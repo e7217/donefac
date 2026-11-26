@@ -6,7 +6,7 @@ import type { CustomFieldDefinition, CustomFieldKind, CustomFieldOption, CustomF
 import { fieldScopeCovers, hasCustomValue, projectIssueSchema } from '../../shared/issue-schema';
 import { projectStatuses } from '../../shared/workflow-helpers';
 import { api, patch } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isSettingsSectionNavigation } from '../lib/navigation';
 import { errorMessage } from './schedule-utils';
 import './issue-schema-settings.css';
 
@@ -45,6 +45,7 @@ function SchemaEditor({ data, projectId, refresh, notify }: FeatureProps) {
     const guard = (event: Event) => {
       if (event.defaultPrevented) return;
       if (pendingRef.current) { event.preventDefault(); notify('업무 속성 설정 처리가 끝난 뒤 이동해 주세요.', 'error'); }
+      else if (isSettingsSectionNavigation(event)) return;
       else if (dirtyRef.current) {
         if (!window.confirm('저장하지 않은 업무 유형·속성 설정을 버리고 이동할까요?')) event.preventDefault();
         else afterAcceptedNavigation(event, () => { dirtyRef.current = false; setDraft(structuredClone(baseline)); setError(''); });

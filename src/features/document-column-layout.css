@@ -22,8 +22,8 @@
 }
 
 [data-layout-border="true"] > [data-layout-grid] > [data-teamspace-node="documentColumn"] {
-  border: 1px solid #dce5ee;
-  border-radius: 6px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
   padding-inline: 10px;
 }
 
@@ -31,8 +31,8 @@
   > [data-layout-grid] > [data-teamspace-node="documentColumn"] {
   min-height: 48px;
   padding-inline: 10px;
-  border-radius: 6px;
-  outline: 1px dashed #cbd7e6;
+  border-radius: var(--radius-md);
+  outline: 1px dashed var(--border-strong);
   outline-offset: -1px;
 }
 
@@ -62,17 +62,17 @@
   gap: 5px;
   min-height: 29px;
   padding: 2px 8px;
-  border: 1px solid #dce5ee;
-  border-radius: 4px;
-  background: white;
-  color: #51617d;
-  font-size: 11px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-1);
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
   text-align: left;
   cursor: pointer;
 }
 
 .docs-column-layout-tools button:focus-visible {
-  outline: 2px solid #5779c1;
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 

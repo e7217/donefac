@@ -139,7 +139,7 @@ function issueListControl(list: HTMLDivElement | null, issueId: string, action: 
 }
 export function IssueTypeIcon({ type, size = 15, data, projectId }: { type: string; size?: number; data?: FeatureProps['data']; projectId?: string }) {
   const meta = data && projectId ? issueTypeMeta(data, projectId, type) : null;
-  return type === '버그' ? <Bug size={size} color={meta?.color || '#db705e'} aria-label={meta?.name} /> : type === '큰틀' ? <Layers3 size={size} color={meta?.color || '#9173cd'} aria-label={meta?.name} /> : type === '개선' ? <ArrowUpRight size={size} color={meta?.color || '#ca9e4a'} aria-label={meta?.name} /> : <CircleDot size={size} color={meta?.color || '#578ca9'} aria-label={meta?.name} />;
+  return type === '버그' ? <Bug size={size} color={meta?.color || 'var(--chart-5)'} aria-label={meta?.name} /> : type === '큰틀' ? <Layers3 size={size} color={meta?.color || 'var(--chart-3)'} aria-label={meta?.name} /> : type === '개선' ? <ArrowUpRight size={size} color={meta?.color || 'var(--chart-4)'} aria-label={meta?.name} /> : <CircleDot size={size} color={meta?.color || 'var(--chart-2)'} aria-label={meta?.name} />;
 }
 export function StatusDot({ color }: { color: string }) { return <span className="issue-status-dot" style={{ background: color }} />; }
 function PriorityIcon({ value }: { value: keyof typeof PRIORITY }) { return value === 'urgent' || value === 'high' ? <ArrowUp size={14} className={value === 'urgent' ? 'issue-priority-urgent' : 'issue-priority-high'} /> : value === 'low' ? <ArrowDown size={14} className="muted" /> : <span className="issue-priority-medium">=</span>; }

@@ -16,16 +16,16 @@
   display: inline-flex;
   align-items: stretch;
   max-width: 100%;
-  border: 1px solid #dce4f4;
-  border-radius: 6px;
-  background: #f3f6fc;
-  color: #465b85;
-  font-size: 11px;
+  border: 1px solid var(--brand-border);
+  border-radius: var(--radius-md);
+  background: var(--brand-subtle);
+  color: var(--brand-fg);
+  font-size: var(--text-xs);
 }
 .docs-label-chip.is-active {
-  border-color: #afc1ee;
-  background: #e9efff;
-  color: #284c9a;
+  border-color: var(--brand);
+  background: var(--bg-selected);
+  color: var(--brand-fg);
 }
 .docs-label-chip button, .docs-label-chip > span {
   border: 0;
@@ -36,12 +36,12 @@
   overflow-wrap: anywhere;
 }
 .docs-label-chip button:enabled { cursor: pointer; }
-.docs-label-chip button:enabled:hover { background: #e4ebfa; }
+.docs-label-chip button:enabled:hover { background: var(--brand-subtle-hover); }
 .docs-label-chip .docs-label-remove {
   display: grid;
   place-items: center;
   flex-shrink: 0;
-  border-left: 1px solid #dce4f4;
+  border-left: 1px solid var(--brand-border);
   padding: 4px;
 }
 .docs-label-form, .docs-label-filters {
@@ -52,12 +52,12 @@
 .docs-label-form input, .docs-label-filters select {
   width: 100%;
   min-width: 0;
-  border: 1px solid #dfe5ef;
-  border-radius: 6px;
-  background: #fff;
-  color: #43516b;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
   padding: 6px 8px;
-  font-size: 11px;
+  font-size: var(--text-sm);
 }
 .docs-label-form { max-width: 320px; }
 .docs-label-form button, .docs-label-filters button {
@@ -66,32 +66,32 @@
   justify-content: center;
   gap: 4px;
   flex-shrink: 0;
-  border: 1px solid #dfe5ef;
-  border-radius: 6px;
-  background: #fff;
-  color: #465b85;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-1);
+  color: var(--fg-secondary);
   padding: 4px 7px;
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 .docs-label-form button:enabled, .docs-label-filters button { cursor: pointer; }
-.docs-label-form button:enabled:hover, .docs-label-filters button:hover { background: #f3f6fc; }
+.docs-label-form button:enabled:hover, .docs-label-filters button:hover { background: var(--bg-layer-1-hover); }
 .docs-label-form button:disabled { opacity: .6; }
-.docs-label-error { margin: 0; color: #a22f26; font-size: 11px; }
+.docs-label-error { margin: 0; color: var(--danger-fg); font-size: var(--text-xs); }
 .docs-label-filters { margin: -7px 13px 7px; }
 .docs-filter-count {
   margin: 4px 13px 5px;
-  color: #56657e;
-  font-size: 11px;
+  color: var(--fg-tertiary);
+  font-size: var(--text-xs);
   overflow-wrap: anywhere;
 }
 .docs-latest-labels {
   margin: 6px 0 0;
-  color: #56657e;
-  font-size: 11px;
+  color: var(--fg-tertiary);
+  font-size: var(--text-xs);
   overflow-wrap: anywhere;
 }
 .docs-label-form :focus-visible, .docs-label-filters :focus-visible, .docs-label-chip :focus-visible {
-  outline: 2px solid #456db9;
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 @media (max-width: 800px) {

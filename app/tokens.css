@@ -1,0 +1,96 @@
+/*
+ * Teamspace design tokens.
+ *
+ * Layering follows Plane's canvas → surface → layer model:
+ *   --bg-canvas      the single application background (body only)
+ *   --bg-surface-1/2 top-level areas that sit side by side on the canvas
+ *                    (main content, sidebar, cards, dialogs, popovers)
+ *   --bg-layer-1/2/3 elements nested inside a surface (rows, chips, inputs, wells)
+ *
+ * Feature CSS must use these semantic tokens instead of raw colors. Raw values
+ * belong only in this file. Data-driven colors (project, member, status colors
+ * stored on records) stay dynamic and are not tokens.
+ *
+ * Tailwind utilities for the same tokens are declared in app/globals.css
+ * (`bg-surface-1`, `text-fg-secondary`, `border-border-subtle`, `bg-primary`, …).
+ */
+:root, ::backdrop {
+  /* Backgrounds */
+  --bg-canvas: #fafcfb;
+  --bg-surface-1: #ffffff;
+  --bg-surface-2: #f5f8f6;
+  --bg-layer-1: #f2f5f3;
+  --bg-layer-1-hover: #ebf1ed;
+  --bg-layer-2: #e9efeb;
+  --bg-layer-2-hover: #e1e9e4;
+  --bg-layer-3: #d9e2dc;
+  --bg-selected: #e3f1ec;
+  --bg-selected-hover: #d7ebe4;
+  --bg-backdrop: rgb(23 43 35 / 0.38);
+  --bg-inverse: #24312d;
+
+  /* Text and icons */
+  --fg-primary: #263338;
+  --fg-secondary: #4d5f56;
+  --fg-tertiary: #627069;
+  --fg-placeholder: #98a39d;
+  --fg-disabled: #b2bcb6;
+  --fg-on-color: #ffffff;
+  --fg-inverse: #f4f7f5;
+
+  /* Borders */
+  --border-subtle: #e6ece8;
+  --border-default: #dbe3de;
+  --border-strong: #c6d3cb;
+
+  /* Brand */
+  --brand: #177c72;
+  --brand-hover: #10685f;
+  --brand-subtle: #eaf5f1;
+  --brand-subtle-hover: #dcefe8;
+  --brand-border: #b6dbd1;
+  --brand-fg: #176a5f;
+
+  /* Status */
+  --danger: #bd4c4c;
+  --danger-hover: #a64444;
+  --danger-subtle: #fdf2f2;
+  --danger-border: #efd0d0;
+  --danger-fg: #a94444;
+
+  --warning: #c08523;
+  --warning-hover: #a6711b;
+  --warning-subtle: #fcf5e8;
+  --warning-border: #f0dfbd;
+  --warning-fg: #8c5f14;
+
+  --success: #3c8b64;
+  --success-hover: #317553;
+  --success-subtle: #eaf6ef;
+  --success-border: #cde6d7;
+  --success-fg: #2e6f4f;
+
+  --info: #3d6fb5;
+  --info-hover: #335e9a;
+  --info-subtle: #eef3fb;
+  --info-border: #cddbf0;
+  --info-fg: #335d98;
+
+  /* Categorical palette for charts, bars, tags and markers. Tint with
+     color-mix(in srgb, var(--chart-n) 16%, var(--bg-surface-1)). */
+  --chart-1: #2a9d8f;
+  --chart-2: #4c7bd9;
+  --chart-3: #8a6bd1;
+  --chart-4: #d49a32;
+  --chart-5: #cf5f7a;
+  --chart-6: #5aa36b;
+  --chart-7: #6b7b8c;
+  --chart-8: #df7a3a;
+
+  /* Focus */
+  /* At least 3:1 against surfaces and the selected tint (WCAG 1.4.11). */
+  --focus-ring: #3d9084;
+
+  /* Type (--text-*, --font-weight-*), radius (--radius-*) and elevation
+     (--shadow-*) tokens are Tailwind theme tokens declared in app/globals.css. */
+}

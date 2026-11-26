@@ -7,7 +7,7 @@
 .gitlab-deployments-issue {
   margin-top: 14px;
   padding-top: 14px;
-  border-top: 1px solid #dce8e1;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .gitlab-deployment-heading {
@@ -27,7 +27,7 @@
 }
 
 .gitlab-deployment-heading h4 {
-  font-size: 14px;
+  font-size: var(--text-md);
 }
 
 .gitlab-deployment-heading h2 svg,
@@ -42,8 +42,8 @@
   flex-wrap: wrap;
   gap: 5px 8px;
   min-width: 0;
-  font-size: 12px;
-  color: #3c6554;
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
 }
 
 .gitlab-deployment-repository select {
@@ -54,8 +54,8 @@
 
 .gitlab-deployment-hint {
   margin: 0;
-  color: #4d685b;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 
@@ -72,8 +72,8 @@
   flex: 1 1 130px;
   gap: 4px;
   min-width: 0;
-  font-size: 12px;
-  color: #3c6554;
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
 }
 
 .gitlab-deployment-filters .field {
@@ -94,8 +94,8 @@
 }
 
 .gitlab-deployment-sync-report {
-  color: #3c6554;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 
@@ -109,7 +109,7 @@
 
 .gitlab-deployment-sync-meta {
   margin-bottom: 4px;
-  color: #526e60;
+  color: var(--fg-tertiary);
   font-variant-numeric: tabular-nums;
 }
 
@@ -119,8 +119,8 @@
   min-width: 0;
   margin: 0;
   padding: 0;
-  border: 1px solid #dce8e1;
-  border-radius: 7px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
   list-style: none;
 }
 
@@ -132,7 +132,7 @@
 }
 
 .gitlab-deployment-row + .gitlab-deployment-row {
-  border-top: 1px solid #e5eee8;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .gitlab-deployment-title,
@@ -146,34 +146,34 @@
 }
 
 .gitlab-deployment-title strong {
-  font-size: 13px;
+  font-size: var(--text-base);
 }
 
 .gitlab-deployment-tier,
 .gitlab-deployment-meta {
-  color: #4d685b;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .gitlab-deployment-status {
   margin-left: auto;
   padding: 3px 6px;
-  border-radius: 4px;
-  color: #365b4c;
-  background: #edf4ef;
-  font-size: 11px;
-  font-weight: 650;
+  border-radius: var(--radius-sm);
+  color: var(--fg-secondary);
+  background: var(--bg-layer-2);
+  font-size: var(--text-xs);
+  font-weight: var(--font-weight-semibold);
 }
 
 .gitlab-deployment-row[data-deployment-status='success'] .gitlab-deployment-status {
-  color: #23634d;
-  background: #e4f2e9;
+  color: var(--success-fg);
+  background: var(--success-subtle);
 }
 
 .gitlab-deployment-row[data-deployment-status='failed'] .gitlab-deployment-status,
 .gitlab-deployment-row[data-deployment-status='blocked'] .gitlab-deployment-status {
-  color: #8d402e;
-  background: #faeae3;
+  color: var(--danger-fg);
+  background: var(--danger-subtle);
 }
 
 .gitlab-deployment-source {
@@ -181,8 +181,8 @@
   align-items: center;
   justify-self: start;
   gap: 5px;
-  color: #2a5846;
-  font-size: 12px;
+  color: var(--fg-primary);
+  font-size: var(--text-sm);
   text-decoration: underline;
 }
 
@@ -196,8 +196,8 @@
   justify-content: center;
   flex-wrap: wrap;
   gap: 5px 8px;
-  color: #3c6554;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .gitlab-deployments button[aria-disabled='true'] {

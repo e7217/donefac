@@ -17,27 +17,27 @@
   justify-self: start;
   gap: 7px;
   min-height: 34px;
-  color: #40516a;
+  color: var(--fg-secondary);
 }
 
 .docs-copy-include input {
   width: 16px;
   height: 16px;
   margin: 0;
-  accent-color: #4c6dcc;
+  accent-color: var(--brand);
 }
 
 .docs-copy-warnings {
   margin-top: 8px;
-  color: #6d542a;
+  color: var(--warning-fg);
 }
 
 .docs-copy-dialog .docs-move-list small {
-  color: #53637b;
+  color: var(--fg-tertiary);
 }
 
 .docs-copy-result h3 {
   width: fit-content;
   margin: 0 0 6px;
-  font-size: 15px;
+  font-size: var(--text-lg);
 }

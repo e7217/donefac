@@ -71,7 +71,7 @@ test('Jira 스프린트 이관은 현재 사이클과 과거 이력을 보존하
   let projectId: string | undefined;
 
   try {
-    await page.goto(`/#/${original.projects[0].id}/settings`);
+    await page.goto(`/#/${original.projects[0].id}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     await expect(settings).toBeVisible({ timeout: 30_000 });
     await settings.getByLabel(`이관 패키지 ${filename}`, { exact: true }).check();

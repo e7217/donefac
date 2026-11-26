@@ -37,11 +37,11 @@
 }
 
 .assignment-history-pages span {
-  color: #536f5d;
-  font-size: .875rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .assignment-settings .automation-log-scroll:focus-visible {
-  outline: 2px solid #177c72;
+  outline: 2px solid var(--brand);
   outline-offset: 2px;
 }

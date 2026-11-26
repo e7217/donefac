@@ -2,7 +2,7 @@
   min-width: 0;
   margin: 16px 0;
   padding: 16px;
-  color: #365046;
+  color: var(--fg-primary);
 }
 
 .gantt-findings-count {
@@ -11,11 +11,11 @@
   min-height: 18px;
   padding-inline: 4px;
   place-items: center;
-  border-radius: 10px;
-  background: #fff1d9;
-  color: #824b19;
-  font-size: 11px;
-  font-weight: 650;
+  border-radius: var(--radius-xl);
+  background: var(--warning-subtle);
+  color: var(--warning-fg);
+  font-size: var(--text-xs);
+  font-weight: var(--font-weight-semibold);
   line-height: 1;
 }
 
@@ -36,18 +36,18 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 16px;
+  font-size: var(--text-lg);
 }
 
 .gantt-findings-header h2 svg {
-  color: #8a521d;
+  color: var(--warning-fg);
 }
 
 .gantt-findings-header p,
 .gantt-findings-empty {
   margin: 4px 0 0;
-  color: #53685e;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
   line-height: 1.5;
 }
 
@@ -66,27 +66,27 @@
 
 .gantt-findings-summary > div {
   padding: 7px 10px;
-  background: #f6f8f7;
-  border: 1px solid #e2ebe5;
-  border-radius: 6px;
+  background: var(--bg-layer-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
 }
 
 .gantt-findings-summary > .has-conflicts {
-  background: #fff7ea;
-  border-color: #eedbbd;
+  background: var(--warning-subtle);
+  border-color: var(--warning-border);
 }
 
 .gantt-findings-summary dt,
 .gantt-findings-dates dt {
-  color: #53685e;
-  font-size: 11px;
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
   overflow-wrap: anywhere;
 }
 
 .gantt-findings-summary dd,
 .gantt-findings-dates dd {
   margin: 2px 0 0;
-  font-weight: 650;
+  font-weight: var(--font-weight-semibold);
 }
 
 .gantt-findings-list {
@@ -103,47 +103,47 @@
   flex-direction: column;
   min-width: 0;
   padding: 10px;
-  border: 1px solid #e4eae5;
-  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
 }
 
 .gantt-findings-item-heading h3 {
-  font-size: 13px;
+  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 
 .gantt-findings-kind {
   flex: none;
   padding: 2px 6px;
-  border-radius: 4px;
-  background: #edf3ef;
-  color: #41594a;
-  font-size: 11px;
-  font-weight: 650;
+  border-radius: var(--radius-sm);
+  background: var(--bg-layer-2);
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
+  font-weight: var(--font-weight-semibold);
 }
 
 .gantt-findings-kind[data-kind='conflict'] {
-  background: #fff1d9;
-  color: #824b19;
+  background: var(--warning-subtle);
+  color: var(--warning-fg);
 }
 
 .gantt-findings-item-titles,
 .gantt-findings-relation,
 .gantt-findings-reason {
   margin: 4px 0 0;
-  color: #53685e;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .gantt-findings-relation {
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 
 .gantt-findings-team-relation {
-  color: #41594a;
-  font-weight: 650;
+  color: var(--fg-secondary);
+  font-weight: var(--font-weight-semibold);
 }
 
 .gantt-findings-dates {
@@ -154,13 +154,13 @@
 }
 
 .gantt-findings-dates dd {
-  font-size: 12px;
+  font-size: var(--text-sm);
   white-space: nowrap;
 }
 
 .gantt-findings-bound dd,
 .gantt-findings-reason {
-  color: #824b19;
+  color: var(--warning-fg);
 }
 
 .gantt-findings-actions,
@@ -179,8 +179,8 @@
   min-width: 0;
   min-height: 36px;
   padding-inline: 7px;
-  color: #2d6251;
-  font-size: 11px;
+  color: var(--brand-fg);
+  font-size: var(--text-xs);
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -192,12 +192,12 @@
 .gantt-findings-pagination {
   justify-content: end;
   margin-top: 6px;
-  color: #53685e;
-  font-size: 11px;
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
 }
 
 .gantt-findings button:focus-visible {
-  outline: 2px solid #386e5b;
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 

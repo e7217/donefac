@@ -7,10 +7,10 @@
   min-width: 0;
   margin-block: 10px;
   padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--accent-soft);
-  color: var(--ink);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--brand-subtle);
+  color: var(--fg-primary);
 }
 
 .gantt-hierarchy-focus-summary {
@@ -23,13 +23,13 @@
   align-items: center;
   gap: 7px;
   margin: 0;
-  color: var(--accent-hover);
-  font-size: 14px;
+  color: var(--brand-fg);
+  font-size: var(--text-md);
 }
 
 .gantt-hierarchy-focus-work {
   margin: 4px 0 0;
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -46,23 +46,23 @@
 .gantt-hierarchy-focus-counts,
 .gantt-hierarchy-focus-range {
   margin: 5px 0 0;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
 
 .gantt-hierarchy-focus-counts > span {
   padding: 2px 6px;
-  border-radius: 4px;
-  background: var(--surface);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-1);
 }
 
 .gantt-hierarchy-focus-counts > .gantt-hierarchy-focus-extra {
-  background: #fff0d6;
-  color: #754710;
+  background: var(--warning-subtle);
+  color: var(--warning-fg);
 }
 
 .gantt-hierarchy-focus-range dt {
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .gantt-hierarchy-focus-range dd {
@@ -73,22 +73,22 @@
   display: inline-block;
   margin-inline-start: 4px;
   padding: 1px 4px;
-  border-radius: 3px;
-  background: var(--accent-soft);
-  color: var(--accent-hover);
-  font-size: 10px;
-  font-weight: 600;
+  border-radius: var(--radius-xs);
+  background: var(--brand-subtle);
+  color: var(--brand-fg);
+  font-size: var(--text-2xs);
+  font-weight: var(--font-weight-semibold);
   line-height: 1.25;
   white-space: nowrap;
 }
 
 .gantt-hierarchy-focus-label[data-tier='anchor'] {
-  background: var(--accent-hover);
-  color: var(--surface);
+  background: var(--brand);
+  color: var(--fg-on-color);
 }
 
 .gantt-feature .gantt-row[data-hierarchy-focus-row='anchor'] > .gantt-left {
-  box-shadow: inset 3px 0 var(--accent);
+  box-shadow: inset 3px 0 var(--brand);
 }
 
 .gantt-hierarchy-span {
@@ -96,11 +96,11 @@
   bottom: 3px;
   z-index: 2;
   height: 4px;
-  border-top: 2px dashed var(--accent-hover);
+  border-top: 2px dashed var(--brand);
   pointer-events: none;
 }
 
 .gantt-hierarchy-span-key {
   width: 20px;
-  border-top: 2px dashed var(--accent-hover);
+  border-top: 2px dashed var(--brand);
 }

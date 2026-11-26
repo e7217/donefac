@@ -1,19 +1,19 @@
 .document-outline {
   min-width: 0;
   margin-block: 0 16px;
-  border: 1px solid #e5e9f0;
-  border-radius: 8px;
-  background: #fafbfe;
-  color: #465570;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-layer-1);
+  color: var(--fg-secondary);
 }
 
 .document-outline-summary {
   box-sizing: border-box;
   min-height: 36px;
   padding: 8px 12px;
-  border-radius: 7px;
-  font-size: 12px;
-  font-weight: 650;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-semibold);
   line-height: 20px;
   cursor: pointer;
 }
@@ -38,55 +38,55 @@
   min-width: 0;
   padding: 6px 8px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 20px;
   text-align: start;
   overflow-wrap: anywhere;
   cursor: pointer;
 }
 
-.document-outline-entry:hover { background: #eaf0ff; }
+.document-outline-entry:hover { background: var(--bg-layer-1-hover); }
 .document-outline-link {
   flex: 0 0 36px;
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
-  color: #384f87;
+  color: var(--brand-fg);
   cursor: pointer;
 }
-.document-outline-link:hover:not(:disabled) { background: #eaf0ff; }
+.document-outline-link:hover:not(:disabled) { background: var(--bg-layer-1-hover); }
 .document-outline-link:disabled { opacity: .5; cursor: default; }
 .document-outline-summary:focus-visible,
 .document-outline-link:focus-visible,
-.document-outline-entry:focus-visible { outline: 2px solid #5675d4; outline-offset: -2px; }
-.document-outline-link-feedback { margin: 0; padding: 5px 12px 10px; font-size: 12px; }
+.document-outline-entry:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.document-outline-link-feedback { margin: 0; padding: 5px 12px 10px; font-size: var(--text-sm); }
 .document-outline-link-feedback input { width: 100%; margin-top: 4px; }
-.document-section-not-found { margin: 0 0 12px; color: #654621; font-size: 13px; }
-[data-document-section-id]:focus-visible { outline: 2px solid #5675d4; outline-offset: 3px; }
+.document-section-not-found { margin: 0 0 12px; color: var(--warning-fg); font-size: var(--text-base); }
+[data-document-section-id]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
 
 .document-toc {
   min-width: 0;
   margin-block: 12px;
-  border: 1px solid #dfe6ee;
-  border-radius: 8px;
-  background: #fafbfe;
-  color: #465570;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-layer-1);
+  color: var(--fg-secondary);
 }
-.document-toc.is-selected { outline: 2px solid #5675d4; }
-.document-toc-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 9px 12px; font-size: 13px; }
-.document-toc-settings { min-width: 0; font-size: 12px; }
-.document-toc-settings summary { cursor: pointer; color: #384f87; }
+.document-toc.is-selected { outline: 2px solid var(--focus-ring); }
+.document-toc-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 9px 12px; font-size: var(--text-base); }
+.document-toc-settings { min-width: 0; font-size: var(--text-sm); }
+.document-toc-settings summary { cursor: pointer; color: var(--brand-fg); }
 .document-toc-fields { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; margin-top: 8px; }
 .document-toc-fields label { display: grid; gap: 4px; }
 .document-toc-fields select { max-width: 100%; min-height: 30px; padding-inline: 6px; font: inherit; color: inherit; }
-.document-toc-fields .btn { min-height: 30px; font-size: 12px; }
-.document-toc-empty { margin: 0 12px 10px; font-size: 13px; }
+.document-toc-fields .btn { min-height: 30px; font-size: var(--text-sm); }
+.document-toc-empty { margin: 0 12px 10px; font-size: var(--text-base); }
 .document-toc-more { margin: 0 8px 8px; }
 .document-toc .document-outline-navigation { max-height: none; }
 .document-toc .document-outline-entries { padding: 0; list-style: none; }

@@ -1,10 +1,10 @@
 .cycle-progress {
   min-width: 0;
   margin-bottom: 14px;
-  border: 1px solid #dce9e1;
-  border-radius: 10px;
-  background: #fff;
-  color: #294337;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xl);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
 }
 
 .cycle-progress h3 {
@@ -17,8 +17,8 @@
   justify-content: flex-start;
   gap: 8px;
   padding: 8px 12px;
-  font-size: 0.925rem;
-  font-weight: 650;
+  font-size: var(--text-md);
+  font-weight: var(--font-weight-semibold);
 }
 
 .cycle-progress-toggle svg:last-child {
@@ -34,7 +34,7 @@
   gap: 12px;
   min-width: 0;
   padding: 0 12px 12px;
-  font-size: .8125rem;
+  font-size: var(--text-base);
 }
 
 .cycle-progress-body p {
@@ -62,14 +62,14 @@
 .cycle-progress-paging .btn {
   min-height: 36px;
   padding: 5px 9px;
-  font-size: .8125rem;
+  font-size: var(--text-base);
 }
 
 .cycle-progress-metrics .btn[aria-pressed='true'] {
-  border-color: #4b846f;
-  background: #e7f1eb;
-  color: #195641;
-  font-weight: 700;
+  border-color: var(--brand-border);
+  background: var(--brand-subtle);
+  color: var(--brand-fg);
+  font-weight: var(--font-weight-bold);
 }
 
 .cycle-progress-window > div {
@@ -90,9 +90,9 @@
 .cycle-progress-summary > div {
   min-width: 0;
   padding: 9px;
-  border: 1px solid #e0ebe4;
-  border-radius: 8px;
-  background: #f7faf8;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-layer-1);
 }
 
 .cycle-progress-summary dt,
@@ -100,28 +100,28 @@
 .cycle-progress-window small,
 .cycle-progress-note,
 .cycle-progress-figure small {
-  color: #526b5f;
+  color: var(--fg-secondary);
 }
 
 .cycle-progress-summary dd {
   margin: 4px 0 0;
-  color: #214b3d;
-  font-size: 1.1rem;
-  font-weight: 650;
+  color: var(--fg-primary);
+  font-size: var(--text-xl);
+  font-weight: var(--font-weight-semibold);
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
 .cycle-progress-summary dd time {
-  font-size: .8125rem;
+  font-size: var(--text-base);
 }
 
 .cycle-progress-figure {
   min-width: 0;
   margin: 0;
   padding: 8px;
-  border: 1px solid #e0ebe4;
-  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
 }
 
 .cycle-progress-figure canvas {
@@ -145,11 +145,11 @@
 
 .cycle-progress-figure figcaption i {
   width: 14px;
-  border-top: 2px solid #236c55;
+  border-top: 2px solid #236c55; /* token-exception: legend swatch must match the hard-coded canvas stroke in CycleProgress.tsx */
 }
 
 .cycle-progress-figure figcaption span:nth-child(2) i {
-  border-top: 2px dashed #63796d;
+  border-top: 2px dashed #63796d; /* token-exception: legend swatch must match the hard-coded canvas stroke in CycleProgress.tsx */
 }
 
 .cycle-progress-figure small {
@@ -158,8 +158,8 @@
 
 .cycle-progress-table-wrap {
   min-width: 0;
-  border: 1px solid #e0ebe4;
-  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
 }
 
 .cycle-progress-table {
@@ -171,7 +171,7 @@
 
 .cycle-progress-table :is(th, td) {
   padding: 6px;
-  border-bottom: 1px solid #e0ebe4;
+  border-bottom: 1px solid var(--border-subtle);
   text-align: start;
   overflow-wrap: anywhere;
 }
@@ -181,11 +181,11 @@
 }
 
 .cycle-progress-table thead {
-  background: #f7faf8;
+  background: var(--bg-layer-1);
 }
 
 .cycle-progress-table tr[data-selected='true'] {
-  background: #eaf4ee;
+  background: var(--bg-selected);
 }
 
 .cycle-progress-table tbody tr:last-child :is(th, td) {
@@ -196,11 +196,11 @@
 .cycle-progress-issue {
   max-width: 100%;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
-  color: #236c55;
+  color: var(--brand-fg);
   font: inherit;
-  font-weight: 650;
+  font-weight: var(--font-weight-semibold);
   cursor: pointer;
 }
 
@@ -218,12 +218,12 @@
 
 .cycle-progress-evidence {
   padding-top: 10px;
-  border-top: 1px solid #e0ebe4;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .cycle-progress-evidence h4 {
   margin: 0 0 6px;
-  font-size: .9rem;
+  font-size: var(--text-md);
 }
 
 .cycle-progress-change-counts,
@@ -238,7 +238,7 @@
   flex-wrap: wrap;
   gap: 5px 12px;
   margin-bottom: 6px;
-  color: #526b5f;
+  color: var(--fg-secondary);
 }
 
 .cycle-progress-evidence-list > li {
@@ -247,12 +247,12 @@
   align-items: start;
   gap: 6px;
   padding: 8px 1px;
-  border-bottom: 1px solid #e0ebe4;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .cycle-progress-evidence-list time {
   padding-top: 4px;
-  color: #526b5f;
+  color: var(--fg-secondary);
   font-variant-numeric: tabular-nums;
 }
 
@@ -271,12 +271,12 @@ p.cycle-progress-issue {
 }
 
 .cycle-progress-issue strong {
-  color: #263c33;
+  color: var(--fg-primary);
 }
 
 .cycle-progress-issue small {
-  color: #526b5f;
-  font-weight: 400;
+  color: var(--fg-secondary);
+  font-weight: var(--font-weight-normal);
 }
 
 button.cycle-progress-issue:hover strong {

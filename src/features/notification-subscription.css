@@ -2,13 +2,13 @@
   flex-shrink: 0;
   min-height: 32px;
   padding: 5px 8px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   white-space: nowrap;
 }
 
 .notification-subscription-button.is-subscribed {
-  color: #167467;
-  background: #edf6f3;
+  color: var(--brand-fg);
+  background: var(--brand-subtle);
 }
 
 .issue-heading-actions {
@@ -26,7 +26,7 @@
 @media (max-width: 700px) {
   .issue-heading-actions > .btn {
     padding: 8px;
-    font-size: 10px;
+    font-size: var(--text-xs);
   }
 }
 

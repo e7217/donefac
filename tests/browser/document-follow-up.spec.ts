@@ -1359,7 +1359,8 @@ test('360px 팀 결정 후속 업무에서 여러 프로젝트와 공통 문서�
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
     await page.goto(`/#/${base.id}/overview`);
     await page.getByRole('button', { name: '메뉴 열기', exact: true }).click();
-    await page.getByRole('button', { name: '팀 결정 후속 업무', exact: true }).click();
+    await page.getByRole('navigation', { name: '워크스페이스', exact: true }).getByRole('button', { name: '팀 개요', exact: true }).click();
+    await page.getByRole('navigation', { name: '팀 개요 화면', exact: true }).getByRole('button', { name: '팀 결정 후속 업무', exact: true }).click();
     await expect(page).toHaveURL(url => url.hash === `${path}?scope=team`);
     await expect(projectPicker).toHaveValue('team');
     await search.fill(query);

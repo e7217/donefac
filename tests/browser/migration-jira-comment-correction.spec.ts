@@ -105,7 +105,7 @@ test('360px에서 새 Jira 댓글 수정분을 검토하고 팀 편집과 원본
 
     const next = await stage(true);
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
-    await page.goto(`/#/${settingsProject.id}/settings`);
+    await page.goto(`/#/${settingsProject.id}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     await settings.getByLabel(`이관 패키지 ${next.filename}`, { exact: true }).check();
     await settings.getByRole('button', { name: '선택 패키지 매핑 불러오기', exact: true }).click();

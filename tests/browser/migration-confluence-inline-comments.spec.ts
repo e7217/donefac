@@ -98,7 +98,7 @@ test('360px에서 Confluence 원본 주소로 문장 댓글과 답글을 열고 
     const documents = (await json<WorkspaceSnapshot>(await request.get('/api/workspace'))).documents.filter(row => row.projectId === projectId);
     documentIds = documents.map(document => document.id);
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), reviewer.id);
-    await page.goto(`/#/${projectId}/settings`);
+    await page.goto(`/#/${projectId}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     const receipts = settings.getByRole('region', { name: '완료한 이관 영수증', exact: true });
     await receipts.getByRole('button').filter({ hasText: receipt.id }).click();

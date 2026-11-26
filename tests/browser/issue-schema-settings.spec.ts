@@ -5,6 +5,8 @@ import type { CustomFieldDefinition, Issue, ProjectIssueSchema, ProjectWorkflow,
 const snapshot = async (request: APIRequestContext) => await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
 const schema = async (request: APIRequestContext, projectId: string) => await (await request.get(`/api/projects/${projectId}/issue-schema`)).json() as ProjectIssueSchema;
 async function restoreSchema(request: APIRequestContext, original: ProjectIssueSchema) { const current = await schema(request, original.projectId); expect((await request.patch(`/api/projects/${original.projectId}/issue-schema`, { data: { ...original, expectedVersion: current.version } })).ok()).toBeTruthy(); }
+// Type/field and workflow editors live in the '업무 구성' settings section; hidden sections stay mounted.
+const settingsSection = (page: Page, label: string) => page.getByRole('navigation', { name: '설정 섹션' }).getByRole('button', { name: label, exact: true });
 async function decisions(page: Page, choices: boolean[], action: () => Promise<unknown>) { const messages: string[] = []; const handle = async (dialog: Dialog) => { const accepted = choices[messages.length] ?? false; messages.push(dialog.message()); if (accepted) await dialog.accept(); else await dialog.dismiss(); }; page.on('dialog', handle); try { await action(); } finally { page.off('dialog', handle); } expect(messages).toHaveLength(choices.length); return messages; }
 
 test('유형·속성·선택 항목의 이름과 순서 및 보관을 관리하고 사용 중인 ID는 유지한다', async ({ page, request }) => {
@@ -13,7 +15,7 @@ test('유형·속성·선택 항목의 이름과 순서 및 보관을 관리하�
   const typeIndex = original.issueTypes.length + 1, memoIndex = original.fields.length + 1, categoryIndex = original.fields.length + 2;
   let created: Issue | null = null;
   try {
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const editor = page.getByRole('region', { name: '업무 유형·사용자 정의 속성 설정' });
     await expect(editor.getByRole('button', { name: '업무 유형 추가', exact: true })).toBeEnabled();
     await editor.getByRole('button', { name: '업무 유형 추가', exact: true }).click();
@@ -81,14 +83,17 @@ test('유형·속성 초안은 외부 갱신·버전 충돌과 복합 탐색 취
   const initial = await snapshot(request), project = initial.projects[0], original = await schema(request, project.id), user = initial.users[0];
   let release: () => void = () => undefined;
   try {
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const editor = page.getByRole('region', { name: '업무 유형·사용자 정의 속성 설정' }), name = editor.getByLabel('유형 1 이름', { exact: true });
     await expect(name).toBeEnabled(); await name.fill('보존할 업무 유형 초안');
     const remote = await request.patch(`/api/projects/${project.id}/issue-schema`, { data: { ...original, expectedVersion: original.version, issueTypes: original.issueTypes.map((value, index) => index === 0 ? { ...value, name: '다른 작업자의 유형 이름' } : value) } }); expect(remote.ok()).toBeTruthy();
+    await settingsSection(page, '일반').click();
     await page.locator('.team-row').filter({ hasText: user.name }).getByRole('button', { name: '이메일 변경', exact: true }).click();
     const emailDialog = page.getByRole('dialog', { name: '팀원 이메일 변경' });
     await emailDialog.getByLabel('새 이메일').fill(`schema-${Date.now()}@example.test`);
     await emailDialog.getByRole('button', { name: '이메일 저장' }).click();
+    await expect(emailDialog).toHaveCount(0);
+    await settingsSection(page, '업무 구성').click();
     await expect(editor.getByRole('alert')).toContainText('다른 작업자가 유형·속성 설정'); await expect(name).toHaveValue('보존할 업무 유형 초안');
     const rejected = page.waitForResponse(value => value.url().endsWith(`/projects/${project.id}/issue-schema`) && value.request().method() === 'PATCH');
     await editor.getByRole('button', { name: '유형·속성 저장', exact: true }).click(); expect((await rejected).status()).toBe(409); await expect(name).toHaveValue('보존할 업무 유형 초안');
@@ -100,10 +105,13 @@ test('유형·속성 초안은 외부 갱신·버전 충돌과 복합 탐색 취
     await name.fill('복합 탐색에서도 보존할 유형');
     const actor = page.getByLabel('작업자 선택', { exact: true }), previousActor = await actor.inputValue(), nextActor = initial.users.find(value => value.id !== previousActor)!;
     await decisions(page, [false], () => actor.selectOption(nextActor.id)); await expect(name).toHaveValue('복합 탐색에서도 보존할 유형');
+    await settingsSection(page, '업무 달력').click();
     const calendarName = page.getByLabel('업무 달력 이름', { exact: true }); await calendarName.fill('함께 보존할 달력 초안');
     const url = page.url(); await decisions(page, [true, false], () => actor.selectOption(nextActor.id));
-    await expect(actor).toHaveValue(previousActor); await expect(page).toHaveURL(url); await expect(name).toHaveValue('복합 탐색에서도 보존할 유형'); await expect(calendarName).toHaveValue('함께 보존할 달력 초안');
-    await decisions(page, [true, true], () => actor.selectOption(nextActor.id)); await expect(actor).toHaveValue(nextActor.id); await expect(name).toHaveValue('지연 응답으로 저장한 유형'); await expect(calendarName).toHaveValue(initial.calendars!.find(value => value.projectId === project.id)!.name);
+    await expect(actor).toHaveValue(previousActor); await expect(page).toHaveURL(url); await expect(calendarName).toHaveValue('함께 보존할 달력 초안');
+    await settingsSection(page, '업무 구성').click(); await expect(name).toHaveValue('복합 탐색에서도 보존할 유형');
+    await decisions(page, [true, true], () => actor.selectOption(nextActor.id)); await expect(actor).toHaveValue(nextActor.id); await expect(name).toHaveValue('지연 응답으로 저장한 유형');
+    await settingsSection(page, '업무 달력').click(); await expect(calendarName).toHaveValue(initial.calendars!.find(value => value.projectId === project.id)!.name);
   } finally { release(); await page.unroute(`**/api/projects/${project.id}/issue-schema`); await request.patch(`/api/users/${user.id}`, { data: { email: user.email } }); await restoreSchema(request, original); }
 });
 
@@ -115,7 +123,7 @@ test('사용자 정의 유형과 속성을 워크플로 전이 및 필수 규칙
   let created: Issue | null = null;
   try {
     expect((await request.patch(`/api/projects/${project.id}/issue-schema`, { data: { ...original, expectedVersion: original.version, issueTypes: [...original.issueTypes, { id: typeId, name: typeName, color: '#507f9d', archived: false }], fields: [...original.fields, field] } })).ok()).toBeTruthy();
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const editor = page.getByRole('region', { name: '프로젝트 워크플로 설정' }); await expect(editor.getByLabel('상태 1 이름', { exact: true })).toBeEnabled();
     await editor.locator('.workflow-tabs button').filter({ hasText: '필수 속성' }).click(); await editor.getByRole('button', { name: '규칙 추가', exact: true }).click();
     const rule = workflow.fieldRules.length + 1;

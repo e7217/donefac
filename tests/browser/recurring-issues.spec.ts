@@ -85,7 +85,7 @@ test('360px에서 주간 반복 업무의 저장 결과를 다시 확인하고 �
     }
     await route.fulfill({ response });
   });
-  await page.goto(`/#/${f.project.id}/settings`);
+  await page.goto(`/#/${f.project.id}/settings?section=work`);
   const area = page.getByRole('region', { name: '반복 업무', exact: true });
   await expect(area).toBeVisible({ timeout: 25_000 });
   await area.getByRole('button', { name: '반복 업무 추가', exact: true }).click();

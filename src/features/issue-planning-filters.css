@@ -13,28 +13,28 @@
 
 .issue-planning-filters-bar .btn {
   min-height: 36px;
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 
 .issue-planning-filters-bar .is-filtered {
-  border-color: #a8d1bd;
-  color: #176c5c;
-  background: #e9f6ef;
+  border-color: var(--brand-border);
+  color: var(--brand-fg);
+  background: var(--brand-subtle);
 }
 
 .issue-planning-filter-labels {
   margin: 0;
   padding: 0;
   list-style: none;
-  color: #436256;
+  color: var(--fg-secondary);
 }
 
 .issue-planning-filter-labels li {
   padding: 3px 7px;
-  border: 1px solid #e1eae2;
-  border-radius: 4px;
-  background: #f3f8f5;
-  font-size: 0.75rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-layer-1);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
   max-width: 100%;
 }
@@ -43,10 +43,10 @@
   width: min(720px, 100%);
   margin-top: 5px;
   padding: 14px;
-  border: 1px solid #cbded2;
-  border-radius: 8px;
-  background: #fafcfb;
-  color: #254137;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
 }
 
 .issue-planning-filter-grid {
@@ -57,7 +57,7 @@
 
 .issue-planning-filter-grid label {
   min-width: 0;
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 
 .issue-planning-filter-grid .field {
@@ -65,7 +65,7 @@
   width: 100%;
   min-width: 0;
   margin-top: 4px;
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 
 .issue-planning-release-choices {
@@ -73,13 +73,13 @@
   min-width: 0;
   margin: 0;
   padding: 6px 10px 8px;
-  border: 1px solid #cbded2;
-  border-radius: 6px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
 }
 
 .issue-planning-release-choices legend {
   padding-inline: 4px;
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 
 .issue-planning-release-options {
@@ -105,15 +105,15 @@
 .issue-planning-filter-hint,
 .issue-planning-filter-error {
   margin: 10px 0 0;
-  color: #496859;
-  font-size: 0.8125rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .issue-planning-filter-error {
   padding: 8px 10px;
-  color: #943e43;
-  background: #fff4f4;
-  border-radius: 6px;
+  color: var(--danger-fg);
+  background: var(--danger-subtle);
+  border-radius: var(--radius-md);
 }
 
 .issue-planning-filter-panel footer {

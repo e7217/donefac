@@ -18,8 +18,8 @@
 .my-work-heading p,
 .my-work-total,
 .my-work-group-heading > span {
-  color: #52655e;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
   font-variant-numeric: tabular-nums;
 }
 
@@ -35,13 +35,13 @@
   display: grid;
   gap: 4px;
   min-width: 0;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-semibold);
 }
 
 .my-work-filter .field {
   min-width: 0;
-  font-weight: 400;
+  font-weight: var(--font-weight-normal);
 }
 
 .my-work-include-closed {
@@ -49,7 +49,7 @@
   align-items: center;
   gap: 7px;
   min-height: 36px;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .my-work-include-closed input {
@@ -68,14 +68,14 @@
   align-items: center;
   gap: 8px;
   margin-block: 12px;
-  color: #52655e;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .my-work-empty {
   margin: 0;
   padding: 24px;
-  color: #52655e;
+  color: var(--fg-secondary);
 }
 
 .my-work-groups {
@@ -93,7 +93,7 @@
 }
 
 .my-work-queue-group[data-group='overdue'] .my-work-group-heading h2 {
-  color: #a24042;
+  color: var(--warning-fg);
 }
 
 .my-work-list {
@@ -106,16 +106,16 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .my-work-list li[data-bulk-selected='true'] {
-  background: #edf7f1;
+  background: var(--bg-selected);
 }
 
 .my-work-bulk-controls {
-  color: #334f43;
-  font-size: 12px;
+  color: var(--fg-primary);
+  font-size: var(--text-sm);
 }
 
 .my-work-bulk-row-select {
@@ -129,7 +129,7 @@
 .my-work-bulk-controls input {
   width: 16px;
   height: 16px;
-  accent-color: #286c5d;
+  accent-color: var(--brand);
 }
 
 .my-work-list .my-work-status-action {
@@ -141,7 +141,7 @@
   min-height: 44px;
   margin-inline-end: 8px;
   padding: 4px 6px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   white-space: nowrap;
 }
 
@@ -156,7 +156,7 @@
 }
 
 .my-work-row:hover {
-  background: #f2f8f5;
+  background: var(--bg-layer-1-hover);
 }
 
 .my-work-row:focus-visible {
@@ -178,14 +178,14 @@
 
 .my-work-item-title strong {
   overflow-wrap: anywhere;
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .my-work-item-project,
 .my-work-item-status,
 .my-work-item-date {
-  color: #52655e;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 
@@ -202,12 +202,12 @@
 
 .my-work-item-date time {
   display: block;
-  color: var(--ink);
+  color: var(--fg-primary);
   font-variant-numeric: tabular-nums;
 }
 
 .my-work-row-arrow {
-  color: #5d7368;
+  color: var(--fg-tertiary);
 }
 
 .my-work-pages {
@@ -217,13 +217,13 @@
   gap: 8px;
   margin: 0;
   padding: 8px 16px;
-  border-top: 1px solid var(--line);
-  font-size: 12px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-sm);
 }
 
 .my-work-pages span {
   margin-right: auto;
-  color: #52655e;
+  color: var(--fg-secondary);
 }
 
 @media (max-width: 760px) {

@@ -61,7 +61,7 @@ test('360px에서 제한된 Jira 원본의 검토 보고서를 저장하고 그 
     const original = await readApi<LegacyRecord>(request, recordPath);
     const originalPackage = await readApi<LegacyPackageDetail>(request, packagePath);
     expect(original).toMatchObject({ title, text: description });
-    await page.goto(`/#/${workspace.projects[0].id}/settings`);
+    await page.goto(`/#/${workspace.projects[0].id}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     await expect(settings).toBeVisible({ timeout: 30_000 });
     await settings.getByLabel(`이관 패키지 ${filename}`, { exact: true }).check();
@@ -155,7 +155,7 @@ test('Jira 원본 분류를 상태 매핑에 표시하고 충돌한 상태는 �
   try {
     const { projects: [current] } = await readApi<WorkspaceSnapshot>(request, '/api/workspace');
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.goto(`/#/${current.id}/settings`);
+    await page.goto(`/#/${current.id}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     await settings.getByLabel(`이관 패키지 ${filename}`, { exact: true }).check();
     await settings.getByRole('button', { name: '선택 패키지 매핑 불러오기', exact: true }).click();

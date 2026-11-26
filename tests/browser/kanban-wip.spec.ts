@@ -11,7 +11,7 @@ test('360px 보드 한도는 필터에서 숨긴 하위 업무를 포함하고 �
   expect(result.status(), await result.text()).toBe(201);
   const project: Project = await result.json();
   const issueRoute = `/#/${project.id}/issues`;
-  const settingsRoute = `/#/${project.id}/settings`;
+  const settingsRoute = `/#/${project.id}/settings?section=work`;
   const workflowPath = `/api/projects/${project.id}/workflow`;
   const created: Issue[] = [];
 

@@ -1,5 +1,5 @@
 .docs-sibling-order-position {
-  color: #485a70;
+  color: var(--fg-secondary);
 }
 
 .docs-sibling-order-list {
@@ -15,7 +15,7 @@
   gap: 10px;
   min-height: 44px;
   padding: 4px 6px 4px 10px;
-  border-bottom: 1px solid #edf0f6;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .docs-sibling-order-title {
@@ -26,8 +26,8 @@
 .docs-sibling-order-title small {
   display: inline-block;
   margin-inline-start: 5px;
-  color: #3858ad;
-  font-size: 11px;
+  color: var(--brand-fg);
+  font-size: var(--text-xs);
 }
 
 .docs-sibling-order-arrows {

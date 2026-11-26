@@ -2960,7 +2960,7 @@ function ProjectGantt(props: GanttProps) {
       {todayPosition >= 0 && todayPosition < timelineWidth && <div className="gantt-today-line" style={{ left: LEFT_WIDTH + todayPosition + dayWidth / 2, top: HEADER_HEIGHT, height: chartRowCount * ROW_HEIGHT }} />}
       <svg className="gantt-dependency-lines" width={timelineWidth} height={issues.length * ROW_HEIGHT} style={{ left: LEFT_WIDTH, top: HEADER_HEIGHT + planningRows.length * ROW_HEIGHT }} aria-hidden="true">
         <defs>
-          <marker id="gantt-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="#8a9b9b" /></marker>
+          <marker id="gantt-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="var(--fg-placeholder)" /></marker>
           {hasVisibleDependencyConflict &&
             <marker id="gantt-arrow-conflict" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="var(--gantt-dependency-conflict)" /></marker>}
           {analysisResult?.analysis && <marker id="gantt-arrow-analysis" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="var(--gantt-analysis-accent)" /></marker>}
@@ -3481,7 +3481,7 @@ function GanttConnector({ dependency, predecessor, successor, range, dayWidth, d
     ? { color: 'var(--gantt-dependency-conflict)', width: 2, dash: teamBlockerId ? '8 4 2 4' : '5 3', marker: 'gantt-arrow-conflict' }
     : teamBlockerId ? { color: 'var(--gantt-team-blocker-line)', width: 2, dash: '8 4 2 4', marker: 'gantt-arrow-team-blocker' }
     : critical ? { color: 'var(--gantt-analysis-accent)', width: 2, marker: 'gantt-arrow-analysis' }
-      : { color: '#8a9b9b', width: 1.3, dash: '3 3', marker: 'gantt-arrow' };
+      : { color: 'var(--fg-placeholder)', width: 1.3, dash: '3 3', marker: 'gantt-arrow' };
   return <path
     data-dependency-id={dependency.id}
     data-team-blocker-id={teamBlockerId}

@@ -11,8 +11,8 @@
 }
 
 .docs-page-suggestions button[aria-current='true'] {
-  background: #eef3fc;
-  color: #365ba4;
+  background: var(--bg-selected);
+  color: var(--brand-fg);
 }
 
 .docs-page-suggestions strong,
@@ -22,8 +22,8 @@
 
 .docs-page-suggestions button span,
 .docs-page-suggestions-empty {
-  color: #56647b;
-  font-size: 11px;
+  color: var(--fg-tertiary);
+  font-size: var(--text-xs);
 }
 
 .docs-page-suggestions-empty {

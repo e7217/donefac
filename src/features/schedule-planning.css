@@ -1,15 +1,15 @@
-.schedule-planning{margin:0 0 18px;border:1px solid var(--border);border-radius:12px;background:var(--surface,#fff);overflow:hidden}.schedule-planning-toolbar{display:flex;align-items:center;gap:8px;padding:12px 15px;flex-wrap:wrap}.schedule-planning-title{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:650;margin-right:auto}.schedule-baseline-label{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}.schedule-baseline-label select{max-width:230px;padding:6px 9px;border:1px solid var(--border);border-radius:7px;background:var(--surface,#fff);color:var(--text)}.schedule-baseline-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 15px;background:#f4f6f9;color:var(--muted);font-size:12px}.schedule-baseline-summary strong{color:var(--text)}.schedule-baseline-summary small{display:block;margin-top:4px;white-space:pre-wrap}.schedule-milestone-list{border-top:1px solid var(--border);padding:0 15px}.schedule-milestone-list summary{padding:11px 0;font-size:12px;font-weight:600;cursor:pointer}.schedule-milestone-list>p{font-size:12px;padding-bottom:10px}.schedule-milestone-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--border)}.schedule-milestone-dot{width:9px;height:9px;background:#c37a20;transform:rotate(45deg);flex-shrink:0}.schedule-milestone-dot.reached{background:#398369}.schedule-milestone-name{flex:1;text-align:left;border:0;background:none;cursor:pointer;color:var(--text);min-width:0}.schedule-milestone-name strong{display:block;font-size:12px;overflow-wrap:anywhere}.schedule-milestone-name small{display:block;font-size:11px;color:var(--muted);margin-top:4px}.schedule-artifact-form{margin:0 15px 15px;border-top:1px solid var(--border);padding-top:12px}.schedule-artifact-form-title{display:flex;align-items:center;justify-content:space-between;font-size:13px;margin-bottom:9px}.schedule-artifact-form fieldset{border:0;padding:0;margin:0;display:grid;grid-template-columns:minmax(150px,2fr) repeat(3,minmax(100px,1fr));gap:10px}.schedule-artifact-form label{font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:5px}.schedule-artifact-form .field{font-size:12px;width:100%;box-sizing:border-box}.schedule-form-wide{grid-column:1/-1}.schedule-artifact-form textarea{resize:vertical;min-height:65px}.schedule-artifact-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}.schedule-artifact-form>.muted{font-size:12px;line-height:1.6;margin-bottom:12px}.schedule-artifact-warning{background:#fff5db;color:#86631e;border-radius:6px;padding:8px 10px;font-size:12px;margin-bottom:10px}.schedule-artifact-error{margin:12px 15px;padding:9px 12px;border:1px solid #eac0be;border-radius:7px;background:#fff3f2;color:#9d3935;font-size:12px;line-height:1.6}@media(max-width:760px){.schedule-artifact-form fieldset{grid-template-columns:1fr 1fr}.schedule-artifact-form label:first-child{grid-column:1/-1}.schedule-planning-toolbar{padding:10px}.schedule-baseline-label{width:100%}.schedule-baseline-label select{max-width:100%;flex:1}.schedule-baseline-summary{align-items:flex-start}.schedule-artifact-form{margin:0 10px 12px}}
+.schedule-planning{margin:0 0 18px;border:1px solid var(--border-subtle);border-radius:var(--radius-2xl);background:var(--bg-surface-1);overflow:hidden}.schedule-planning-toolbar{display:flex;align-items:center;gap:8px;padding:12px 15px;flex-wrap:wrap}.schedule-planning-title{display:flex;align-items:center;gap:7px;font-size:var(--text-base);font-weight:var(--font-weight-semibold);margin-right:auto}.schedule-baseline-label{display:flex;align-items:center;gap:6px;color:var(--fg-tertiary);font-size:var(--text-sm)}.schedule-baseline-label select{max-width:230px;padding:6px 9px;border:1px solid var(--border-default);border-radius:var(--radius-md);background:var(--bg-surface-1);color:var(--fg-primary)}.schedule-baseline-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 15px;background:var(--bg-layer-1);color:var(--fg-tertiary);font-size:var(--text-sm)}.schedule-baseline-summary strong{color:var(--fg-primary)}.schedule-baseline-summary small{display:block;margin-top:4px;white-space:pre-wrap}.schedule-milestone-list{border-top:1px solid var(--border-subtle);padding:0 15px}.schedule-milestone-list summary{padding:11px 0;font-size:var(--text-sm);font-weight:var(--font-weight-semibold);cursor:pointer}.schedule-milestone-list>p{font-size:var(--text-sm);padding-bottom:10px}.schedule-milestone-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--border-subtle)}.schedule-milestone-dot{width:9px;height:9px;background:var(--warning);transform:rotate(45deg);flex-shrink:0}.schedule-milestone-dot.reached{background:var(--success)}.schedule-milestone-name{flex:1;text-align:left;border:0;background:none;cursor:pointer;color:var(--fg-primary);min-width:0}.schedule-milestone-name strong{display:block;font-size:var(--text-sm);overflow-wrap:anywhere}.schedule-milestone-name small{display:block;font-size:var(--text-xs);color:var(--fg-tertiary);margin-top:4px}.schedule-artifact-form{margin:0 15px 15px;border-top:1px solid var(--border-subtle);padding-top:12px}.schedule-artifact-form-title{display:flex;align-items:center;justify-content:space-between;font-size:var(--text-base);margin-bottom:9px}.schedule-artifact-form fieldset{border:0;padding:0;margin:0;display:grid;grid-template-columns:minmax(150px,2fr) repeat(3,minmax(100px,1fr));gap:10px}.schedule-artifact-form label{font-size:var(--text-xs);color:var(--fg-tertiary);display:flex;flex-direction:column;gap:5px}.schedule-artifact-form .field{font-size:var(--text-sm);width:100%;box-sizing:border-box}.schedule-form-wide{grid-column:1/-1}.schedule-artifact-form textarea{resize:vertical;min-height:65px}.schedule-artifact-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}.schedule-artifact-form>.muted{font-size:var(--text-sm);line-height:1.6;margin-bottom:12px}.schedule-artifact-warning{background:var(--warning-subtle);color:var(--warning-fg);border-radius:var(--radius-md);padding:8px 10px;font-size:var(--text-sm);margin-bottom:10px}.schedule-artifact-error{margin:12px 15px;padding:9px 12px;border:1px solid var(--danger-border);border-radius:var(--radius-md);background:var(--danger-subtle);color:var(--danger-fg);font-size:var(--text-sm);line-height:1.6}@media(max-width:760px){.schedule-artifact-form fieldset{grid-template-columns:1fr 1fr}.schedule-artifact-form label:first-child{grid-column:1/-1}.schedule-planning-toolbar{padding:10px}.schedule-baseline-label{width:100%}.schedule-baseline-label select{max-width:100%;flex:1}.schedule-baseline-summary{align-items:flex-start}.schedule-artifact-form{margin:0 10px 12px}}
 
 .schedule-milestone-issues {
   min-width: 0;
-  color: var(--muted);
-  font-size: 12px;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
 }
 
 .schedule-milestone-issues h3 {
   margin: 0 0 8px;
-  color: var(--text);
-  font-size: 13px;
+  color: var(--fg-primary);
+  font-size: var(--text-base);
 }
 
 .schedule-milestone-picker-controls,
@@ -40,7 +40,7 @@
 
 .schedule-milestone-issues input[type='checkbox'] {
   margin: 0;
-  accent-color: var(--accent, #385fc4);
+  accent-color: var(--brand);
 }
 
 .schedule-milestone-unavailable,
@@ -58,7 +58,7 @@
   overflow: auto;
   margin: 5px 0 0;
   padding: 0 0 0 2px;
-  border-block: 1px solid var(--border);
+  border-block: 1px solid var(--border-subtle);
   list-style: none;
 }
 
@@ -72,13 +72,13 @@
 }
 
 .schedule-milestone-candidates li + li {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .schedule-milestone-candidates label {
   flex: 1;
   min-width: 0;
-  color: var(--text);
+  color: var(--fg-primary);
   font-size: inherit;
 }
 
@@ -89,7 +89,7 @@
 .schedule-milestone-candidates small {
   display: block;
   margin-top: 3px;
-  color: var(--muted);
+  color: var(--fg-tertiary);
 }
 
 .schedule-milestone-picker-pages {

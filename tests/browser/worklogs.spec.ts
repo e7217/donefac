@@ -44,6 +44,7 @@ test('티켓의 실제 작업 시간을 작성하고 작성자별 보고서에�
 
     await drawer.getByRole('button',{name:'업무 상세 닫기'}).click();
     await page.setViewportSize({width:1440,height:1000});
+    await page.getByRole('button',{name:'더보기',exact:true}).click();
     await page.getByRole('button',{name:'보고서',exact:true}).click();
     await page.getByRole('tab',{name:'작업 시간',exact:true}).click();
     await page.getByLabel('작업 시간 시작일',{exact:true}).fill(workDate);

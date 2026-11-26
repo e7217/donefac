@@ -1,52 +1,52 @@
-.worklog-report { color: #213b36; font-size: 1rem; line-height: 1.55; }
-.worklog-report .btn, .worklog-report .field { font-size: .875rem; }
-.worklog-report h2 { margin: 0; font-size: 1.125rem; line-height: 1.4; }
+.worklog-report { color: var(--fg-primary); font-size: var(--text-base); line-height: 1.55; }
+.worklog-report .btn, .worklog-report .field { font-size: var(--text-sm); }
+.worklog-report h2 { margin: 0; font-size: var(--text-lg); line-height: 1.4; }
 .worklog-report-query { padding: 1.4rem; }
 .worklog-report-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .worklog-report-heading h2 { display: flex; align-items: center; gap: .5rem; }
-.worklog-report-heading > span { color: #526c65; font-size: .875rem; }
-.worklog-report-query > p { margin: .65rem 0 1rem; color: #526c65; font-size: .875rem; }
+.worklog-report-heading > span { color: var(--fg-tertiary); font-size: var(--text-sm); }
+.worklog-report-query > p { margin: .65rem 0 1rem; color: var(--fg-tertiary); font-size: var(--text-sm); }
 .worklog-report-filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
-.worklog-report-filters label { font-size: .875rem; }
+.worklog-report-filters label { font-size: var(--text-sm); }
 .worklog-report .field { margin-top: .35rem; width: 100%; }
 .worklog-report-query-actions { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 1.1rem; }
-.worklog-report-query-actions > span { font-size: .875rem; color: #526c65; }
-.worklog-report-query-actions > span.worklog-report-validation { color: #9b4239; }
-.worklog-report-error { margin: 1rem 0; padding: .85rem 1rem; color: #94363d; border: 1px solid #ebc4c6; background: #fff3f3; border-radius: .5rem; }
-.worklog-report-loading { min-height: 1.75rem; padding-top: .4rem; color: #526c65; font-size: .875rem; }
+.worklog-report-query-actions > span { font-size: var(--text-sm); color: var(--fg-tertiary); }
+.worklog-report-query-actions > span.worklog-report-validation { color: var(--danger-fg); }
+.worklog-report-error { margin: 1rem 0; padding: .85rem 1rem; color: var(--danger-fg); border: 1px solid var(--danger-border); background: var(--danger-subtle); border-radius: var(--radius-lg); }
+.worklog-report-loading { min-height: 1.75rem; padding-top: .4rem; color: var(--fg-tertiary); font-size: var(--text-sm); }
 .worklog-report-result-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin: .4rem 0 1rem; }
-.worklog-report-result-heading p { margin: .35rem 0 0; color: #526c65; font-size: .875rem; }
-.worklog-report-old-result { color: #8c5931; background: #fff5e9; border: 1px solid #efddc6; border-radius: .4rem; padding: .3rem .6rem; font-size: .875rem; }
+.worklog-report-result-heading p { margin: .35rem 0 0; color: var(--fg-tertiary); font-size: var(--text-sm); }
+.worklog-report-old-result { color: var(--warning-fg); background: var(--warning-subtle); border: 1px solid var(--warning-border); border-radius: var(--radius-md); padding: .3rem .6rem; font-size: var(--text-sm); }
 .worklog-report-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .85rem; margin-bottom: 1.2rem; }
 .worklog-report-stats article { display: flex; align-items: flex-start; flex-direction: column; gap: .4rem; padding: 1.1rem 1.2rem; }
-.worklog-report-stats article > span { font-size: .875rem; color: #4c675f; }
-.worklog-report-stats article > strong { font-size: 1.6rem; line-height: 1.4; font-weight: 650; color: #193f34; overflow-wrap: anywhere; }
-.worklog-report-stats small { font-size: .875rem; font-weight: 400; color: #526c65; }
+.worklog-report-stats article > span { font-size: var(--text-sm); color: var(--fg-secondary); }
+.worklog-report-stats article > strong { font-size: var(--text-3xl); line-height: 1.4; font-weight: var(--font-weight-semibold); color: var(--fg-primary); overflow-wrap: anywhere; }
+.worklog-report-stats small { font-size: var(--text-sm); font-weight: var(--font-weight-normal); color: var(--fg-tertiary); }
 .worklog-report-stats strong small { margin-left: .3rem; }
-.worklog-report-empty { display: flex; align-items: center; gap: .6rem; padding: .9rem 1rem; background: #f1f7f4; border-radius: .5rem; margin: 0 0 1.2rem; color: #526c65; }
+.worklog-report-empty { display: flex; align-items: center; gap: .6rem; padding: .9rem 1rem; background: var(--bg-layer-1); border-radius: var(--radius-lg); margin: 0 0 1.2rem; color: var(--fg-tertiary); }
 .worklog-report-empty p { margin: 0; }
 .worklog-report-daily { margin-bottom: 1.2rem; }
 .worklog-report-daily > .worklog-report-heading, .worklog-report-breakdowns > section > .worklog-report-heading { padding: 1.1rem 1.2rem; }
-.worklog-report-table-scroll { max-height: 420px; overflow: auto; border-top: 1px solid #e4ece7; }
-.worklog-report table { width: 100%; border-collapse: collapse; font-size: .875rem; text-align: left; }
-.worklog-report th, .worklog-report td { padding: .7rem 1rem; border-bottom: 1px solid #edf2ee; vertical-align: middle; }
-.worklog-report thead th { position: sticky; top: 0; z-index: 1; color: #526c65; background: #f7faf8; font-weight: 500; white-space: nowrap; }
-.worklog-report tbody th { font-weight: 500; overflow-wrap: anywhere; }
+.worklog-report-table-scroll { max-height: 420px; overflow: auto; border-top: 1px solid var(--border-subtle); }
+.worklog-report table { width: 100%; border-collapse: collapse; font-size: var(--text-base); text-align: left; }
+.worklog-report th, .worklog-report td { padding: .7rem 1rem; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
+.worklog-report thead th { position: sticky; top: 0; z-index: 1; color: var(--fg-tertiary); background: var(--bg-layer-1); font-weight: var(--font-weight-medium); white-space: nowrap; }
+.worklog-report tbody th { font-weight: var(--font-weight-medium); overflow-wrap: anywhere; }
 .worklog-report td { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .worklog-report td:last-child, .worklog-report th:last-child { text-align: right; }
 .worklog-report tbody tr:last-child th, .worklog-report tbody tr:last-child td { border-bottom: 0; }
-.worklog-report-weekday { margin-left: .6rem; color: #6a7f77; font-size: .875rem; }
+.worklog-report-weekday { margin-left: .6rem; color: var(--fg-tertiary); font-size: var(--text-sm); }
 .worklog-report-daily-value { display: flex; align-items: center; gap: 1rem; }
 .worklog-report-daily-value > span { min-width: 6rem; }
-.worklog-report-bar { width: min(260px, 22vw); height: 7px; border-radius: 4px; overflow: hidden; background: #eef4f0; }
-.worklog-report-bar > span { display: block; height: 100%; background: #68a499; border-radius: inherit; }
+.worklog-report-bar { width: min(260px, 22vw); height: 7px; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-layer-2); }
+.worklog-report-bar > span { display: block; height: 100%; background: var(--chart-1); border-radius: inherit; }
 .worklog-report-breakdowns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); gap: 1rem; align-items: start; }
-.worklog-report-no-rows { margin: 0; padding: 0 1.2rem 1.2rem; color: #526c65; font-size: .875rem; }
+.worklog-report-no-rows { margin: 0; padding: 0 1.2rem 1.2rem; color: var(--fg-tertiary); font-size: var(--text-sm); }
 .worklog-report-issue { display: flex; flex-direction: column; align-items: flex-start; gap: .15rem; padding: 0; text-align: left; max-width: 100%; }
-.worklog-report-issue > span { font-size: .875rem; color: #6a7f77; }
-.worklog-report-issue strong { font-size: .875rem; font-weight: 500; overflow-wrap: anywhere; }
-.worklog-report-issue small { font-size: .875rem; color: #796a63; }
-.worklog-report-issue-link { color: #177c72; }
+.worklog-report-issue > span { font-size: var(--text-sm); color: var(--fg-tertiary); }
+.worklog-report-issue strong { font-size: var(--text-base); font-weight: var(--font-weight-medium); overflow-wrap: anywhere; }
+.worklog-report-issue small { font-size: var(--text-sm); color: var(--fg-tertiary); }
+.worklog-report-issue-link { color: var(--brand-fg); }
 .worklog-report-issue-link:hover strong { text-decoration: underline; }
 @media (max-width: 1050px) {
   .worklog-report-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -59,7 +59,7 @@
   .worklog-report-old-result { align-self: flex-start; }
   .worklog-report-stats { gap: .6rem; }
   .worklog-report-stats article { padding: .9rem; }
-  .worklog-report-stats article > strong { font-size: 1.35rem; }
+  .worklog-report-stats article > strong { font-size: var(--text-2xl); }
   .worklog-report th, .worklog-report td { padding: .65rem .7rem; }
   .worklog-report-daily-value { gap: 0; }
   .worklog-report-bar { display: none; }

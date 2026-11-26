@@ -44,7 +44,8 @@ test('a blank built pilot supports intake, Gantt planning and a linked document 
   const { projects: [project] } = await workspace();
   expect(project).toMatchObject({ key: 'NATIVE', name: projectName });
 
-  await sidebar.getByRole('button', { name: '간트 · 일정', exact: true }).click();
+  await sidebar.locator('.project-navigation').getByRole('button', { name: /^업무(?: [\d,]+)?$/u }).click();
+  await page.getByRole('navigation', { name: '업무 화면', exact: true }).getByRole('button', { name: '간트', exact: true }).click();
   const chart = page.getByRole('region', { name: '간트 차트', exact: true });
   await expect(chart).toContainText('표시할 업무가 없습니다');
   const actorSwitch = page.getByRole('combobox', { name: '작업자 선택' });
@@ -70,7 +71,8 @@ test('a blank built pilot supports intake, Gantt planning and a linked document 
   const [accepted] = (await workspace()).issues;
   expect(accepted).toMatchObject({ projectId: project.id, reporterId: reader.id, assigneeId: owner.id, startDate: '2027-01-07', endDate: '2027-01-08' });
 
-  await sidebar.getByRole('button', { name: '간트 · 일정', exact: true }).click();
+  await sidebar.locator('.project-navigation').getByRole('button', { name: /^업무(?: [\d,]+)?$/u }).click();
+  await page.getByRole('navigation', { name: '업무 화면', exact: true }).getByRole('button', { name: '간트', exact: true }).click();
   await page.getByRole('button', { name: '새 업무 붙여넣기', exact: true }).click();
   const paste = page.getByRole('dialog', { name: '업무 붙여넣기', exact: true });
   const sheet = [

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { CalendarDays, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
 import type { FeatureProps, WorkCalendar } from '../../shared/types';
 import { api, patch } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isSettingsSectionNavigation } from '../lib/navigation';
 import { errorMessage } from './schedule-utils';
 import './calendar-settings.css';
 
@@ -32,6 +32,7 @@ function ProjectCalendar({ data, projectId, refresh, notify }: FeatureProps) {
     const guard = (event: Event) => {
       if (event.defaultPrevented) return;
       if (savingRef.current) { event.preventDefault(); notify('달력 저장이 끝난 뒤 이동해 주세요.', 'error'); }
+      else if (isSettingsSectionNavigation(event)) return;
       else if (dirtyRef.current) {
         if (!window.confirm('저장하지 않은 업무 달력 변경을 버리고 이동할까요?')) event.preventDefault();
         else afterAcceptedNavigation(event, () => { dirtyRef.current = false; setDraft(draftOf({ ...current, ...baseline })); setError(''); });

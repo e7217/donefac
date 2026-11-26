@@ -98,7 +98,8 @@ test('전체 프로젝트 간트는 프로젝트 필터를 유지하고 각 달�
     const second = await data.issue(data.second, '둘째 프로젝트 업무');
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), data.actor.id);
     await page.goto(`/#/${data.first.id}/overview`);
-    await button(page, name).click();
+    await button(page.locator('aside.sidebar'), '팀 개요').click();
+    await button(page.getByRole('navigation', { name: '팀 개요 화면', exact: true }), name).click();
     await narrow(page, data.prefix);
     await expect.poll(() => location(page)).toEqual({ path: route(data.first), scope: 'team', project: null, issue: null });
     const filter = page.getByRole('combobox', { name: '프로젝트 필터', exact: true });

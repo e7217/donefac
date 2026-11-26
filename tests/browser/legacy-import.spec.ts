@@ -21,7 +21,7 @@ const test = base.extend<{ legacy: LegacyFixture }>({
 const csv = (rows: string[][]) => Buffer.from(rows.map(row => row.map(value => `"${value.replaceAll('"', '""')}"`).join(',')).join('\r\n'));
 const canonical = (snapshot: WorkspaceSnapshot) => ({ issues: snapshot.issues, documents: snapshot.documents });
 async function openSettings(page: Page, f: LegacyFixture) {
-  await page.goto(`/#/${f.workspace.projects[0].id}/settings`);
+  await page.goto(`/#/${f.workspace.projects[0].id}/settings?section=migration`);
   return page.getByRole('region', { name: '기존 도구 원본 분석', exact: true });
 }
 

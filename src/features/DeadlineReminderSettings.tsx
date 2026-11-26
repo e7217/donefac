@@ -5,7 +5,7 @@ import { Bell, RefreshCw, Save } from 'lucide-react';
 import type { DeadlineReminderPreferences, FeatureProps } from '../../shared/types';
 import { MAX_DEADLINE_REMINDER_DAYS } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isSettingsSectionNavigation } from '../lib/navigation';
 import './deadline-reminder-settings.css';
 
 type ReminderDraft = Omit<DeadlineReminderPreferences, 'version'>;
@@ -91,6 +91,8 @@ export function DeadlineReminderSettings({ actorId, actorName, notify }: {
       if (saving.current) {
         event.preventDefault();
         notify('마감 알림 설정 저장이 끝난 뒤 이동해 주세요.', 'error');
+      } else if (isSettingsSectionNavigation(event)) {
+        return;
       } else if (dirty.current) {
         if (!window.confirm('저장하지 않은 마감 알림 설정을 버리고 이동할까요?')) {
           event.preventDefault();

@@ -8,7 +8,7 @@
 }
 
 .project-creation-dialog::backdrop {
-  background: #172b2345;
+  background: var(--bg-backdrop);
   backdrop-filter: blur(3px);
 }
 
@@ -31,9 +31,9 @@
 .project-creation-message,
 .project-creation-error {
   margin: 12px 0 0;
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 
 .project-creation-error {
-  color: #913c40;
+  color: var(--danger-fg);
 }

@@ -10,17 +10,17 @@
   width: 36px;
   min-height: 36px;
   padding: 0;
-  color: #536b60;
+  color: var(--fg-secondary);
 }
 
 .favorite-button.btn.is-favorite {
-  color: #805e22;
-  background: #fff4d9;
+  color: var(--warning-fg);
+  background: var(--warning-subtle);
 }
 
 .favorite-button.btn:focus-visible,
 .favorites-page .page-heading h1:focus-visible {
-  outline: 2px solid #247b65;
+  outline: 2px solid var(--brand);
   outline-offset: 2px;
 }
 
@@ -50,8 +50,8 @@
   gap: 12px;
   margin: 0 0 14px;
   padding: 16px;
-  color: #52655e;
-  font-size: 13px;
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 

@@ -8,9 +8,9 @@
   min-width: 0;
   margin-top: 8px;
   padding: clamp(10px, 3vw, 15px);
-  border: 1px solid #dce6df;
-  border-radius: 8px;
-  background: #f7faf8;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-layer-1);
 }
 
 .legacy-batch h3,
@@ -22,8 +22,8 @@
 .legacy-batch-progress,
 .legacy-batch-result,
 .legacy-batch-row-head small {
-  color: #4e6659;
-  font-size: 13px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .legacy-batch-picker,
@@ -31,7 +31,7 @@
   display: grid;
   gap: 4px;
   min-width: 0;
-  font-size: 13px;
+  font-size: var(--text-sm);
 }
 
 .legacy-batch .field {
@@ -54,9 +54,9 @@
   gap: 8px;
   min-width: 0;
   padding: 10px;
-  border: 1px solid #e0e9e1;
-  border-radius: 6px;
-  background: #fff;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-1);
 }
 
 .legacy-batch-row-head,
@@ -72,14 +72,14 @@
 }
 
 .legacy-batch-state {
-  color: #315948;
-  font-size: 12px;
-  font-weight: 650;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-semibold);
 }
 
 .legacy-batch-rows [data-state='failed'] .legacy-batch-state,
 .legacy-batch-rows [data-state='unknown'] .legacy-batch-state {
-  color: #8a3930;
+  color: var(--danger-fg);
 }
 
 .legacy-batch fieldset {

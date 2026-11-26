@@ -252,7 +252,7 @@ export function DocumentReplyList({ replies, users, actorId, notify, refresh, ed
       const user = users.find(item => item.id === reply.authorId);
       return <article className="docs-comment-reply" key={reply.id} id={`document-comment-${reply.id}`} aria-label="답글" tabIndex={-1}>
         <div className="docs-comment-head">
-          <span className="docs-avatar" aria-hidden="true" style={{ background: user?.color ?? '#78849a' }}>{user?.name.slice(0, 1) ?? '팀'}</span>
+          <span className="docs-avatar" aria-hidden="true" style={{ background: user?.color ?? 'var(--chart-7)' }}>{user?.name.slice(0, 1) ?? '팀'}</span>
           <strong>{user?.name ?? '팀원'}</strong>
           <time dateTime={reply.createdAt} title={new Date(reply.createdAt).toLocaleString('ko-KR')}>{relativeTime(reply.createdAt)}</time>
           <CommentEditedMark comment={reply} />

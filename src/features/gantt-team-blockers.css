@@ -21,37 +21,37 @@
   align-items: center;
   gap: 7px;
   margin: 0;
-  font-size: 16px;
+  font-size: var(--text-lg);
 }
 
 .gantt-team-blockers-status,
 .gantt-team-blockers-form p {
   margin: 8px 0 0;
-  color: #53685e;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 
 .gantt-team-blockers p[role='alert'] {
-  color: #a12627;
+  color: var(--danger-fg);
 }
 
 .gantt-team-blockers-form,
 .gantt-team-blockers-list > li {
   min-width: 0;
   padding: 10px;
-  border: 1px solid #dce6df;
-  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
 }
 
 .gantt-team-blockers-form {
   margin-top: 10px;
-  background: #f6f8f7;
+  background: var(--bg-layer-1);
 }
 
 .gantt-team-blockers-form h3 {
   margin: 0 0 8px;
-  font-size: 13px;
+  font-size: var(--text-base);
 }
 
 .gantt-team-blockers-form fieldset {
@@ -75,7 +75,7 @@
   display: grid;
   gap: 3px;
   min-width: 0;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .gantt-team-blockers-picker .field {
@@ -110,8 +110,8 @@
 .gantt-team-blockers-endpoint small,
 .gantt-team-blockers-picker small,
 .gantt-team-blockers-review small {
-  color: #53685e;
-  font-size: 11px;
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
   overflow-wrap: anywhere;
 }
 
@@ -134,7 +134,7 @@
 }
 
 .gantt-team-blockers-arrow {
-  color: #53685e;
+  color: var(--fg-secondary);
 }
 
 .gantt-team-blockers-review {
@@ -144,7 +144,7 @@
 
 .gantt-team-follow-up-modal > header p,
 .gantt-team-follow-up-modal .gantt-preview-table td:first-child > small {
-  color: #53685e;
+  color: var(--fg-secondary);
   overflow-wrap: anywhere;
 }
 
@@ -162,7 +162,7 @@
 
 .gantt-team-follow-up-selected small {
   display: block;
-  color: #53685e;
+  color: var(--fg-secondary);
 }
 
 .gantt-team-follow-up-dates {
@@ -172,22 +172,22 @@
   min-width: 0;
   margin: 12px 25px;
   padding: 8px 12px 10px;
-  border: 1px solid #dce6df;
-  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
 }
 
 .gantt-team-follow-up-dates legend {
   padding-inline: 4px;
-  color: #344d40;
-  font-size: 12px;
-  font-weight: 600;
+  color: var(--fg-primary);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-semibold);
 }
 
 .gantt-team-follow-up-dates label {
   display: grid;
   gap: 4px;
   min-width: 0;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .gantt-team-follow-up-dates .field {
@@ -206,7 +206,7 @@
 .gantt-team-follow-up-stale,
 .gantt-team-follow-up-notice {
   margin: 8px 25px;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .gantt-team-follow-up-stale p {
@@ -216,7 +216,7 @@
 .gantt-team-blockers-pages {
   justify-content: flex-end;
   margin-top: 6px;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .gantt-team-follow-up-chooser {
@@ -226,19 +226,19 @@
   margin: auto;
   padding: 16px;
   overflow: auto;
-  border: 1px solid #dce6df;
-  border-radius: 8px;
-  background: #fff;
-  color: #344d40;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
 }
 
 .gantt-team-follow-up-chooser::backdrop {
-  background: #16392f66;
+  background: var(--bg-backdrop);
 }
 
 .gantt-team-follow-up-chooser h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--text-lg);
 }
 
 .gantt-team-follow-up-chooser p {
@@ -252,7 +252,7 @@
   justify-content: space-between;
   gap: 6px;
   margin-top: 8px;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .gantt-team-follow-up-chooser ul {
@@ -296,7 +296,7 @@
 .gantt-team-follow-up-chooser li small {
   display: block;
   margin-top: 2px;
-  color: #53685e;
+  color: var(--fg-secondary);
 }
 
 .gantt-team-follow-up-chooser footer {

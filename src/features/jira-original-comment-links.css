@@ -1,20 +1,20 @@
 .jira-original-comment-links {
   margin-block-start: 6px;
   min-width: 0;
-  color: #3e544b;
-  font-size: .78rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .jira-original-comment-links .btn {
-  color: var(--accent-hover);
+  color: var(--brand-fg);
 }
 
 .jira-original-comment-link-panel {
   margin-block-start: 4px;
   padding: 8px 10px;
-  border: 1px solid #d6e4dc;
-  border-radius: 6px;
-  background: #f5faf7;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-layer-1);
 }
 
 .jira-original-comment-link-panel p {
@@ -22,7 +22,7 @@
 }
 
 .jira-original-comment-link-panel p[role='alert'] {
-  color: #963b31;
+  color: var(--danger-fg);
 }
 
 .jira-original-comment-link-panel ul {
@@ -37,7 +37,7 @@
 .jira-original-comment-link-address {
   display: block;
   overflow-wrap: anywhere;
-  font-size: .72rem;
+  font-size: var(--text-xs);
 }
 
 @media (max-width: 600px) {

@@ -107,7 +107,7 @@ test('360px 이관 대조에서 현재 필드와 상위 연결 차이, 원본 �
       if (url.pathname.startsWith('/api/') && !['GET', 'HEAD', 'OPTIONS'].includes(sent.method())) writes.push(`${sent.method()} ${url.pathname}`);
     });
 
-    await page.goto(`/#/${currentIssue.projectId}/settings`);
+    await page.goto(`/#/${currentIssue.projectId}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     const receipts = settings.getByRole('region', { name: '완료한 이관 영수증', exact: true });
     await receipts.getByRole('button').filter({ hasText: receipt.id }).click();

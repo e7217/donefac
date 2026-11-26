@@ -8,15 +8,15 @@
   margin: auto;
   padding: 0;
   overflow: hidden;
-  border: 1px solid #dce8e2;
-  border-radius: 13px;
-  background: #fff;
-  color: #203c32;
-  box-shadow: 0 18px 56px #152f2540;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2xl);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
+  box-shadow: var(--shadow-lg);
 }
 
 .issue-document-preview[open] { display: flex; flex-direction: column; }
-.issue-document-preview::backdrop { background: #172e2866; }
+.issue-document-preview::backdrop { background: var(--bg-backdrop); }
 
 .issue-document-preview-header {
   display: flex;
@@ -25,12 +25,12 @@
   justify-content: space-between;
   gap: 12px;
   padding: 16px 20px;
-  border-bottom: 1px solid #e5ede8;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .issue-document-preview-header > div { min-width: 0; }
-.issue-document-preview-header p { margin: 0 0 4px; color: #567065; font-size: .8125rem; }
-.issue-document-preview-header h2 { margin: 0; font-size: 1.125rem; line-height: 1.4; overflow-wrap: anywhere; }
+.issue-document-preview-header p { margin: 0 0 4px; color: var(--fg-tertiary); font-size: var(--text-sm); }
+.issue-document-preview-header h2 { margin: 0; font-size: var(--text-xl); line-height: 1.4; overflow-wrap: anywhere; }
 .issue-document-preview-header > .btn { flex: none; min-width: 40px; min-height: 40px; padding: 6px; }
 
 .issue-document-preview-body {
@@ -41,12 +41,12 @@
   overscroll-behavior: contain;
 }
 
-.issue-document-preview-body:focus-visible { outline: 2px solid #348478; outline-offset: -2px; }
+.issue-document-preview-body:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
 .issue-document-preview-body > .document-outline { margin-top: 0; }
 .issue-document-preview-body [data-preview-issue-reference][aria-current="location"] {
-  outline: 2px solid #348478;
+  outline: 2px solid var(--brand);
   outline-offset: -2px;
-  background: #eaf6ef;
+  background: var(--bg-selected);
 }
 
 .issue-document-preview-footer {
@@ -56,13 +56,13 @@
   justify-content: flex-end;
   gap: 8px;
   padding: 10px 20px;
-  border-top: 1px solid #e5ede8;
-  background: #fff;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-surface-1);
 }
 
 .issue-document-preview-footer > .btn { min-height: 40px; }
-.issue-document-preview-section { width: 100%; margin: 0; color: #567065; font-size: .8125rem; overflow-wrap: anywhere; }
-.issue-document-preview-reference-status { width: 100%; color: #567065; font-size: .8125rem; }
+.issue-document-preview-section { width: 100%; margin: 0; color: var(--fg-tertiary); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.issue-document-preview-reference-status { width: 100%; color: var(--fg-tertiary); font-size: var(--text-sm); }
 .issue-document-preview-reference-status:empty { position: absolute; }
 
 @media (max-width: 480px) {

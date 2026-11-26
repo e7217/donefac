@@ -1,7 +1,7 @@
 .gantt-planning-controls {
   min-width: 0;
-  color: #263d37;
-  font-size: 16px;
+  color: var(--fg-primary);
+  font-size: var(--text-base);
   line-height: 1.5;
 }
 
@@ -13,8 +13,8 @@
 }
 
 .gantt-planning-toggle-row > span {
-  color: #526b62;
-  font-size: 13px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .gantt-planning-toggle svg:last-child {
@@ -28,9 +28,9 @@
 .gantt-planning-panel {
   margin-top: 12px;
   padding: 22px;
-  border: 1px solid #dce6e0;
-  border-radius: 12px;
-  background: #fff;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2xl);
+  background: var(--bg-surface-1);
 }
 
 .gantt-planning-heading,
@@ -45,15 +45,15 @@
 .gantt-planning-heading h3,
 .gantt-planning-editor h4 {
   margin: 0;
-  font-size: 17px;
-  font-weight: 650;
+  font-size: var(--text-lg);
+  font-weight: var(--font-weight-semibold);
   overflow-wrap: anywhere;
 }
 
 .gantt-planning-heading p {
   margin: 5px 0 0;
-  color: #526b62;
-  font-size: 14px;
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
 }
 
 .gantt-planning-layout {
@@ -79,15 +79,15 @@
   display: grid;
   gap: 6px;
   min-width: 0;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-semibold);
 }
 
 .gantt-planning-controls .field {
   width: 100%;
   min-width: 0;
   min-height: 40px;
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .gantt-planning-search {
@@ -99,7 +99,7 @@
   position: absolute;
   top: 13px;
   left: 10px;
-  color: #60776e;
+  color: var(--fg-tertiary);
   pointer-events: none;
 }
 
@@ -113,8 +113,8 @@
   gap: 7px;
   width: fit-content;
   margin: 12px 0;
-  font-size: 13px;
-  color: #526b62;
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
 }
 
 .gantt-planning-list {
@@ -132,39 +132,39 @@
   gap: 5px;
   width: 100%;
   padding: 12px 14px;
-  border: 1px solid #e0e7e3;
-  border-radius: 8px;
-  background: #fff;
-  color: #263d37;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
   text-align: left;
   cursor: pointer;
   overflow-wrap: anywhere;
 }
 
 .gantt-planning-item:hover {
-  background: #f6faf7;
+  background: var(--bg-layer-1-hover);
 }
 
 .gantt-planning-item.is-selected {
-  border-color: #177c72;
-  background: #eff8f4;
-  box-shadow: inset 3px 0 #177c72;
+  border-color: var(--brand);
+  background: var(--bg-selected);
+  box-shadow: inset 3px 0 var(--brand);
 }
 
 .gantt-planning-item:focus-visible {
-  outline: 2px solid #177c72;
+  outline: 2px solid var(--brand);
   outline-offset: 2px;
 }
 
 .gantt-planning-item strong {
-  font-size: 15px;
-  font-weight: 600;
+  font-size: var(--text-md);
+  font-weight: var(--font-weight-semibold);
 }
 
 .gantt-planning-item > span:not(.gantt-planning-item-meta),
 .gantt-planning-item small {
-  color: #526b62;
-  font-size: 13px;
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
 }
 
 .gantt-planning-item-meta {
@@ -172,14 +172,14 @@
   flex-wrap: wrap;
   justify-content: space-between;
   gap: 6px;
-  color: #526b62;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .gantt-planning-empty,
 .gantt-planning-editor-empty {
-  color: #526b62;
-  font-size: 14px;
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
 }
 
 .gantt-planning-editor-empty {
@@ -189,9 +189,9 @@
   gap: 10px;
   min-height: 240px;
   padding: 20px;
-  border: 1px dashed #d5e2da;
-  border-radius: 10px;
-  background: #fafcfb;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-xl);
+  background: var(--bg-surface-2);
   text-align: center;
 }
 
@@ -202,16 +202,16 @@
 .gantt-planning-editor {
   min-width: 0;
   padding: 20px;
-  border: 1px solid #e0e7e3;
-  border-radius: 10px;
-  background: #fafcfb;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xl);
+  background: var(--bg-surface-2);
 }
 
 .gantt-planning-editor > header > div > span {
   display: block;
   margin-bottom: 4px;
-  color: #526b62;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .gantt-planning-editor fieldset {
@@ -229,8 +229,8 @@
 
 .gantt-planning-date-help {
   margin: 14px 0 0;
-  color: #526b62;
-  font-size: 13px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .gantt-planning-editor-actions {
@@ -243,26 +243,26 @@
 
 .gantt-planning-controls .btn {
   min-height: 36px;
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .gantt-planning-warning,
 .gantt-planning-error {
   margin: 14px 0 0;
   padding: 10px 12px;
-  border-radius: 7px;
-  font-size: 14px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 
 .gantt-planning-warning {
-  background: #fff6df;
-  color: #72531f;
+  background: var(--warning-subtle);
+  color: var(--warning-fg);
 }
 
 .gantt-planning-error {
-  background: #fff0ee;
-  color: #9b362a;
+  background: var(--danger-subtle);
+  color: var(--danger-fg);
 }
 
 .gantt-planning-pagination {
@@ -276,8 +276,8 @@
 
 .gantt-planning-pagination > span {
   margin-right: auto;
-  color: #526b62;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 @media (max-width: 850px) {

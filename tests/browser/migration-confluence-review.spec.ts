@@ -44,7 +44,7 @@ test('360px 이관 화면에서 ZIP 전체 검토 범위와 개별 검토 파일
         { packageId: otherPackageId, archivePages: 1234, permissionCheckedPages: 1234 }];
       await route.fulfill({ response, json: options });
     });
-    await page.goto(`/#/${projects[0].id}/settings`);
+    await page.goto(`/#/${projects[0].id}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     const checkbox = settings.getByLabel(`이관 패키지 ${filename}`, { exact: true });
     await checkbox.check();

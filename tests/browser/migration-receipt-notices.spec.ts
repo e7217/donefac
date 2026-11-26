@@ -92,7 +92,7 @@ test('360px 이관 영수증의 경고에서 같은 원본 ID를 가진 패키�
       if (url.pathname.startsWith('/api/') && !['GET', 'HEAD', 'OPTIONS'].includes(method)) writes.push(`${method} ${url.pathname}`);
       if (url.pathname.startsWith(originalPrefix)) originalReads.push(`${url.pathname}${url.search}`);
     });
-    await page.goto(`/#/${workspace.projects[0].id}/settings`);
+    await page.goto(`/#/${workspace.projects[0].id}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     const receipts = settings.getByRole('region', { name: '완료한 이관 영수증', exact: true });
     await receipts.getByRole('button').filter({ hasText: receipt.id }).click();

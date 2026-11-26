@@ -3,11 +3,11 @@
   gap: 7px;
   margin-top: 5px;
   padding: 8px;
-  border: 1px solid #dce6f0;
-  border-radius: 7px;
-  background: #f8fbff;
-  color: #354760;
-  font-size: 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-layer-1);
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .docs-find-controls {
@@ -22,13 +22,13 @@
   width: 100%;
   min-height: 34px;
   padding-block: 5px;
-  font-size: 13px;
+  font-size: var(--text-base);
 }
 
 .docs-find-panel .btn {
   min-height: 32px;
   padding: 4px 7px;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .docs-find-controls .btn {
@@ -60,28 +60,28 @@
 }
 
 ::highlight(teamspace-document-reader-find) {
-  background-color: #fff0bd;
-  color: #302511;
+  background-color: color-mix(in srgb, var(--warning) 25%, var(--bg-surface-1));
+  color: var(--fg-primary);
 }
 
 ::highlight(teamspace-document-reader-find-current) {
-  background-color: #ffcf85;
-  color: #302511;
+  background-color: color-mix(in srgb, var(--warning) 45%, var(--bg-surface-1));
+  color: var(--fg-primary);
   text-decoration: underline;
 }
 
 .docs-reading-paper [data-document-reader-find-current="block"] {
-  outline: 2px solid #9a4e13;
+  outline: 2px solid var(--warning-fg);
   outline-offset: 2px;
 }
 
 .docs-prose [data-document-find-match] {
-  border-radius: 2px;
-  background: #fff0bd;
-  color: #302511;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--warning) 25%, var(--bg-surface-1));
+  color: var(--fg-primary);
 }
 
 .docs-prose [data-document-find-active] {
-  outline: 1px solid #9a4e13;
-  background: #ffcf85;
+  outline: 1px solid var(--warning-fg);
+  background: color-mix(in srgb, var(--warning) 45%, var(--bg-surface-1));
 }

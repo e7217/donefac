@@ -91,7 +91,7 @@ test('360px 이관에서 이메일 일치 후보를 확인하고 선택한 Jira�
   try {
     staged.push(await upload(request, jiraFilename, jiraInstance, jira));
     staged.push(await upload(request, wikiFilename, wikiInstance, zip([{ path: 'entities.xml', bytes: Buffer.from(wiki) }])));
-    await page.goto(`/#/${workspace.projects[0].id}/settings`);
+    await page.goto(`/#/${workspace.projects[0].id}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     await expect(settings).toBeVisible({ timeout: 30_000 });
     await settings.getByLabel(`이관 패키지 ${jiraFilename}`, { exact: true }).check();
@@ -250,7 +250,7 @@ test('360px에서 같은 Jira 원본 계정에 팀원 매핑을 재사용하고 
       }));
       staged.push(await upload(request, pack.filename, pack.instance, Buffer.from(JSON.stringify({ issues }))));
     }
-    await page.goto(`/#/${workspace.projects[0].id}/settings`);
+    await page.goto(`/#/${workspace.projects[0].id}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     await expect(settings).toBeVisible({ timeout: 30_000 });
     for (const pack of packs) await settings.getByLabel(`이관 패키지 ${pack.filename}`, { exact: true }).check();

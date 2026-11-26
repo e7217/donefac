@@ -2,8 +2,8 @@
   position: relative;
   display: inline-block;
   min-width: 0;
-  color: #254137;
-  font-size: 1rem;
+  color: var(--fg-primary);
+  font-size: var(--text-base);
   line-height: 1.55;
 }
 
@@ -17,7 +17,7 @@
 .issue-field-filters .btn,
 .issue-field-filters .field,
 .issue-field-filters label {
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 
 .issue-field-filters .btn {
@@ -25,13 +25,13 @@
 }
 
 .issue-field-filter-active {
-  background: #e9f6ef;
-  color: #176c5c;
-  border-color: #a8d1bd;
+  background: var(--brand-subtle);
+  color: var(--brand-fg);
+  border-color: var(--brand-border);
 }
 
 .issue-field-filter-active > span {
-  font-size: 0.8125rem;
+  font-size: var(--text-xs);
   padding-left: 0.25rem;
 }
 
@@ -41,10 +41,10 @@
   overflow: auto;
   margin-top: 0.7rem;
   padding: 1.2rem;
-  background: white;
-  border: 1px solid #cbded2;
-  border-radius: 9px;
-  box-shadow: 0 14px 42px #21453721;
+  background: var(--bg-surface-1);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
 }
 
 .issue-field-filters.is-open {
@@ -63,13 +63,13 @@
 
 .issue-field-filter-editor h3 {
   margin: 0;
-  font-size: 1rem;
+  font-size: var(--text-md);
 }
 
 .issue-field-filter-editor header p {
   margin: 0.3rem 0 0;
-  font-size: 1rem;
-  color: #536e61;
+  font-size: var(--text-base);
+  color: var(--fg-secondary);
 }
 
 .issue-field-filters .field {
@@ -95,8 +95,8 @@
 .issue-field-filter-match > span {
   padding-bottom: 0.55rem;
   white-space: nowrap;
-  color: #536d60;
-  font-size: 0.8125rem;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
 }
 
 .issue-field-filter-rule {
@@ -105,7 +105,7 @@
   align-items: end;
   gap: 0.65rem;
   padding: 0.8rem 0;
-  border-top: 1px solid #e1eae4;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .issue-field-filter-rule > label {
@@ -121,15 +121,15 @@
   display: flex;
   align-items: center;
   min-height: 36px;
-  font-size: 0.8125rem;
-  color: #5b7467;
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
 }
 
 .issue-field-filter-empty {
   padding: 0.85rem 0;
   margin: 0;
-  font-size: 1rem;
-  color: #526d5e;
+  font-size: var(--text-base);
+  color: var(--fg-tertiary);
 }
 
 .issue-field-filter-add {
@@ -141,18 +141,18 @@
 }
 
 .issue-field-filter-add small {
-  color: #526c5f;
-  font-size: 0.8125rem;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
 }
 
 .issue-field-filter-error {
   margin: 0.85rem 0;
-  border: 1px solid #e7c1c4;
-  border-radius: 6px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
   padding: 0.75rem 0.85rem;
-  color: #943e43;
-  background: #fff4f4;
-  font-size: 0.875rem;
+  color: var(--danger-fg);
+  background: var(--danger-subtle);
+  font-size: var(--text-sm);
 }
 
 .issue-field-filter-editor > footer {
@@ -163,12 +163,13 @@
   gap: 0.5rem;
   margin-top: 1rem;
   padding-top: 1rem;
-  border-top: 1px solid #dce7df;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .issue-field-filters select.field {
   appearance: none;
   padding-right: 2rem;
+  /* token-exception: SVG data-URI stroke (%23516965) cannot read CSS variables */
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%23516965' viewBox='0 0 16 16'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 0.6rem center;
@@ -181,7 +182,7 @@
 
 .issue-field-filters button:focus-visible,
 .issue-field-filters .field:focus-visible {
-  outline: 2px solid #177c72;
+  outline: 2px solid var(--brand);
   outline-offset: 2px;
 }
 

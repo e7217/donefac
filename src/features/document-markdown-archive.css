@@ -23,8 +23,8 @@
 
 .document-markdown-archive-review h3 {
   margin: 0;
-  color: #25354c;
-  font-size: 16px;
+  color: var(--fg-primary);
+  font-size: var(--text-lg);
 }
 
 .document-markdown-archive-pages {
@@ -33,24 +33,24 @@
   padding: 0;
   overflow: auto;
   list-style: none;
-  border: 1px solid #e7ebf2;
-  border-radius: 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
 }
 
 .document-markdown-archive-pages li {
   padding: 8px 10px;
-  font-size: 13px;
+  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 
 .document-markdown-archive-pages li + li {
-  border-top: 1px solid #edf0f5;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .document-markdown-archive-pages small {
   display: block;
   margin-top: 3px;
-  color: #54647a;
+  color: var(--fg-tertiary);
 }
 
 .document-markdown-archive-pages .btn {
@@ -61,8 +61,8 @@
 
 .document-markdown-archive-warnings {
   margin: 10px 0 14px;
-  color: #725518;
-  font-size: 13px;
+  color: var(--warning-fg);
+  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 

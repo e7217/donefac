@@ -14,13 +14,13 @@
 
 .issue-priority-label-bar > .btn {
   min-height: 36px;
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 
 .issue-priority-label-bar > .is-filtered {
-  border-color: #a8d1bd;
-  color: #176c5c;
-  background: #e9f6ef;
+  border-color: var(--brand-border);
+  color: var(--brand-fg);
+  background: var(--brand-subtle);
 }
 
 .issue-priority-label-summary,
@@ -34,11 +34,11 @@
 
 .issue-priority-label-summary li {
   padding: 3px 7px;
-  border: 1px solid #e1eae2;
-  border-radius: 4px;
-  color: #436256;
-  background: #f3f8f5;
-  font-size: 0.75rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--fg-secondary);
+  background: var(--bg-layer-1);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   max-width: 100%;
@@ -48,11 +48,11 @@
   width: min(660px, 100%);
   margin-top: 5px;
   padding: 14px;
-  border: 1px solid #cbded2;
-  border-radius: 8px;
-  background: #fafcfb;
-  color: #254137;
-  font-size: 0.875rem;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
+  font-size: var(--text-sm);
 }
 
 .issue-priority-choices {
@@ -78,7 +78,7 @@
 }
 
 .issue-priority-choices input {
-  accent-color: #176c5c;
+  accent-color: var(--brand);
 }
 
 .issue-priority-label-grid {
@@ -119,7 +119,7 @@
   padding: 3px 6px;
   white-space: normal;
   text-align: left;
-  font-size: 0.75rem;
+  font-size: var(--text-sm);
 }
 
 .issue-label-choice-selection .btn span {

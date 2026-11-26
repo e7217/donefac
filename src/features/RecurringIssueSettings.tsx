@@ -4,7 +4,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type 
 import { CalendarClock, Plus, RefreshCw } from 'lucide-react';
 import type { FeatureProps, IssueTemplate, RecurringIssueConfig, RecurringIssueRule, RecurringIssueRun } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isSettingsSectionNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import './recurring-issue-settings.css';
 
@@ -122,6 +122,8 @@ function ProjectRecurringIssues({ actorId, data, projectId, notify, refresh, ope
       if (operation.current) {
         event.preventDefault();
         notify('반복 업무 저장이 끝난 뒤 이동해 주세요.', 'error');
+      } else if (isSettingsSectionNavigation(event)) {
+        return;
       } else if (dirty) {
         const question = uncertain ? '반복 업무 저장 결과를 확인하지 않고 이동할까요?'
           : '저장하지 않은 반복 업무 입력을 버리고 이동할까요?';

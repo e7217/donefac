@@ -102,7 +102,7 @@ test('360px Jira 작업 시간 수정에서 반영할 기록, 팀에서 수정�
     expect(before.totalMinutes * 60).toBe(225);
 
     const next = await stage(true);
-    await page.goto(`/#/${settingsProject.id}/settings`);
+    await page.goto(`/#/${settingsProject.id}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     await settings.getByLabel(`이관 패키지 ${next.filename}`, { exact: true }).check();
     await settings.getByRole('button', { name: '선택 패키지 매핑 불러오기', exact: true }).click();

@@ -84,7 +84,7 @@ test('워크플로 전이에서 열린 차단 업무를 해결해야 보드와 �
     }), 201);
 
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const settings = page.getByRole('region', { name: '프로젝트 워크플로 설정', exact: true });
     const transitions = settings.locator('.workflow-tabs button').filter({ hasText: '허용 전이' });
     const requireResolved = settings.getByRole('checkbox', { name: `전이 ${transition} 열린 차단 업무 해결 필요`, exact: true });
@@ -162,7 +162,7 @@ test('워크플로 전이에서 열린 차단 업무를 해결해야 보드와 �
     expect(await json<IssueRelation[]>(await request.get(`${issuePath(target)}/relations`))).toContainEqual(relation);
 
     await expect(button(targetPanel, '변경사항 저장')).toBeDisabled();
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     await transitions.click();
     await requireResolved.uncheck();
     const clearing = waitPatch(page, workflowPath(project.id));
@@ -218,7 +218,7 @@ test('워크플로 전이에서 열린 하위 업무를 완료한 뒤 상위 업
     const child = await createIssue('진행 중인 하위 업무', parent.id);
     await page.setViewportSize({ width: 360, height: 820 });
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const settings = page.getByRole('region', { name: '프로젝트 워크플로 설정', exact: true });
     const transitions = settings.locator('.workflow-tabs button').filter({ hasText: '허용 전이' });
     const requireClosed = settings.getByRole('checkbox', { name: `전이 ${transition} 하위 업무 종료 필요`, exact: true });
@@ -263,7 +263,7 @@ test('워크플로 전이에서 열린 하위 업무를 완료한 뒤 상위 업
     expect(completedParent.completedAt).toBeTruthy();
     await expect(button(parentPanel, '변경사항 저장')).toBeDisabled();
 
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     await transitions.click();
     await requireClosed.uncheck();
     const clearing = waitPatch(page, path);

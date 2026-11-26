@@ -4,7 +4,7 @@
 }
 
 .gitlab-activity-inspection .btn {
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .gitlab-activity-inspection .btn[aria-disabled='true'] {
@@ -19,11 +19,11 @@
   min-width: 0;
   margin-top: 5px;
   padding: 10px;
-  border: 1px solid #dce8e1;
-  border-radius: 6px;
-  background: #f9fbfa;
-  color: #365b4c;
-  font-size: 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-layer-1);
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 
@@ -44,7 +44,7 @@
 .gitlab-pipeline-job-link,
 .gitlab-test-report-link,
 .gitlab-discussion-link {
-  color: #245846;
+  color: var(--fg-primary);
   text-decoration: underline;
 }
 
@@ -57,11 +57,11 @@
 }
 
 .gitlab-activity-inspection-meta time {
-  color: #547364;
+  color: var(--fg-tertiary);
 }
 
 .gitlab-activity-inspection-warning {
-  color: #8d402e;
+  color: var(--danger-fg);
 }
 
 .gitlab-changed-file-search {
@@ -81,7 +81,7 @@
   justify-self: stretch;
   gap: 6px;
   padding-top: 8px;
-  border-top: 1px solid #dce8e1;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .gitlab-pipeline-job-list,
@@ -94,10 +94,10 @@
   overflow-y: auto;
   padding: 0;
   margin: 0;
-  border: 1px solid #dce8e1;
-  border-radius: 5px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
   list-style: none;
-  background: #fff;
+  background: var(--bg-surface-1);
 }
 
 .gitlab-pipeline-job,
@@ -115,7 +115,7 @@
 .gitlab-test-suite + .gitlab-test-suite,
 .gitlab-discussion + .gitlab-discussion,
 .gitlab-changed-file + .gitlab-changed-file {
-  border-top: 1px solid #e5eee8;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .gitlab-pipeline-job-link,
@@ -160,14 +160,14 @@
 
 .gitlab-pipeline-job-state {
   padding: 2px 5px;
-  border-radius: 4px;
-  background: #edf4ef;
-  color: #3c5f4e;
+  border-radius: var(--radius-sm);
+  background: var(--bg-layer-2);
+  color: var(--fg-secondary);
 }
 
 .gitlab-pipeline-job-state[data-state='failed'] {
-  background: #faeae3;
-  color: #8d402e;
+  background: var(--danger-subtle);
+  color: var(--danger-fg);
 }
 
 .gitlab-review-people {

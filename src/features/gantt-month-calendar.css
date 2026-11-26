@@ -2,7 +2,7 @@
   min-width: 0;
   margin: 16px 0;
   padding: 16px;
-  color: var(--ink, #29453c);
+  color: var(--fg-primary);
 }
 
 .gantt-month-header,
@@ -23,7 +23,7 @@
   align-items: center;
   gap: 7px;
   margin: 0;
-  font-size: 16px;
+  font-size: var(--text-lg);
 }
 
 .gantt-month-layout {
@@ -47,7 +47,7 @@
 .gantt-month-controls h3,
 .gantt-month-agenda h3 {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--text-md);
 }
 
 .gantt-month-controls h3 {
@@ -79,8 +79,8 @@
 .gantt-month-weekday {
   text-align: center;
   padding: 4px 0;
-  color: #4f6a62;
-  font-size: 11px;
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
 }
 
 .gantt-month-day {
@@ -92,26 +92,26 @@
   min-width: 0;
   min-height: 44px;
   padding: 3px 0;
-  border: 1px solid #d4e3dd;
-  border-radius: 6px;
-  color: #29463d;
-  background: #fcfefd;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--fg-primary);
+  background: var(--bg-surface-1);
   cursor: pointer;
 }
 
 .gantt-month-day[aria-current='date'] {
-  font-weight: 750;
-  border-color: #75998c;
+  font-weight: var(--font-weight-bold);
+  border-color: var(--brand-border);
 }
 
 .gantt-month-day[aria-pressed='true'] {
-  color: #125449;
-  border-color: #126a5a;
-  background: #def1e8;
+  color: var(--brand-fg);
+  border-color: var(--brand);
+  background: var(--bg-selected);
 }
 
 .gantt-month-day:focus-visible {
-  outline: 2px solid var(--accent, #126a5a);
+  outline: 2px solid var(--brand);
   outline-offset: 1px;
 }
 
@@ -123,13 +123,13 @@
 .gantt-month-count {
   max-width: 100%;
   padding: 0 2px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   overflow-wrap: anywhere;
   line-height: 1.15;
-  font-size: 10px;
-  font-weight: 650;
-  color: #18584d;
-  background: #e2eee8;
+  font-size: var(--text-2xs);
+  font-weight: var(--font-weight-semibold);
+  color: var(--brand-fg);
+  background: var(--brand-subtle);
 }
 
 .gantt-month-agenda-heading {
@@ -171,8 +171,8 @@
 .gantt-month-agenda h3 span,
 .gantt-month-empty,
 .gantt-month-pagination {
-  color: #4a655a;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .gantt-month-empty {
@@ -196,8 +196,8 @@
   gap: 5px;
   min-width: 0;
   padding: 6px;
-  border: 1px solid #d4e3dd;
-  border-radius: 6px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
 }
 
 .gantt-month-item-name {
@@ -213,8 +213,8 @@
 .gantt-month-item-name span,
 .gantt-month-project,
 .gantt-month-milestone {
-  font-size: 11px;
-  color: #4a655a;
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
 }
 
 .gantt-month-project,
@@ -234,13 +234,13 @@
 .gantt-month-field {
   min-height: 32px;
   padding: 4px 8px;
-  font-size: 11px;
-  background: #eaf3ee;
+  font-size: var(--text-xs);
+  background: var(--bg-layer-2);
 }
 
 .gantt-month-field[data-field='dueDate'] {
-  color: #674b30;
-  background: #fff1dc;
+  color: var(--warning-fg);
+  background: var(--warning-subtle);
 }
 
 .gantt-month-pagination {

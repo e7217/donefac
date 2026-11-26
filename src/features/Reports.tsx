@@ -43,12 +43,12 @@ type Props = FeatureProps & {
 };
 const CATEGORIES: StatusCategory[] = ['backlog', 'todo', 'in_progress', 'review', 'done', 'cancelled'];
 const META: Record<StatusCategory, { label: string; color: string }> = {
-  backlog: { label: '백로그', color: '#8a98a7' },
-  todo: { label: '할 일', color: '#647b93' },
-  in_progress: { label: '진행', color: '#557fe0' },
-  review: { label: '검토', color: '#9b73b6' },
-  done: { label: '완료', color: '#177c72' },
-  cancelled: { label: '취소', color: '#c0c6c9' },
+  backlog: { label: '백로그', color: 'color-mix(in srgb, var(--chart-7) 80%, var(--bg-surface-1))' },
+  todo: { label: '할 일', color: 'var(--chart-7)' },
+  in_progress: { label: '진행', color: 'var(--chart-2)' },
+  review: { label: '검토', color: 'var(--chart-3)' },
+  done: { label: '완료', color: 'var(--chart-1)' },
+  cancelled: { label: '취소', color: 'color-mix(in srgb, var(--chart-7) 45%, var(--bg-surface-1))' },
 };
 const COVERAGE = { complete: '관측', partial: '일부 관측', unobserved: '미관측' };
 const errorMessage = (error: unknown) =>
@@ -1091,15 +1091,15 @@ function DailyCharts({ days }: { days: ReportDay[] }) {
         </header>
         <div className="reports-chart-legend">
           <span>
-            <i style={{ background: '#557fe0' }} />
+            <i style={{ background: 'var(--chart-2)' }} />
             생성
           </span>
           <span>
-            <i style={{ background: '#177c72' }} />
+            <i style={{ background: 'var(--chart-1)' }} />
             완료 전이
           </span>
           <span>
-            <i style={{ background: '#b5733d' }} />
+            <i style={{ background: 'var(--chart-8)' }} />
             재오픈
           </span>
         </div>
@@ -1118,9 +1118,9 @@ function DailyCharts({ days }: { days: ReportDay[] }) {
                 >
                   {day.coverage !== 'unobserved' &&
                     [
-                      [day.created, '#557fe0'],
-                      [day.completed, '#177c72'],
-                      [day.reopened, '#b5733d'],
+                      [day.created, 'var(--chart-2)'],
+                      [day.completed, 'var(--chart-1)'],
+                      [day.reopened, 'var(--chart-8)'],
                     ].map(([count, color], index) => (
                       <i
                         key={index}

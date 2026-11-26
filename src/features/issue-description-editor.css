@@ -20,8 +20,8 @@
 
 .issue-description-format {
   gap: 6px;
-  color: #536b5e;
-  font-size: .8125rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .issue-description-format .field {
@@ -33,13 +33,13 @@
 .issue-description-toolbar .btn {
   min-height: 32px;
   padding: 4px 7px;
-  font-size: .8125rem;
+  font-size: var(--text-base);
 }
 
 .issue-description-mode .btn[aria-pressed='true'] {
-  background: #e9f4ee;
-  color: #245d47;
-  font-weight: 650;
+  background: var(--brand-subtle);
+  color: var(--brand-fg);
+  font-weight: var(--font-weight-semibold);
 }
 
 .issue-description-toolbar {
@@ -66,11 +66,11 @@
 .issue-description-preview {
   min-width: 0;
   padding: 10px 12px;
-  border: 1px solid #dce8e0;
-  border-radius: 7px;
-  background: #fbfdfb;
-  color: #263d33;
-  font-size: .875rem;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
+  font-size: var(--text-md);
   line-height: 1.65;
   overflow-wrap: anywhere;
 }
@@ -80,14 +80,14 @@
 }
 
 .issue-description-preview :where(h1, h2, h3, h4, h5, h6) {
-  color: #2b4e3e;
-  font-size: 1rem;
-  font-weight: 700;
+  color: var(--fg-primary);
+  font-size: var(--text-lg);
+  font-weight: var(--font-weight-bold);
   line-height: 1.4;
 }
 
 .issue-description-preview h1 {
-  font-size: 1.15rem;
+  font-size: var(--text-xl);
 }
 
 .issue-description-preview :where(ul, ol) {
@@ -112,11 +112,11 @@
 
 .issue-description-preview blockquote {
   padding-inline-start: 10px;
-  border-inline-start: 3px solid #b8d2c4;
+  border-inline-start: 3px solid var(--border-strong);
 }
 
 .issue-description-preview a {
-  color: #17654b;
+  color: var(--brand-fg);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -124,20 +124,20 @@
 .issue-description-link-status {
   display: inline-block;
   margin-inline-start: .4em;
-  color: #4f685a;
-  font-size: .8125rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .issue-description-preview code {
-  border-radius: 3px;
-  background: #eaf3ee;
+  border-radius: var(--radius-xs);
+  background: var(--bg-layer-2);
 }
 
 .issue-description-preview pre {
   overflow-x: auto;
   padding: 7px 9px;
-  border-radius: 5px;
-  background: #eaf3ee;
+  border-radius: var(--radius-sm);
+  background: var(--bg-layer-2);
   white-space: pre;
 }
 
@@ -152,12 +152,12 @@
 .issue-description-table :where(th, td) {
   min-width: 56px;
   padding: 4px 6px;
-  border: 1px solid #dae7de;
+  border: 1px solid var(--border-default);
 }
 
 .issue-description-table th {
-  background: #eef6f1;
-  font-weight: 650;
+  background: var(--bg-layer-1);
+  font-weight: var(--font-weight-semibold);
 }
 
 .issue-description-literal {
@@ -166,8 +166,8 @@
 
 .issue-description-note {
   margin: 3px 0;
-  color: #4f685a;
-  font-size: .8125rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 @media (max-width: 480px) {

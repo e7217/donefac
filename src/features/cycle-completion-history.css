@@ -1,10 +1,10 @@
 .cycle-history {
   min-width: 0;
   margin-bottom: 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--ink);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
 }
 
 .cycle-history > h3 { margin: 0; }
@@ -16,8 +16,8 @@
   display: grid;
   gap: 10px;
   padding: 12px;
-  border-top: 1px solid var(--line);
-  font-size: 12px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-sm);
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -30,14 +30,14 @@
   flex-direction: column;
   gap: 3px;
   min-width: 0;
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .cycle-history-controls .field {
   box-sizing: border-box;
   width: 100%;
   min-height: 34px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   text-overflow: ellipsis;
 }
 
@@ -46,36 +46,36 @@
   gap: 7px;
   min-width: 0;
   padding-top: 10px;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border-subtle);
 }
 
-.cycle-history-record :is(h2, h4) { margin: 0; font-size: 15px; }
+.cycle-history-record :is(h2, h4) { margin: 0; font-size: var(--text-lg); }
 .cycle-history-record-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; }
 .cycle-history-view { max-width: 900px; }
 .cycle-history-view .feature-heading { align-items: center; flex-wrap: wrap; gap: 8px; }
 .cycle-history-view .cycle-history-body, .cycle-history-view .cycle-history-record { border-top: 0; }
 .cycle-history-view .cycle-history-record { padding-top: 0; }
-.cycle-history-record p + p { color: var(--muted); }
+.cycle-history-record p + p { color: var(--fg-tertiary); }
 .cycle-history-dates { display: flex; flex-wrap: wrap; gap: 2px 9px; }
 .cycle-history-counts { display: flex; flex-wrap: wrap; gap: 4px 6px; }
 .cycle-history-counts, .cycle-history-group > ul { margin: 0; padding: 0; list-style: none; }
-.cycle-history-counts > li { padding: 3px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); }
-.cycle-history-counts > li[data-disposition='done'] { background: var(--accent-soft); }
-.cycle-history-counts > li[data-disposition='carry'] { background: #fff7e8; color: #784b15; }
-.cycle-history-group h5 { margin: 6px 0 4px; font-size: 12px; }
+.cycle-history-counts > li { padding: 3px 7px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-surface-1); }
+.cycle-history-counts > li[data-disposition='done'] { background: var(--success-subtle); }
+.cycle-history-counts > li[data-disposition='carry'] { background: var(--warning-subtle); color: var(--warning-fg); }
+.cycle-history-group h5 { margin: 6px 0 4px; font-size: var(--text-sm); }
 .cycle-history-group > ul > li {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(50px, auto);
   align-items: start;
   gap: 3px 7px;
   padding: 6px 0;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .cycle-history-status {
   max-width: 12ch;
   padding-top: 3px;
-  color: var(--muted);
+  color: var(--fg-tertiary);
   text-align: right;
 }
 
@@ -93,7 +93,7 @@
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--ink);
+  color: var(--fg-primary);
   text-align: left;
   cursor: pointer;
 }
@@ -101,7 +101,7 @@
 .cycle-history-issue-link strong { min-width: 0; }
 .cycle-history-issue-link:hover strong,
 .cycle-history-issue-link:focus-visible strong { text-decoration: underline; text-underline-offset: 2px; }
-.cycle-history-static-issue > small, .cycle-history-assignee { color: var(--muted); }
+.cycle-history-static-issue > small, .cycle-history-assignee { color: var(--fg-tertiary); }
 .cycle-history-assignee { display: block; }
 .cycle-history-current-schedule {
   display: flex;
@@ -110,7 +110,7 @@
   justify-content: space-between;
   grid-column: 1 / -1;
   gap: 2px 10px;
-  color: var(--muted);
+  color: var(--fg-tertiary);
 }
 .cycle-history-current-schedule .btn { min-height: 30px; }
 .cycle-history-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }

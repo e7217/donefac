@@ -94,7 +94,7 @@ test('360px에서 기존 Jira 업무의 새 관계를 이관해 일정 연결을
     expect(localRelation.origin).toBe('teamspace');
 
     const followUp = await upload('jira-with-link', true);
-    await page.goto(`/#/${projectId}/settings`);
+    await page.goto(`/#/${projectId}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     await expect(settings).toBeVisible({ timeout: 30_000 });
     const mode = settings.getByRole('combobox', { name: '이관 방식', exact: true });
@@ -262,7 +262,7 @@ test('360px에서 따로 이관한 Jira 프로젝트 간 관계를 열고 후행
     const [blocker, blocked] = tickets;
     expect(blocker.projectId).not.toBe(blocked.projectId);
     const later = await upload(projects[0], true);
-    await page.goto(`/#/${blocker.projectId}/settings`);
+    await page.goto(`/#/${blocker.projectId}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     await expect(settings).toBeVisible({ timeout: 30_000 });
     await settings.getByLabel(`이관 패키지 ${later.filename}`, { exact: true }).check();

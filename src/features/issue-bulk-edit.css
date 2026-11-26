@@ -1,7 +1,7 @@
 .issue-bulk-toggle[aria-pressed="true"] {
-  color: #175e4d;
-  background: #e7f3ed;
-  border-color: #bcdacb;
+  color: var(--brand-fg);
+  background: var(--brand-subtle);
+  border-color: var(--brand-border);
 }
 
 .issue-bulk-filter-controls {
@@ -15,9 +15,9 @@
   min-width: 0;
   margin-bottom: 12px;
   padding: 16px;
-  border: 1px solid #d5e7dd;
-  border-radius: 8px;
-  background: #f7fbf9;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-2);
 }
 
 .issue-bulk-editor > header {
@@ -31,8 +31,8 @@
 .issue-bulk-editor h2,
 .issue-bulk-editor h3 {
   margin: 0;
-  color: #284c42;
-  font-size: 14px;
+  color: var(--fg-primary);
+  font-size: var(--text-md);
 }
 
 .issue-bulk-editor h2 {
@@ -45,8 +45,8 @@
 
 .issue-bulk-editor p {
   margin: 5px 0 0;
-  font-size: 12px;
-  color: #4e695f;
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
   line-height: 1.55;
 }
 
@@ -69,8 +69,8 @@
   flex-direction: column;
   gap: 5px;
   min-width: 0;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-semibold);
 }
 
 .issue-bulk-fields .field { width: 100%; min-width: 0; }
@@ -90,20 +90,20 @@
   align-self: start;
   min-width: 0;
   padding: 6px 9px;
-  border: 1px solid #d5e7dd;
-  border-radius: 5px;
-  background: #fff;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-1);
 }
 
 .issue-bulk-label-removal summary {
   padding: 5px 0;
-  color: #284c42;
-  font-size: 12px;
-  font-weight: 600;
+  color: var(--fg-primary);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-semibold);
   cursor: pointer;
 }
 
-.issue-bulk-label-removal summary:focus-visible { outline: 2px solid #286c5d; outline-offset: 2px; }
+.issue-bulk-label-removal summary:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .issue-bulk-removal-options { max-height: 150px; overflow: auto; }
 
 .issue-bulk-fields .issue-bulk-removal-option {
@@ -111,11 +111,11 @@
   align-items: center;
   gap: 7px;
   padding: 4px 1px;
-  font-weight: 400;
+  font-weight: var(--font-weight-normal);
   overflow-wrap: anywhere;
 }
 
-.issue-bulk-removal-option input { flex-shrink: 0; accent-color: #286c5d; }
+.issue-bulk-removal-option input { flex-shrink: 0; accent-color: var(--brand); }
 
 .issue-bulk-parent-fields,
 .issue-bulk-planning-fields,
@@ -125,7 +125,7 @@
   gap: 8px;
   min-width: 0;
   padding-top: 10px;
-  border-top: 1px solid #d5e7dd;
+  border-top: 1px solid var(--border-default);
 }
 
 .issue-bulk-parent-fields > label:first-of-type { width: min(100%, 16rem); }
@@ -152,13 +152,13 @@
 }
 
 .issue-bulk-parent-results .btn[aria-pressed="true"] {
-  border-color: #bcdacb;
-  background: #e7f3ed;
-  color: #175e4d;
+  border-color: var(--brand-border);
+  background: var(--brand-subtle);
+  color: var(--brand-fg);
 }
 
-.issue-bulk-parent-results small { color: #4e695f; }
-.issue-bulk-parent-pages { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; font-size: 12px; }
+.issue-bulk-parent-results small { color: var(--fg-secondary); }
+.issue-bulk-parent-pages { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; font-size: var(--text-sm); }
 
 .issue-bulk-planning-controls {
   display: grid;
@@ -184,9 +184,9 @@
   gap: 8px;
   min-width: 0;
   padding: 8px;
-  border: 1px solid #d5e7dd;
-  border-radius: 6px;
-  background: #fff;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-1);
 }
 
 .issue-bulk-custom-row-heading {
@@ -194,7 +194,7 @@
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 
@@ -208,8 +208,8 @@
   display: grid;
   gap: 5px;
   min-width: 0;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-semibold);
 }
 
 .issue-bulk-custom-controls .field {
@@ -220,16 +220,16 @@
 .issue-bulk-editor .issue-bulk-error {
   margin-top: 10px;
   padding: 7px 9px;
-  border: 1px solid #efc3b9;
-  border-radius: 5px;
-  background: #fff2ed;
-  color: #8e3429;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  background: var(--danger-subtle);
+  color: var(--danger-fg);
 }
 
 .issue-bulk-preview {
   margin-top: 14px;
   padding-top: 12px;
-  border-top: 1px solid #d5e7dd;
+  border-top: 1px solid var(--border-default);
 }
 
 .issue-bulk-preview-list {
@@ -244,9 +244,9 @@
 
 .issue-bulk-preview-list li {
   padding: 8px 10px;
-  border: 1px solid #e2ece7;
-  border-radius: 5px;
-  background: #fff;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-1);
   overflow-wrap: anywhere;
 }
 
@@ -256,15 +256,15 @@
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 3px 10px;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
-.issue-bulk-preview-heading span { color: #526c62; }
-.issue-bulk-preview .issue-bulk-row-reason { color: #8e3429; }
-.issue-bulk-changes { margin: 5px 0 0; font-size: 12px; }
+.issue-bulk-preview-heading span { color: var(--fg-secondary); }
+.issue-bulk-preview .issue-bulk-row-reason { color: var(--danger-fg); }
+.issue-bulk-changes { margin: 5px 0 0; font-size: var(--text-sm); }
 .issue-bulk-changes div { display: flex; flex-wrap: wrap; gap: 2px 8px; }
-.issue-bulk-changes dt { font-weight: 600; }
-.issue-bulk-changes dd { margin: 0; color: #456759; overflow-wrap: anywhere; }
+.issue-bulk-changes dt { font-weight: var(--font-weight-semibold); }
+.issue-bulk-changes dd { margin: 0; color: var(--fg-secondary); overflow-wrap: anywhere; }
 
 .issue-table .issue-bulk-selection {
   width: 40px;
@@ -287,14 +287,14 @@
   width: 16px;
   height: 16px;
   vertical-align: middle;
-  accent-color: #286c5d;
+  accent-color: var(--brand);
 }
 
-.issue-table tbody tr.issue-bulk-selected { background: #edf7f1; }
+.issue-table tbody tr.issue-bulk-selected { background: var(--bg-selected); }
 
 .issue-board-bulk-controls {
-  color: #334f43;
-  font-size: 12px;
+  color: var(--fg-primary);
+  font-size: var(--text-sm);
 }
 
 .issue-board-card-select {
@@ -303,13 +303,13 @@
   height: 44px;
   margin-inline-start: auto;
   padding-inline: 8px;
-  color: #334f43;
-  font-size: 12px;
+  color: var(--fg-primary);
+  font-size: var(--text-sm);
 }
 
 .issue-board-card-row[data-bulk-selected='true'] > .issue-board-card {
-  border-color: #298166;
-  background: #edf7f1;
+  border-color: var(--brand);
+  background: var(--bg-selected);
 }
 
 @media (max-width: 520px) {

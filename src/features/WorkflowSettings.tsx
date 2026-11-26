@@ -7,7 +7,7 @@ import { MAX_WORKING_DURATION_DAYS } from '../../shared/calendar';
 import { MAX_WORKFLOW_WIP_LIMIT, projectWorkflow, STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
 import { projectIssueSchema, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
 import { api, patch } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isSettingsSectionNavigation } from '../lib/navigation';
 import { errorMessage } from './schedule-utils';
 import { WorkflowStatusMigration } from './WorkflowStatusMigration';
 import './workflow-settings.css';
@@ -70,6 +70,7 @@ function WorkflowEditor({ data, projectId, actorId, refresh, notify }: FeaturePr
   const guard = useCallback((event: Event) => {
     if (event.defaultPrevented) return;
     if (savingRef.current) { event.preventDefault(); notify('워크플로 저장이 끝난 뒤 이동해 주세요.', 'error'); }
+    else if (isSettingsSectionNavigation(event)) return;
     else if (dirtyRef.current) { if (!window.confirm('저장하지 않은 워크플로 설정을 버리고 이동할까요?')) event.preventDefault(); else afterAcceptedNavigation(event, () => { dirtyRef.current = false; setDraft(workflowDraft(baseline)); setError(''); }); }
   }, [notify, baseline]);
   useEffect(() => {

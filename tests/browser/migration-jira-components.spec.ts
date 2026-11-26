@@ -52,7 +52,7 @@ test('360px Jira 컴포넌트 이관에서 여러 멤버십을 보존하고 업�
   let savedView: SavedView | undefined;
 
   try {
-    await page.goto(`/#/${homeProject.id}/settings`);
+    await page.goto(`/#/${homeProject.id}/settings?section=migration`);
     const analysis = page.getByRole('form', { name: '원본 파일 분석', exact: true });
     await analysis.getByLabel('Jira·Confluence 원본 파일', { exact: true }).setInputFiles({
       name: filename, mimeType: 'application/zip', buffer: zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }]),

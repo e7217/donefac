@@ -9,12 +9,12 @@
 .issue-template-picker,
 .issue-template-editor {
   padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
 }
 
 .issue-template-picker {
-  background: #f8faf7;
+  background: var(--bg-layer-1);
 }
 
 .issue-template-actions {
@@ -39,14 +39,14 @@
 .issue-template-picker :is(p, span[role=status]),
 .issue-template-settings p {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
 
 .issue-template-picker p[role=alert],
 .issue-template-settings .issue-template-actions p[role=alert] {
-  color: #963e35;
+  color: var(--danger-fg);
 }
 
 .issue-template-list {
@@ -62,16 +62,16 @@
   flex-wrap: wrap;
   gap: 8px 14px;
   padding: 10px 0;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .issue-template-list li strong {
-  font-size: 13px;
+  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 
 .issue-template-list li p {
-  color: var(--muted);
+  color: var(--fg-tertiary);
 }
 
 .issue-template-editor,
@@ -81,7 +81,7 @@
 }
 
 .issue-template-editor h3 {
-  font-size: 13px;
+  font-size: var(--text-base);
   margin: 0;
 }
 

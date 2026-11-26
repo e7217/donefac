@@ -5,7 +5,7 @@ import { FilePlus, ListChecks, Plus } from 'lucide-react';
 import { PRIORITY, type CustomFieldValue, type FeatureProps, type IssueTemplate, type IssueTemplateDefaults } from '../../shared/types';
 import { fieldApplies, hasCustomValue, issueTypeMeta, projectIssueSchema } from '../../shared/issue-schema';
 import { api, ApiError, patch, post } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isSettingsSectionNavigation } from '../lib/navigation';
 import { CustomFieldInput, initialIssueType, IssueTypeSelect } from './CustomFields';
 import { IssueDescriptionEditor } from './IssueDescriptionEditor';
 import { isAvailableTemplateFieldValue } from './issue-template-fields';
@@ -73,6 +73,8 @@ function ProjectIssueTemplates({ data, projectId, refresh, notify }: FeatureProp
       if (pending.current) {
         event.preventDefault();
         notify('업무 템플릿 저장이 끝난 뒤 이동해 주세요.', 'error');
+      } else if (isSettingsSectionNavigation(event)) {
+        return;
       } else if (dirty) {
         if (!window.confirm('저장하지 않은 업무 템플릿을 버리고 이동할까요?')) event.preventDefault();
         else afterAcceptedNavigation(event, () => {

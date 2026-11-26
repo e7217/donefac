@@ -89,7 +89,7 @@ test('360px에서 이관한 Confluence 라벨 목록은 실제 문서를 열고 
     await expect(title).toHaveValue(memberTitle);
     await expect(editor.getByText('Confluence에서 이관한 운영 절차 본문', { exact: true })).toBeVisible();
 
-    await page.goto(`/#/${projectId}/settings`);
+    await page.goto(`/#/${projectId}/settings?section=migration`);
     const receipts = page.getByRole('region', { name: '완료한 이관 영수증', exact: true });
     await receipts.getByRole('button', { name: new RegExp(receipt.id, 'u') }).click();
     await receipts.getByText('검토한 이관 진단', { exact: true }).click();

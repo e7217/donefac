@@ -1501,7 +1501,7 @@ function IssuePanelContent(props: IssuePanelProps) {
         {loadingComments ? <p className="issue-section-empty">댓글을 불러오는 중…</p> : comments.length === 0 ? <p className="issue-section-empty">논의와 결정사항을 남겨주세요.</p> : comments.map(comment => {
           const user = data.users.find(value => value.id === comment.authorId);
           return <article id={`issue-comment-${comment.id}`} key={comment.id} className="issue-comment" tabIndex={-1}>
-            <span className="issue-avatar" style={{ background: user?.color || '#8996a4' }}>{user?.name.slice(0, 1) || '?'}</span>
+            <span className="issue-avatar" style={{ background: user?.color || 'var(--chart-7)' }}>{user?.name.slice(0, 1) || '?'}</span>
             <div>
               <header><strong>{user?.name || '알 수 없는 사용자'}</strong><time title={comment.createdAt}>{relativeTime(comment.createdAt)}</time>
                 <CommentEditedMark comment={comment} />

@@ -44,7 +44,7 @@ function resolveRemotePositions(state: EditorState, client: CollaborationClient)
       const anchorOffset = resolve(anchor);
       const headOffset = resolve(head);
       if (!textPosition(state, anchorOffset) || !textPosition(state, headOffset)) continue;
-      const color = /^#[\da-f]{6}$/i.test(peer.color) ? peer.color : '#27745e';
+      const color = /^#[\da-f]{6}$/i.test(peer.color) ? peer.color : 'var(--chart-1)';
       positions.push({ peer, color, anchor: anchorOffset, head: headOffset });
     } catch {
       // A remote relative position can become unresolvable as its blocks are edited.
@@ -145,7 +145,7 @@ export function collaborativeCursors(client: CollaborationClient): Extension {
                   class: 'docs-remote-selection',
                   'data-peer-id': peer.id,
                   'data-actor-id': peer.actorId,
-                  style: `--docs-peer-selection-color: ${color}33`,
+                  style: `--docs-peer-selection-color: color-mix(in srgb, ${color} 20%, transparent)`,
                 }),
               ]);
               const decorations = DecorationSet.create(view.state.doc, selection);

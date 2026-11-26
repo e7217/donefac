@@ -78,7 +78,7 @@ test('업무 달력의 날짜 예외를 저장하고 근무일 이동은 달력 
   const monday = nextMonday(), friday = addDays(monday, -3), saturday = addDays(monday, -2), tuesday = addDays(monday, 1);
   const item = await issue(request, project.id, `달력 이동 ${Date.now()}`, friday, friday);
   try {
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=calendar`);
     const editor = page.getByRole('region', { name: '업무 달력 설정' });
     await editor.getByLabel('업무 달력 이름', { exact: true }).fill('보존할 달력 입력');
     expect((await request.patch(`/api/projects/${project.id}/calendar`, { data: { ...original, expectedVersion: original.version, name: '다른 작업자의 달력' } })).ok()).toBeTruthy();

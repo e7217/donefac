@@ -7,15 +7,15 @@
   margin: auto;
   padding: 0;
   overflow: hidden;
-  border: 1px solid #dfebe6;
-  border-radius: 13px;
-  background: #fff;
-  color: #203c32;
-  box-shadow: 0 18px 56px #152f2540;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2xl);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
+  box-shadow: var(--shadow-lg);
   overflow-wrap: anywhere;
 }
 
-.report-meeting-draft-dialog::backdrop { background: #172e2866; }
+.report-meeting-draft-dialog::backdrop { background: var(--bg-backdrop); }
 
 .report-meeting-draft-dialog > form {
   display: flex;
@@ -29,14 +29,14 @@
   padding: 0.8rem 1rem;
 }
 
-.report-meeting-draft-dialog header { border-bottom: 1px solid #e6eee8; }
+.report-meeting-draft-dialog header { border-bottom: 1px solid var(--border-subtle); }
 
 .report-meeting-draft-dialog footer {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 0.5rem;
-  border-top: 1px solid #e6eee8;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .report-meeting-draft-content {
@@ -48,8 +48,8 @@
   overscroll-behavior: contain;
 }
 
-.report-meeting-draft-content > label { font-weight: 600; }
-.report-meeting-draft-content .field { box-sizing: border-box; font-size: 1rem; }
+.report-meeting-draft-content > label { font-weight: var(--font-weight-semibold); }
+.report-meeting-draft-content .field { box-sizing: border-box; font-size: var(--text-base); }
 
 .report-meeting-draft-content dl {
   display: grid;
@@ -57,38 +57,38 @@
   gap: 0.5rem 0.7rem;
   margin: 0;
   padding: 0.65rem 0.8rem;
-  border-radius: 8px;
-  background: #f2f7f4;
-  font-size: 0.875rem;
+  border-radius: var(--radius-lg);
+  background: var(--bg-layer-1);
+  font-size: var(--text-base);
 }
 
-.report-meeting-draft-content dt { color: #526c65; font-size: 0.8125rem; }
+.report-meeting-draft-content dt { color: var(--fg-secondary); font-size: var(--text-sm); }
 .report-meeting-draft-content dd { margin: 0.15rem 0 0; }
-.report-meeting-draft-content p { margin: 0; font-size: 0.875rem; }
-.report-meeting-draft-content summary { color: #156c5e; font-size: 0.875rem; cursor: pointer; }
+.report-meeting-draft-content p { margin: 0; font-size: var(--text-base); }
+.report-meeting-draft-content summary { color: var(--brand-fg); font-size: var(--text-sm); cursor: pointer; }
 
 .report-meeting-draft-content ol {
   display: grid;
   gap: 0.4rem;
   margin: 0.4rem 0 0;
   padding-inline-start: 1.25rem;
-  font-size: 0.875rem;
+  font-size: var(--text-base);
 }
 
-.report-meeting-draft-content li > p { color: #526c65; font-size: 0.8125rem; }
+.report-meeting-draft-content li > p { color: var(--fg-secondary); font-size: var(--text-sm); }
 
 .report-meeting-draft-selection {
   min-width: 0;
   margin: 0;
   padding: 0.5rem 0.7rem;
-  border: 1px solid #dce8e1;
-  border-radius: 8px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
 }
 
-.report-meeting-draft-selection legend { padding: 0 0.25rem; font-size: 0.875rem; font-weight: 600; }
+.report-meeting-draft-selection legend { padding: 0 0.25rem; font-size: var(--text-base); font-weight: var(--font-weight-semibold); }
 .report-meeting-draft-selection-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; }
 .report-meeting-draft-selection ul { margin: 0.5rem 0 0; padding: 0; list-style: none; }
-.report-meeting-draft-selection li { padding: 0.45rem 0; border-top: 1px solid #e6eee8; }
-.report-meeting-draft-selection label { display: flex; align-items: baseline; gap: 0.5rem; font-size: 0.875rem; font-weight: 600; cursor: pointer; }
-.report-meeting-draft-selection input { flex: none; margin: 0; accent-color: #156c5e; }
-.report-meeting-draft-selection small { display: block; padding-inline-start: 1.3rem; color: #526c65; font-size: 0.8125rem; }
+.report-meeting-draft-selection li { padding: 0.45rem 0; border-top: 1px solid var(--border-subtle); }
+.report-meeting-draft-selection label { display: flex; align-items: baseline; gap: 0.5rem; font-size: var(--text-base); font-weight: var(--font-weight-semibold); cursor: pointer; }
+.report-meeting-draft-selection input { flex: none; margin: 0; accent-color: var(--brand); }
+.report-meeting-draft-selection small { display: block; padding-inline-start: 1.3rem; color: var(--fg-secondary); font-size: var(--text-sm); }

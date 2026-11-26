@@ -133,12 +133,11 @@ test('간트에서 응답을 잃고 업무 목록으로 이동하면 저장된 �
     await form.getByRole('button', { name: '간트에 추가', exact: true }).click();
     await expect(form.getByRole('button', { name: '업무 추가 결과 다시 확인', exact: true })).toBeVisible();
 
-    await page.getByRole('button', { name: '메뉴 열기', exact: true }).click();
     const confirmation = page.waitForEvent('dialog').then(async dialog => {
       await dialog.accept();
       expect(dialog.message()).toContain('업무가 이미 추가됐을 수 있습니다');
     });
-    await page.locator('.project-navigation').getByRole('button', { name: /^업무\s/u }).click();
+    await page.getByRole('navigation', { name: '업무 화면', exact: true }).getByRole('button', { name: '목록 · 보드', exact: true }).click();
     await confirmation;
     await expect(page).toHaveURL(new RegExp(`/#/${project.id}/issues$`));
     await expect(page.getByText(title, { exact: true })).toBeVisible();

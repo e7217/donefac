@@ -1,5 +1,8 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import type { Issue, ProjectWorkflow, WorkspaceSnapshot } from '../../shared/types';
+
+// The workflow editor lives in the '업무 구성' settings section; hidden sections stay mounted.
+const settingsSection = (page: Page, label: string) => page.getByRole('navigation', { name: '설정 섹션' }).getByRole('button', { name: label, exact: true });
 
 test('프로젝트에서 추가한 상태·전이·필수 속성이 간트 생성과 업무 보드·상세에 적용된다', async ({ page, request }) => {
   const snapshot = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
@@ -8,7 +11,7 @@ test('프로젝트에서 추가한 상태·전이·필수 속성이 간트 생�
   const suffix = Date.now().toString(36), stateId = `qa_${suffix}`, label = `품질 확인 ${suffix}`;
   let created: Issue | undefined;
   try {
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const settings = page.getByRole('region', { name: '프로젝트 워크플로 설정' });
     await expect(settings.getByRole('button', { name: '상태 추가', exact: true })).toBeEnabled();
     await settings.getByRole('button', { name: '상태 추가', exact: true }).click();
@@ -42,7 +45,10 @@ test('프로젝트에서 추가한 상태·전이·필수 속성이 간트 생�
     expect(saved.initialStatusId).toBe(stateId);
     expect(saved.transitions.find(edge => edge.from === stateId)?.requiredFields).toEqual(['description']);
 
-    await page.locator('.project-navigation button').filter({ hasText: '간트 · 일정' }).click();
+    await page.locator('.project-navigation').getByRole('button', { name: /^업무(?: [\d,]+)?$/u }).click();
+    const workTabs = page.getByRole('navigation', { name: '업무 화면' });
+    await workTabs.getByRole('button', { name: '간트', exact: true }).click();
+    await expect(workTabs.getByRole('button', { name: '간트', exact: true })).toHaveAttribute('aria-current', 'page');
     await page.getByRole('button', { name: '업무 추가', exact: true }).click();
     const form = page.getByRole('form', { name: '간트에서 업무 만들기' });
     await form.getByLabel('추가할 업무 제목').fill(`워크플로 브라우저 ${suffix}`);
@@ -56,7 +62,8 @@ test('프로젝트에서 추가한 상태·전이·필수 속성이 간트 생�
     created = await (await createResponse).json() as Issue;
     expect(created.status).toBe(stateId);
     await expect(page.locator(`[data-issue-id="${created.id}"] .gantt-task-range`)).toHaveCSS('--bar-color', '#588b9c');
-    await page.locator('.project-navigation').getByRole('button', { name: /^업무(?: [\d,]+)?$/u }).click();
+    await workTabs.getByRole('button', { name: '목록 · 보드', exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`#/${project.id}/issues`));
     await page.getByRole('button', { name: '보드', exact: true }).click();
     await page.getByLabel('업무 검색', { exact: true }).fill(created.title);
     const column = page.locator('.issue-board-column').filter({ has: page.locator('.issue-board-heading strong').filter({ hasText: label }) });
@@ -83,7 +90,7 @@ test('워크플로 버전 충돌 시 작성 중인 설정을 보존하고 명시
   const project = snapshot.projects[0];
   const original = await (await request.get(`/api/projects/${project.id}/workflow`)).json() as ProjectWorkflow;
   try {
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const settings = page.getByRole('region', { name: '프로젝트 워크플로 설정' });
     await expect(settings.getByLabel('상태 1 이름', { exact: true })).toBeEnabled();
     await settings.getByLabel('상태 1 이름', { exact: true }).fill('내가 작성 중인 설정');
@@ -106,7 +113,7 @@ test('작업공간 새로고침은 깨끗한 설정을 갱신하고 작성 중�
   const project = snapshot.projects[0], user = snapshot.users[0];
   const original = await (await request.get(`/api/projects/${project.id}/workflow`)).json() as ProjectWorkflow;
   try {
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const settings = page.getByRole('region', { name: '프로젝트 워크플로 설정' });
     const name = settings.getByLabel('상태 1 이름', { exact: true });
     await expect(name).toBeEnabled();
@@ -115,16 +122,22 @@ test('작업공간 새로고침은 깨끗한 설정을 갱신하고 작성 중�
     const updated = await first.json() as ProjectWorkflow;
     const editEmail = page.locator('.team-row').filter({ hasText: user.name }).getByRole('button', { name: '이메일 변경', exact: true });
     const emailDialog = page.getByRole('dialog', { name: '팀원 이메일 변경' });
+    await settingsSection(page, '일반').click();
     await editEmail.click();
     await emailDialog.getByLabel('새 이메일').fill(`workflow-${Date.now()}@example.test`);
     await emailDialog.getByRole('button', { name: '이메일 저장' }).click();
+    await expect(emailDialog).toHaveCount(0);
+    await settingsSection(page, '업무 구성').click();
     await expect(name).toHaveValue('새로고침으로 반영된 이름');
     await name.fill('새로고침에도 유지할 작성 내용');
     const second = await request.patch(`/api/projects/${project.id}/workflow`, { data: { ...updated, expectedVersion: updated.version, statuses: updated.statuses.map((status, index) => index === 0 ? { ...status, label: '동시에 바뀐 서버 이름' } : status) } });
     expect(second.ok()).toBeTruthy();
+    await settingsSection(page, '일반').click();
     await editEmail.click();
     await emailDialog.getByLabel('새 이메일').fill(user.email);
     await emailDialog.getByRole('button', { name: '이메일 저장' }).click();
+    await expect(emailDialog).toHaveCount(0);
+    await settingsSection(page, '업무 구성').click();
     await expect(settings.getByRole('alert')).toContainText('서버 워크플로가 버전');
     await expect(name).toHaveValue('새로고침에도 유지할 작성 내용');
   } finally {

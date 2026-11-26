@@ -1,10 +1,10 @@
 .doc-label-list {
   margin: 10px 0;
   overflow: hidden;
-  border: 1px solid #dfe6f2;
-  border-radius: 9px;
-  background: #fff;
-  color: #30425f;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
 }
 
 .doc-label-list-heading {
@@ -13,27 +13,27 @@
   flex-wrap: wrap;
   gap: 6px 9px;
   padding: 8px 11px;
-  background: #f5f7fc;
+  background: var(--bg-layer-1);
 }
 
 .doc-label-list-heading > strong {
   flex: 1 1 90px;
   min-width: 0;
   overflow-wrap: anywhere;
-  font-size: 13px;
+  font-size: var(--text-base);
 }
 
 .doc-label-list-heading > svg,
 .doc-label-list-row > svg {
   flex-shrink: 0;
-  color: #5576af;
+  color: var(--brand);
 }
 
 .doc-label-list-count,
 .doc-label-list-document-name > small,
 .doc-label-list-footer {
-  color: #526581;
-  font-size: 11px;
+  color: var(--fg-tertiary);
+  font-size: var(--text-xs);
 }
 
 .doc-label-list-actions,
@@ -55,7 +55,7 @@
 }
 
 .doc-label-list-rows > li {
-  border-top: 1px solid #e8edf5;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .doc-label-list-row {
@@ -73,7 +73,7 @@
 }
 
 button.doc-label-list-row { cursor: pointer; }
-button.doc-label-list-row:hover { background: #f6f8fd; }
+button.doc-label-list-row:hover { background: var(--bg-layer-1-hover); }
 
 .doc-label-list-row-body {
   display: grid;
@@ -87,7 +87,7 @@ button.doc-label-list-row:hover { background: #f6f8fd; }
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0 7px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.4;
 }
 
@@ -105,10 +105,10 @@ button.doc-label-list-row:hover { background: #f6f8fd; }
   gap: 4px;
   max-width: 100%;
   padding: 2px 6px;
-  border-radius: 5px;
-  background: #edf2fc;
-  color: #405780;
-  font-size: 11px;
+  border-radius: var(--radius-sm);
+  background: var(--brand-subtle);
+  color: var(--brand-fg);
+  font-size: var(--text-xs);
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
@@ -123,25 +123,25 @@ button.doc-label-list-row:hover { background: #f6f8fd; }
   height: 24px;
   padding: 0;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: inherit;
   cursor: pointer;
 }
 
-.doc-label-list-chips button:hover { background: #dce7fb; }
+.doc-label-list-chips button:hover { background: var(--brand-subtle-hover); }
 
 .doc-label-list .doc-label-list-message,
 .doc-label-list .doc-label-list-error {
   margin: 0;
   line-height: 1.5;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .doc-label-list .doc-label-list-message,
 .doc-label-list-footer {
   padding: 8px 11px;
-  border-top: 1px solid #e8edf5;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .doc-label-list-footer {
@@ -156,7 +156,7 @@ button.doc-label-list-row:hover { background: #f6f8fd; }
   display: grid;
   gap: 10px;
   padding: 11px;
-  border-block: 1px solid #e8edf5;
+  border-block: 1px solid var(--border-subtle);
 }
 
 .doc-label-list-filter-labels {
@@ -190,8 +190,8 @@ button.doc-label-list-row:hover { background: #f6f8fd; }
 
 .doc-label-list-settings label {
   min-width: 0;
-  color: #405372;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .doc-label-list-fields label,
@@ -206,10 +206,10 @@ button.doc-label-list-row:hover { background: #f6f8fd; }
   min-width: 0;
   min-height: 34px;
   padding: 5px 7px;
-  border: 1px solid #d7e0f0;
-  border-radius: 6px;
-  background: #fff;
-  color: #30425f;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
   font: inherit;
 }
 
@@ -227,12 +227,12 @@ button.doc-label-list-row:hover { background: #f6f8fd; }
   gap: 4px;
 }
 
-.doc-label-list-checkboxes input { accent-color: #4168aa; }
+.doc-label-list-checkboxes input { accent-color: var(--brand); }
 .doc-label-list-settings-actions { justify-content: flex-end; }
-.doc-label-list .doc-label-list-error { color: #9c3633; }
+.doc-label-list .doc-label-list-error { color: var(--danger-fg); }
 
 .doc-label-list :is(button, input, select):focus-visible {
-  outline: 2px solid #5274b5;
+  outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
 

@@ -11,8 +11,8 @@
 }
 
 .issue-view-sort-bar > span {
-  color: var(--muted-foreground);
-  font-size: .8rem;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 
@@ -20,8 +20,8 @@
   width: min(100%, 520px);
   margin: 6px 0;
   padding: 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
 }
 
 .issue-view-sort-panel ol {

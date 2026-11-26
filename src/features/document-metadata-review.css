@@ -3,10 +3,10 @@
   gap: 10px;
   min-width: 0;
   padding: 12px 18px;
-  border-bottom: 1px solid #e8edf7;
-  background: #f8faff;
-  color: #42526b;
-  font-size: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-layer-1);
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
   line-height: 1.5;
 }
 
@@ -24,8 +24,8 @@
 .document-metadata-review legend {
   padding: 0;
   margin-bottom: 4px;
-  color: #283951;
-  font-weight: 650;
+  color: var(--fg-primary);
+  font-weight: var(--font-weight-semibold);
 }
 
 .document-metadata-choices {
@@ -41,16 +41,16 @@
   gap: 8px;
   min-height: 44px;
   padding: 7px 9px;
-  border: 1px solid #dae4f4;
-  border-radius: 6px;
-  background: #fff;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-1);
   cursor: pointer;
   overflow-wrap: anywhere;
 }
 
 .document-metadata-choice:has(input:checked) {
-  border-color: #5574bd;
-  background: #eef3ff;
+  border-color: var(--brand);
+  background: var(--bg-selected);
 }
 
 .document-metadata-choice:has(input:disabled) {
@@ -62,14 +62,14 @@
 }
 
 .document-metadata-choice input:focus-visible {
-  outline: 2px solid #5273b9;
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
 .document-metadata-choice strong,
 .document-metadata-choice small {
   display: block;
-  color: #344966;
+  color: var(--fg-primary);
 }
 
 .document-metadata-review .document-metadata-review-submit {

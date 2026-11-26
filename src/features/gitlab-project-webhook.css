@@ -2,13 +2,13 @@
   grid-column: 1 / -1;
   min-width: 0;
   padding: 20px;
-  color: #375649;
-  font-size: 14px;
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
   line-height: 1.6;
 }
 
 .gitlab-project-webhook h2 { margin: 0 0 8px; }
-.gitlab-project-webhook h3 { margin: 0; font-size: 14px; color: #274c3c; }
+.gitlab-project-webhook h3 { margin: 0; font-size: var(--text-md); color: var(--fg-primary); }
 .gitlab-project-webhook p { margin: 4px 0; overflow-wrap: anywhere; }
 
 .gitlab-project-webhook-address,
@@ -26,9 +26,9 @@
   gap: 4px;
   min-width: 0;
   margin: 0;
-  color: #2d5040;
-  font-size: 13px;
-  font-weight: 600;
+  color: var(--fg-primary);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-semibold);
 }
 
 .gitlab-project-webhook .field {
@@ -40,17 +40,17 @@
 
 .gitlab-project-webhook .btn { flex-shrink: 0; min-height: 38px; }
 .gitlab-project-webhook-address input { font-family: ui-monospace, monospace; }
-.gitlab-project-webhook .gitlab-project-webhook-note { color: #506f61; font-size: 13px; }
+.gitlab-project-webhook .gitlab-project-webhook-note { color: var(--fg-tertiary); font-size: var(--text-sm); }
 
 .gitlab-project-webhook-result {
   margin-top: 12px;
   padding: 10px 12px;
-  border: 1px solid #dae8e1;
-  border-radius: 6px;
-  background: #f9fbfa;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-layer-1);
 }
 
-.gitlab-project-webhook-result > p:first-child { font-weight: 650; }
+.gitlab-project-webhook-result > p:first-child { font-weight: var(--font-weight-semibold); }
 
 .gitlab-project-webhook-manual { margin-top: 12px; }
 .gitlab-project-webhook-manual ol { margin: 4px 0 0; padding-inline-start: 22px; list-style: decimal; }
@@ -65,19 +65,19 @@
   list-style: none;
 }
 
-.gitlab-project-webhook-hooks > li { padding: 8px; border: 1px solid #dae8e1; border-radius: 5px; background: #fff; }
+.gitlab-project-webhook-hooks > li { padding: 8px; border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-surface-1); }
 .gitlab-project-webhook-events { display: flex; flex-wrap: wrap; gap: 4px 8px; margin: 6px 0; padding: 0; list-style: none; }
-.gitlab-project-webhook-events > li { padding: 1px 5px; border-radius: 4px; color: #285e49; background: #e8f3eb; font-size: 12px; }
-.gitlab-project-webhook-events > li[data-enabled="false"] { color: #75472f; background: #fff0e2; }
+.gitlab-project-webhook-events > li { padding: 1px 5px; border-radius: var(--radius-sm); color: var(--success-fg); background: var(--success-subtle); font-size: var(--text-sm); }
+.gitlab-project-webhook-events > li[data-enabled="false"] { color: var(--warning-fg); background: var(--warning-subtle); }
 
 .gitlab-project-webhook-history-actions { margin-top: 8px; }
 .gitlab-project-webhook-history {
   margin-top: 10px;
   padding-top: 8px;
-  border-top: 1px solid #dae8e1;
-  font-size: 13px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-base);
 }
-.gitlab-project-webhook-history h4 { margin: 0; color: #274c3c; font-size: 13px; }
+.gitlab-project-webhook-history h4 { margin: 0; color: var(--fg-primary); font-size: var(--text-base); }
 .gitlab-project-webhook-attempts {
   max-height: 18rem;
   overflow-y: auto;
@@ -85,15 +85,15 @@
   padding: 0;
   margin: 6px 0 0;
 }
-.gitlab-project-webhook-attempts > li { padding: 5px 4px; border-bottom: 1px solid #dae8e1; }
+.gitlab-project-webhook-attempts > li { padding: 5px 4px; border-bottom: 1px solid var(--border-subtle); }
 .gitlab-project-webhook-attempts > li > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
-.gitlab-project-webhook-attempts small { color: #506f61; font-size: 12px; }
-.gitlab-project-webhook-http { padding: 0 4px; border-radius: 3px; background: #fff0e2; color: #75472f; font-size: 12px; }
-.gitlab-project-webhook-http[data-ok="true"] { background: #e8f3eb; color: #285e49; }
+.gitlab-project-webhook-attempts small { color: var(--fg-tertiary); font-size: var(--text-sm); }
+.gitlab-project-webhook-http { padding: 0 4px; border-radius: var(--radius-xs); background: var(--warning-subtle); color: var(--warning-fg); font-size: var(--text-sm); }
+.gitlab-project-webhook-http[data-ok="true"] { background: var(--success-subtle); color: var(--success-fg); }
 .gitlab-project-webhook-message-receipt { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
-.gitlab-project-webhook-message-receipt strong { font-size: 12px; color: #506f61; }
-.gitlab-project-webhook-message-receipt strong[data-receipt-status="matched"] { color: #285e49; }
-.gitlab-project-webhook-message-receipt strong[data-receipt-status="unconfirmed"] { color: #75472f; }
+.gitlab-project-webhook-message-receipt strong { font-size: var(--text-sm); color: var(--fg-tertiary); }
+.gitlab-project-webhook-message-receipt strong[data-receipt-status="matched"] { color: var(--success-fg); }
+.gitlab-project-webhook-message-receipt strong[data-receipt-status="unconfirmed"] { color: var(--warning-fg); }
 .gitlab-project-webhook-local-receipt { margin-top: 8px; }
 
 @media (max-width: 600px) {

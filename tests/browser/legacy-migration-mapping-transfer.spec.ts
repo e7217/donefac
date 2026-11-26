@@ -49,7 +49,7 @@ test('360px에서 내보낸 이관 매핑을 다시 분석한 원본에 불러�
   const original = await stage(`mapping-original-${token}.csv`);
   const pendingCleanup = new Map([[original.id, original]]);
   try {
-    await page.goto(`/#/${baseline.projects[0].id}/settings`);
+    await page.goto(`/#/${baseline.projects[0].id}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     const projectKey = settings.getByLabel(`새 프로젝트 키 ${sourceName}`, { exact: true });
     const projectName = settings.getByLabel(`새 프로젝트 이름 ${sourceName}`, { exact: true });

@@ -83,7 +83,7 @@ test('360px 이관 전 목록과 원본을 검토하고 확인한 내용 그대�
       ]));
     staged.push(wiki);
     const previous = await workspace();
-    await page.goto(`/#/${previous.projects[0].id}/settings`);
+    await page.goto(`/#/${previous.projects[0].id}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     for (const source of staged) await settings.getByLabel(`이관 패키지 ${source.filename}`, { exact: true }).check();
     await settings.getByRole('button', { name: '선택 패키지 매핑 불러오기', exact: true }).click();

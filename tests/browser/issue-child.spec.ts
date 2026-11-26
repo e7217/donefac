@@ -119,8 +119,7 @@ test('360px에서 상위 업무의 초안을 유지한 채 하위 업무를 만�
     await expect(parentDialog).toBeVisible();
     await parentDialog.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
 
-    await page.getByRole('button', { name: '메뉴 열기', exact: true }).click();
-    await page.getByRole('button', { name: '간트 · 일정', exact: true }).click();
+    await page.getByRole('navigation', { name: '업무 화면', exact: true }).getByRole('button', { name: '간트', exact: true }).click();
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });
     await expect(chart.locator(`[data-issue-id="${parent.id}"]`)).toContainText('하위 업무 1개');
     await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(childTitle);

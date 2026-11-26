@@ -133,7 +133,8 @@ test('360px 전체 프로젝트 보드에서 실제 상태를 선택하고 티�
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
     await page.goto(`/#/${f.first.id}/overview`);
     await button(page, '메뉴 열기').click();
-    await button(page, name).click();
+    await button(page.getByRole('navigation', { name: '워크스페이스', exact: true }), '팀 개요').click();
+    await button(page.getByRole('navigation', { name: '팀 개요 화면', exact: true }), name).click();
     await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
     await search(page).fill(f.prefix);
     await expect(inside(page, 'review', west)).toBeVisible();

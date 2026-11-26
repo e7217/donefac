@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Copy, KeyRound, Loader2, Plus, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import type { ApiKeyCreated, ApiKeyIssuanceInput, ApiKeyIssuanceResult, ApiKeyRecord, FeatureProps, Project } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isSettingsSectionNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import './api-keys.css';
 
@@ -127,6 +127,7 @@ function ActorApiKeysSettings({ actorId, projects, restoreGeneration, refreshWor
       if (issuanceRef.current && !issuancePersisted.current) {
         event.preventDefault(); notify('이 화면에서 API 키 발급 결과를 확인해 주세요.', 'error'); return;
       }
+      if (isSettingsSectionNavigation(event)) return;
       if (createdRef.current) {
         if (!window.confirm('발급한 API 키를 복사했나요? 이동하면 전체 값을 다시 확인할 수 없습니다.')) event.preventDefault();
         else afterAcceptedNavigation(event, () => { createdRef.current = null; setCreated(null); setCopied(false); });

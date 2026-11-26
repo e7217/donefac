@@ -163,6 +163,9 @@ test('문서 작업자 전환은 초안을 분리하고 가져오기 승인 뒤�
 
   page.once('dialog', dialog => dialog.accept());
   await page.getByRole('button', { name: '워크스페이스 설정', exact: true }).click();
+  // Backup import lives in the '데이터' settings section.
+  await page.getByRole('navigation', { name: '설정 섹션' }).getByRole('button', { name: '데이터', exact: true }).click();
+  await expect(page).toHaveURL(/\/settings\?section=data$/);
   const draftKey = `teamspace:document-draft:${originalActor}:${document.id}`;
   await expect.poll(() => page.evaluate(key => Boolean(localStorage.getItem(key)), draftKey)).toBe(true);
   await page.evaluate(() => localStorage.setItem('navigation-test-marker', 'keep'));

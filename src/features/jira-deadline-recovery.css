@@ -1,19 +1,19 @@
 .jira-deadline-recovery {
   margin-top: 1.5rem;
   padding: 1rem;
-  border: 1px solid #d8e5df;
-  border-radius: .5rem;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
 }
 
 .jira-deadline-recovery h3 {
   margin: 0;
-  font-size: 1rem;
+  font-size: var(--text-md);
 }
 
 .jira-deadline-recovery p,
 .jira-deadline-recovery dl {
   margin: .6rem 0;
-  font-size: .875rem;
+  font-size: var(--text-base);
 }
 
 .jira-deadline-recovery dl {
@@ -23,7 +23,7 @@
 }
 
 .jira-deadline-recovery dt {
-  color: #536f61;
+  color: var(--fg-secondary);
 }
 
 .jira-deadline-recovery dd {
@@ -33,7 +33,7 @@
 }
 
 .jira-deadline-confirm {
-  border-top: 1px solid #d8e5df;
+  border-top: 1px solid var(--border-subtle);
   margin-top: .75rem;
   padding-top: .35rem;
 }

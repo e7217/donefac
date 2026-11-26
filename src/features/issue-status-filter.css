@@ -1,10 +1,10 @@
 .issue-status-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
-.issue-status-filters > .btn { font-size: 11px; min-height: 35px; }
+.issue-status-filters > .btn { font-size: var(--text-xs); min-height: 35px; }
 .issue-status-filters.is-expanded { flex-basis: 100%; }
 .issue-status-filters select { max-width: min(180px, 52vw); }
-.issue-status-choices { width: 100%; min-width: 0; box-sizing: border-box; margin: 0; padding: 8px 12px 10px; border: 1px solid var(--issue-line); border-radius: 6px; }
-.issue-status-choices legend { font-size: 12px; color: #344d40; }
-.issue-status-choices p { margin: 0 0 8px; font-size: 11px; color: #64756d; }
+.issue-status-choices { width: 100%; min-width: 0; box-sizing: border-box; margin: 0; padding: 8px 12px 10px; border: 1px solid var(--issue-line); border-radius: var(--radius-md); }
+.issue-status-choices legend { font-size: var(--text-sm); color: var(--fg-primary); }
+.issue-status-choices p { margin: 0 0 8px; font-size: var(--text-xs); color: var(--fg-tertiary); }
 .issue-status-choices > div { display: flex; flex-wrap: wrap; gap: 4px 16px; max-block-size: min(260px, 40vh); overflow: auto; }
-.issue-status-choices label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; min-height: 28px; font-size: 12px; overflow-wrap: anywhere; color: #344d40; }
+.issue-status-choices label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; min-height: 28px; font-size: var(--text-sm); overflow-wrap: anywhere; color: var(--fg-primary); }
 .issue-status-choices input { flex: none; margin: 0; }

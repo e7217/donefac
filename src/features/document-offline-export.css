@@ -5,15 +5,15 @@
   margin: auto;
   overflow: auto;
   padding: 22px;
-  border: 1px solid #e7ebf2;
-  border-radius: 14px;
-  color: #25354c;
-  background: #fff;
-  box-shadow: 0 20px 70px #15254533;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-3xl);
+  color: var(--fg-primary);
+  background: var(--bg-surface-1);
+  box-shadow: var(--shadow-lg);
 }
 
 .document-offline-export::backdrop {
-  background: #15254566;
+  background: var(--bg-backdrop);
 }
 
 .document-offline-export-heading {
@@ -25,7 +25,7 @@
 
 .document-offline-export-heading h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: var(--text-2xl);
   line-height: 1.4;
 }
 
@@ -40,8 +40,8 @@
 
 .document-offline-export p {
   margin: 5px 0 0;
-  color: #54647a;
-  font-size: 13px;
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
@@ -55,8 +55,8 @@
 .document-offline-export-form label {
   display: block;
   margin-bottom: 4px;
-  font-size: 13px;
-  font-weight: 650;
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-semibold);
 }
 
 .document-offline-export-form .field {
@@ -69,16 +69,16 @@
 .document-offline-export .document-offline-export-status {
   margin: 0;
   padding: 8px 10px;
-  border: 1px solid #dce6df;
-  border-radius: 7px;
-  background: #f0f7f3;
-  color: #365849;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-layer-1);
+  color: var(--fg-secondary);
 }
 
 .document-offline-export .document-offline-export-error {
-  border-color: #efcbcb;
-  background: #fff5f5;
-  color: #9a3240;
+  border-color: var(--danger-border);
+  background: var(--danger-subtle);
+  color: var(--danger-fg);
 }
 
 .document-offline-export-actions {
@@ -97,7 +97,7 @@
   }
 
   .document-offline-export-heading h2 {
-    font-size: 18px;
+    font-size: var(--text-xl);
   }
 
   .document-offline-export .btn,
@@ -106,7 +106,7 @@
   }
 
   .document-offline-export .field {
-    font-size: 1rem;
+    font-size: var(--text-lg);
   }
 
   .document-offline-export-heading .btn {

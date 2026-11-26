@@ -625,7 +625,8 @@ test('같은 작업자의 저장된 탭을 떠나도 다른 탭의 미전송 본
     await append(editing, ` ${pending}`);
     await expect(editing.locator('.docs-collaboration-state')).toHaveText('변경 전송 중');
     expect((await canonical(fixture)).plainText).not.toContain(pending);
-    await leaving.getByRole('button', { name: '간트 · 일정', exact: true }).click();
+    await leaving.locator('.project-navigation').getByRole('button', { name: /^업무(?: [\d,]+)?$/u }).click();
+    await leaving.getByRole('navigation', { name: '업무 화면', exact: true }).getByRole('button', { name: '간트', exact: true }).click();
     await expect(leaving.locator('.docs-live-prose')).toHaveCount(0);
     await expect(editing.locator('.docs-live-prose')).toContainText(pending);
     await editing.close();

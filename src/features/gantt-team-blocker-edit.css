@@ -11,7 +11,7 @@
 }
 
 .gantt-team-blocker-edit::backdrop {
-  background: #17352e66;
+  background: var(--bg-backdrop);
 }
 
 .gantt-team-blocker-edit > header svg {
@@ -28,21 +28,21 @@
 .gantt-team-blocker-edit-preview > li {
   min-width: 0;
   padding: 0.65rem 0.75rem;
-  border: 1px solid #dce7e1;
-  border-radius: 0.45rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   overflow-wrap: anywhere;
 }
 
 .gantt-team-blocker-edit-row > p {
   margin: 0.25rem 0;
-  font-size: 0.875rem;
+  font-size: var(--text-base);
 }
 
 .gantt-team-blocker-edit dl {
   display: grid;
   gap: 0.2rem;
   margin: 0.4rem 0 0;
-  font-size: 0.875rem;
+  font-size: var(--text-base);
 }
 
 .gantt-team-blocker-edit dl > div {
@@ -71,7 +71,7 @@
 }
 
 .gantt-team-blocker-date-choices input {
-  accent-color: #177c72;
+  accent-color: var(--brand);
 }
 
 .gantt-team-blocker-edit .gantt-team-blocker-include {
@@ -83,7 +83,7 @@
 
 .gantt-team-blocker-include input {
   margin-top: 0.28em;
-  accent-color: #177c72;
+  accent-color: var(--brand);
 }
 
 .gantt-team-blocker-edit-actions {

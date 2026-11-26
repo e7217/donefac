@@ -3,11 +3,11 @@
 .docs-table-paste-body > p { margin: 0; }
 .docs-table-paste-body textarea { width: 100%; min-width: 0; resize: vertical; }
 .docs-table-paste-header { display: flex; align-items: center; gap: .45rem; }
-.docs-table-paste-preview { max-height: 16rem; overflow: auto; border: 1px solid var(--border, #e2e8f0); border-radius: .4rem; }
+.docs-table-paste-preview { max-height: 16rem; overflow: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
 .docs-table-paste-preview:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
-.docs-table-paste-preview table { min-width: 100%; border-collapse: collapse; font-size: .85rem; }
+.docs-table-paste-preview table { min-width: 100%; border-collapse: collapse; font-size: var(--text-base); }
 .docs-table-paste-preview :is(th,td) {
-  border: 1px solid var(--border, #e2e8f0);
+  border: 1px solid var(--border-subtle);
   padding: .35rem .5rem;
   min-width: 4rem;
   max-width: 14rem;
@@ -16,6 +16,6 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.docs-table-paste-preview th { background: var(--muted, #f1f5f9); }
+.docs-table-paste-preview th { background: var(--bg-layer-1); }
 .docs-table-paste-footer { justify-content: flex-end; gap: .5rem; flex-wrap: wrap; }
 .docs-table-paste-position { display: inline-flex; align-items: center; flex-wrap: wrap; gap: .4rem; }

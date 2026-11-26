@@ -11,7 +11,7 @@ const suffix = () => randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase();
 async function upload(request: APIRequestContext, filename: string, content: Buffer, instanceKey: string) { const response = await request.post(`/api/legacy-import/packages?${new URLSearchParams({ filename, instanceKey })}`, { headers: { 'Content-Type': 'application/octet-stream' }, data: content }); expect(response.status(), await response.text()).toBe(201); return await response.json() as LegacyPackageSummary; }
 async function open(page: Page, request: APIRequestContext) {
   const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
-  await page.goto(`/#/${workspace.projects[0].id}/settings`);
+  await page.goto(`/#/${workspace.projects[0].id}/settings?section=migration`);
   const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
   await expect(settings).toBeVisible({ timeout: 30_000 });
   return { settings, workspace };
@@ -1791,7 +1791,7 @@ test('360px 이관 영수증에서 업무·문서 연결의 정확한 누락을 
     if (!link) throw new Error('이관한 업무·문서 연결을 찾을 수 없습니다.');
     expect(receipt.resourceLinkProof).toEqual([{ id: link.id, issueId: issue.id, documentId: document.id }]);
 
-    await page.goto(`/#/${issue.projectId}/settings`);
+    await page.goto(`/#/${issue.projectId}/settings?section=migration`);
     const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     const receipts = settings.getByRole('region', { name: '완료한 이관 영수증', exact: true });
     await receipts.getByRole('button').filter({ hasText: receipt.id }).click();
@@ -3508,6 +3508,7 @@ test('별도 Jira REST 댓글과 작업 시간 페이지를 이관하고 티켓�
 
     await drawer.getByRole('button', {name:'업무 상세 닫기'}).click();
     await page.getByRole('button', {name:'메뉴 열기',exact:true}).click();
+    await page.getByRole('button', {name:'더보기',exact:true}).click();
     await page.getByRole('button', {name:'보고서',exact:true}).click();
     await page.getByRole('tab', {name:'작업 시간',exact:true}).click();
     await page.getByLabel('작업 시간 시작일', {exact:true}).fill(workDate);

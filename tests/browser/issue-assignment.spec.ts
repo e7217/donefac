@@ -15,7 +15,7 @@ test('프로젝트에서 배정 규칙을 미리 보고 상태만 저장해 담�
 
   try {
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const settings = page.getByRole('region', { name: '상태별 담당자 자동 배정', exact: true });
     await settings.getByRole('button', { name: '배정 규칙 만들기', exact: true }).click();
     const editor = settings.getByRole('region', { name: '담당자 배정 규칙 편집', exact: true });
@@ -64,7 +64,7 @@ test('프로젝트에서 배정 규칙을 미리 보고 상태만 저장해 담�
     expect(changed).toMatchObject({ assigneeId: target.id, status: 'review', version: issue.version + 1 });
     await issuePanel.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
 
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const history = settings.getByRole('region', { name: '담당자 배정 실행 기록', exact: true });
     const entry = history.getByRole('row').filter({ hasText: issue.key });
     await expect(entry).toHaveCount(1);

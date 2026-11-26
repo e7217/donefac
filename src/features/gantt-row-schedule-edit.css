@@ -6,20 +6,20 @@
 
 .gantt-row-schedule-edit > header p {
   margin: 0.3rem 0 0;
-  color: #526d5d;
-  font-size: 0.875rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
 }
 
 .gantt-row-schedule-edit .gantt-row-edit-fields {
   margin-bottom: 0.85rem;
   padding-top: 0.5rem;
-  border-top: 1px solid #dce7e1;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .gantt-row-edit-fields legend {
   padding-inline-end: 0.55rem;
-  font-size: 0.95rem;
-  font-weight: 650;
+  font-size: var(--text-md);
+  font-weight: var(--font-weight-semibold);
 }
 
 .gantt-row-edit-columns {
@@ -65,8 +65,8 @@
   flex-wrap: wrap;
   gap: 0.2rem 0.4rem;
   margin-top: 0.3rem;
-  color: #74442c;
-  font-size: 0.8rem;
+  color: var(--warning-fg);
+  font-size: var(--text-sm);
 }
 
 .gantt-row-edit-date-conflict .btn {
@@ -81,15 +81,15 @@
 .gantt-row-edit-link-diff {
   margin: 0.5rem 0;
   padding: 0.55rem 0.7rem;
-  border: 1px solid #dce7e1;
-  border-radius: 7px;
-  background: #f5f9f6;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-layer-1);
 }
 
 .gantt-row-edit-existing summary {
   cursor: pointer;
-  color: #526d5d;
-  font-size: 0.875rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
 }
 
 .gantt-row-edit-existing ul,
@@ -104,7 +104,7 @@
 .gantt-row-edit-existing li {
   display: grid;
   margin: 0.35rem 0;
-  font-size: 0.875rem;
+  font-size: var(--text-base);
 }
 
 .gantt-row-edit-drafts[data-multiple='true'] {
@@ -115,8 +115,8 @@
 .gantt-row-edit-drafts[data-multiple='true'] > .gantt-row-edit-draft {
   min-width: 0;
   padding: 0.55rem 0.65rem;
-  border: 1px solid #dce7e1;
-  border-radius: 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
 }
 
 .gantt-row-edit-draft-heading {
@@ -125,14 +125,14 @@
   justify-content: space-between;
   gap: 0.4rem;
   margin-bottom: 0.25rem;
-  color: #38594c;
-  font-size: 0.875rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
 }
 
 .gantt-row-edit-append { margin-top: 0.55rem; }
 
 .gantt-row-edit-cascade {
-  border-top: 1px solid #dce7e1;
+  border-top: 1px solid var(--border-subtle);
   margin-top: 1rem;
 }
 
@@ -149,7 +149,7 @@
 .gantt-row-edit-cascade input,
 .gantt-row-edit-date-toggle input {
   flex: none;
-  accent-color: #177c72;
+  accent-color: var(--brand);
 }
 
 .gantt-row-edit-cascade > p {
@@ -159,15 +159,15 @@
 .gantt-row-edit-existing li span,
 .gantt-row-edit-diff dl dt,
 .gantt-row-schedule-edit .gantt-row-edit-hint {
-  color: #526d5d;
-  font-size: 0.8125rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .gantt-row-edit-results:not(:empty) {
   margin: 0 0 0.65rem;
   padding: 0.25rem;
-  border: 1px solid #dce7e1;
-  border-radius: 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
 }
 
 .gantt-row-edit-results .btn {
@@ -189,22 +189,22 @@
 .gantt-row-edit-suggestion,
 .gantt-row-edit-selection {
   justify-content: space-between;
-  font-size: 0.875rem;
+  font-size: var(--text-base);
 }
 
 .gantt-missing-date-suggestion {
   margin-block: .5rem;
   padding: .55rem .7rem;
-  border: 1px solid #dce7e1;
-  border-radius: 7px;
-  background: #f5f9f6;
-  color: #435d51;
-  font-size: .875rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-layer-1);
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
 }
 
 .gantt-missing-date-suggestion h3 {
   margin: 0 0 .35rem;
-  font-size: .875rem;
+  font-size: var(--text-base);
 }
 
 .gantt-missing-date-suggestion-controls {
@@ -237,7 +237,7 @@
 }
 
 .gantt-row-edit-review {
-  border-top: 1px solid #dce7e1;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .gantt-row-edit-review section > ul {
@@ -266,13 +266,13 @@
 
 .gantt-row-edit-diff dd {
   margin: 0;
-  font-size: 0.875rem;
+  font-size: var(--text-base);
 }
 
 .gantt-row-edit-link-diff h4,
 .gantt-row-edit-link-diff p {
   margin: 0;
-  font-size: 0.875rem;
+  font-size: var(--text-base);
 }
 
 @media (max-width: 480px) {
@@ -282,7 +282,7 @@
   }
 
   .gantt-row-schedule-edit .field {
-    font-size: 1rem;
+    font-size: var(--text-lg);
   }
 
   .gantt-row-edit-date .btn {

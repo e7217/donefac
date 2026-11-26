@@ -1,7 +1,7 @@
 .cycle-board {
   min-width: 0;
   padding: 30px 28px 44px;
-  color: #294337;
+  color: var(--fg-primary);
 }
 
 .cycle-board-heading,
@@ -16,8 +16,8 @@
 
 .cycle-board-heading h1 {
   margin: 0;
-  color: var(--ink);
-  font-size: 1.65rem;
+  color: var(--fg-primary);
+  font-size: var(--text-3xl);
   line-height: 1.3;
 }
 
@@ -25,8 +25,8 @@
 .cycle-board-lane-header p,
 .cycle-board-dialog-header p {
   margin: 4px 0 0;
-  color: #526b5f;
-  font-size: 0.8125rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 
@@ -69,8 +69,8 @@
 .cycle-board-dialog label {
   display: block;
   margin-bottom: 4px;
-  font-size: 0.8125rem;
-  font-weight: 650;
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-semibold);
 }
 
 .cycle-board-toolbar .field,
@@ -90,7 +90,7 @@
   inset-block-start: 50%;
   inset-inline-start: 10px;
   transform: translateY(-50%);
-  color: #526b5f;
+  color: var(--fg-secondary);
   pointer-events: none;
 }
 
@@ -103,15 +103,15 @@
   flex-wrap: wrap;
   padding: 10px 12px;
   margin-bottom: 14px;
-  border: 1px solid #d9e8de;
-  border-radius: 8px;
-  background: #f0f7f3;
+  border: 1px solid var(--brand-border);
+  border-radius: var(--radius-lg);
+  background: var(--brand-subtle);
 }
 
 .cycle-board-feedback[data-error='true'] {
-  border-color: #ecd0cd;
-  background: #fff4f2;
-  color: #8a4341;
+  border-color: var(--danger-border);
+  background: var(--danger-subtle);
+  color: var(--danger-fg);
 }
 
 .cycle-board-feedback p {
@@ -119,7 +119,7 @@
   align-items: center;
   gap: 8px;
   margin: 0;
-  font-size: 0.875rem;
+  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 
@@ -133,13 +133,13 @@
 .cycle-board-lane {
   min-width: 0;
   padding: 12px;
-  border: 1px solid #dce9e1;
-  border-radius: 10px;
-  background: #f7faf8;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xl);
+  background: var(--bg-surface-2);
 }
 
 .cycle-board-lane[data-drop-lane='true'] {
-  border-color: #5b9b85;
+  border-color: var(--brand);
 }
 
 .cycle-board-lane-header {
@@ -161,18 +161,18 @@
 
 .cycle-board-lane-header h2 {
   margin: 0;
-  color: #2a483b;
-  font-size: 1.05rem;
+  color: var(--fg-primary);
+  font-size: var(--text-lg);
   overflow-wrap: anywhere;
 }
 
 .cycle-board-empty {
   margin: 8px 0 2px;
   padding: 12px;
-  border: 1px dashed #dce9e1;
-  border-radius: 8px;
-  color: #526b5f;
-  font-size: 0.875rem;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-lg);
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
 }
 
 .cycle-board-rows {
@@ -186,22 +186,22 @@
 .cycle-board-row {
   align-items: center;
   padding: 8px;
-  border: 1px solid #e2ebe5;
-  border-radius: 8px;
-  background: #fff;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-1);
 }
 
 .cycle-board-row[data-drop-position='before'] {
-  box-shadow: 0 -3px #438a74;
+  box-shadow: 0 -3px var(--brand);
 }
 
 .cycle-board-row[data-drop-position='after'] {
-  box-shadow: 0 3px #438a74;
+  box-shadow: 0 3px var(--brand);
 }
 
 .cycle-board-row[data-bulk-selected='true'] {
-  border-color: #9dc6b3;
-  background: #f1f9f5;
+  border-color: var(--brand-border);
+  background: var(--bg-selected);
 }
 
 .cycle-board-row-select {
@@ -221,17 +221,17 @@
   padding: 3px 2px;
   border: 0;
   background: transparent;
-  border-radius: 3px;
-  color: #315e4d;
-  font-size: 0.875rem;
+  border-radius: var(--radius-xs);
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
   text-align: start;
   overflow-wrap: anywhere;
   cursor: pointer;
 }
 
 .cycle-board-issue strong {
-  color: #263c33;
-  font-weight: 650;
+  color: var(--fg-primary);
+  font-weight: var(--font-weight-semibold);
 }
 
 .cycle-board-issue:hover strong {
@@ -250,8 +250,8 @@
 .cycle-board-row-meta,
 .cycle-board-row-schedule {
   margin-top: 3px;
-  color: #526b5f;
-  font-size: 0.75rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .cycle-board-row-meta > span {
@@ -264,8 +264,8 @@
 .cycle-board-row-meta .cycle-board-status-action {
   min-height: 30px;
   padding-inline: 6px;
-  border: 1px solid #dce9e1;
-  color: #315e4d;
+  border: 1px solid var(--border-default);
+  color: var(--fg-secondary);
   font-size: inherit;
 }
 
@@ -295,7 +295,7 @@
   min-width: 34px;
   min-height: 36px;
   padding-inline: 6px;
-  font-size: 0.75rem;
+  font-size: var(--text-sm);
 }
 
 .cycle-board-row-actions .btn[aria-disabled='true'] {
@@ -309,14 +309,14 @@
   max-height: calc(100dvh - 26px);
   margin: auto;
   padding: 18px;
-  border: 1px solid #dce9e1;
-  border-radius: 14px;
-  background: #fff;
-  color: #294337;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-3xl);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
 }
 
 .cycle-board-dialog::backdrop {
-  background: #17352e66;
+  background: var(--bg-backdrop);
 }
 
 .cycle-board-dialog-header {
@@ -328,7 +328,7 @@
 
 .cycle-board-dialog-header h2 {
   margin: 0;
-  font-size: 1.2rem;
+  font-size: var(--text-xl);
 }
 
 .cycle-board-dialog-actions {
@@ -349,7 +349,7 @@
   }
 
   .cycle-board-heading h1 {
-    font-size: 1.35rem;
+    font-size: var(--text-2xl);
   }
 
   .cycle-board-heading {
@@ -385,6 +385,6 @@
 
   .cycle-board-dialog .field,
   .cycle-board-toolbar .field {
-    font-size: 1rem;
+    font-size: var(--text-lg); /* 16px keeps iOS from zooming focused inputs */
   }
 }

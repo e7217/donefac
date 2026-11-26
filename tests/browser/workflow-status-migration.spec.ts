@@ -45,7 +45,7 @@ test('360px 워크플로에서 차단 사유를 확인하고 저장된 상태로
     const outside = await issue('이동 범위 밖의 업무', 'todo');
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const settings = page.getByRole('region', { name: '프로젝트 워크플로 설정' });
     const draftName = settings.getByLabel(`상태 ${saved.statuses.length} 이름`, { exact: true });
     await expect(draftName).toBeEnabled({ timeout: 25_000 });

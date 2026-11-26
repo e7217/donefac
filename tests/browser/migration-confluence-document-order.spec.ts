@@ -34,7 +34,7 @@ test('360px 이관 미리보기에서 문서 그룹의 순서를 확인하고 �
   const imported: DocPage[] = [];
   try {
     const initial = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
-    await page.goto(`/#/${initial.projects[0].id}/settings`);
+    await page.goto(`/#/${initial.projects[0].id}/settings?section=migration`);
     const migration = page.getByRole('region', { name: '실제 데이터 이관' });
     await migration.getByLabel(`이관 패키지 ${filename}`, { exact: true }).check();
     await migration.getByRole('button', { name: '선택 패키지 매핑 불러오기' }).click();

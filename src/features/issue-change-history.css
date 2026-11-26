@@ -1,5 +1,5 @@
 .issue-field-history {
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--border-subtle);
   margin-bottom: 18px;
   padding-bottom: 16px;
   overflow-wrap: anywhere;
@@ -20,8 +20,8 @@
 
 .issue-field-history-heading h3,
 .issue-field-history-change h4 {
-  color: #536c54;
-  font-size: 13px;
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
   margin: 0;
 }
 
@@ -32,24 +32,24 @@
 }
 
 .issue-field-history-entries > li {
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border-subtle);
   margin-top: 10px;
   padding-top: 12px;
 }
 
 .issue-field-history-meta {
-  color: #52645a;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .issue-field-history-meta strong {
-  color: #344d40;
+  color: var(--fg-primary);
 }
 
 .issue-field-history-change {
   margin-top: 10px;
-  border-radius: 6px;
-  background: #f8faf6;
+  border-radius: var(--radius-md);
+  background: var(--bg-layer-1);
   padding: 8px 10px;
 }
 
@@ -62,13 +62,13 @@
 
 .issue-field-history-change dt,
 .issue-field-history-change small {
-  color: #52645a;
-  font-size: 11px;
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
 }
 
 .issue-field-history-change dd {
-  color: #344d40;
-  font-size: 12px;
+  color: var(--fg-primary);
+  font-size: var(--text-sm);
   margin: 2px 0 0;
   white-space: pre-wrap;
 }

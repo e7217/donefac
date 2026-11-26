@@ -90,7 +90,7 @@ test('작은 화면에서 메뉴를 열고 프로젝트 화면을 사용할 수 
   await expect(page.getByRole('button',{name:'메뉴 열기',exact:true})).toBeVisible();
   await page.getByRole('button',{name:'메뉴 열기',exact:true}).click();
   await expect(page.locator('.sidebar.is-open')).toBeVisible();
-  await page.locator('.project-navigation button').filter({hasText:'프로젝트 개요'}).click();
+  await page.locator('.project-navigation').getByRole('button',{name:'개요',exact:true}).click();
   await expect(page.locator('.sidebar')).not.toHaveClass(/is-open/);
   expect(await page.locator('body').evaluate(e=>e.scrollWidth)).toBeLessThanOrEqual(392);
 });

@@ -22,8 +22,8 @@
 .issue-schedule-relation {
   display: flex;
   align-items: center;
-  border-bottom: 1px solid #edf1e8;
-  background: #fbfdf9;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-layer-1);
 }
 
 .issue-schedule-relation .issue-related-row {
@@ -33,7 +33,7 @@
 }
 
 .issue-schedule-relation .issue-related-row:hover {
-  background: #eff5ec;
+  background: var(--bg-layer-1-hover);
 }
 
 .issue-schedule-row-actions {
@@ -54,14 +54,14 @@
   flex-direction: column;
   gap: 7px;
   align-self: center;
-  font-size: 11px;
-  color: #5c7467;
+  font-size: var(--text-xs);
+  color: var(--fg-tertiary);
 }
 
 .issue-dependent-context strong {
-  color: #344d40;
-  font-size: 13px;
-  font-weight: 600;
+  color: var(--fg-primary);
+  font-size: var(--text-base);
+  font-weight: var(--font-weight-semibold);
   overflow-wrap: anywhere;
 }
 
@@ -74,7 +74,7 @@
   grid-column: 1 / -1;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--text-base);
 }
 
 .gantt-link-review {
@@ -82,10 +82,10 @@
   gap: 10px;
   margin: 0 20px 18px;
   padding: 14px;
-  border: 1px solid #dae6de;
-  border-radius: 8px;
-  background: #f7faf8;
-  font-size: 13px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-layer-1);
+  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 
@@ -100,8 +100,8 @@
 
 .gantt-link-direction-review dt,
 .gantt-link-review-list small {
-  font-weight: 600;
-  color: #557264;
+  font-weight: var(--font-weight-semibold);
+  color: var(--fg-tertiary);
 }
 
 .gantt-link-review-list {
@@ -115,7 +115,7 @@
   display: grid;
   gap: 3px;
   padding: 8px 3px;
-  border-top: 1px solid #dae6de;
+  border-top: 1px solid var(--border-default);
 }
 
 .gantt-link-review .gantt-link-review-messages {
@@ -123,7 +123,7 @@
 }
 
 .gantt-link-review-warnings {
-  border-radius: 6px;
-  background: #fff8e8;
-  color: #695021;
+  border-radius: var(--radius-md);
+  background: var(--warning-subtle);
+  color: var(--warning-fg);
 }

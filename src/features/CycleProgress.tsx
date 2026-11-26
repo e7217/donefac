@@ -280,6 +280,9 @@ function drawProgressChart(canvas: HTMLCanvasElement, days: Day[], metric: Metri
   const context = canvas.getContext('2d');
   if (!context) return;
   context.scale(density, density);
+  // Canvas cannot resolve var(); read the design tokens from the canvas' computed style.
+  const style = getComputedStyle(canvas);
+  const token = (name: string) => style.getPropertyValue(name).trim() || 'currentColor';
   context.font = '11px system-ui, sans-serif';
   const paddingTop = 14, paddingBottom = 24, right = width - 20;
   const highest = days.reduce((maximum, day) => day.state ? Math.max(maximum, measurement(day.state, 'scope', metric),
@@ -294,13 +297,13 @@ function drawProgressChart(canvas: HTMLCanvasElement, days: Day[], metric: Metri
   const y = (value: number) => bottom - value / ceiling * (bottom - paddingTop);
   for (const value of marks) {
     const point = y(value);
-    context.strokeStyle = '#dce9e1';
+    context.strokeStyle = token('--border-default');
     context.lineWidth = 1;
     context.beginPath();
     context.moveTo(left, point);
     context.lineTo(right, point);
     context.stroke();
-    context.fillStyle = '#526b5f';
+    context.fillStyle = token('--fg-secondary');
     context.textAlign = 'right';
     context.textBaseline = 'middle';
     context.fillText(formatNumber.format(value), left - 7, point);
@@ -308,7 +311,7 @@ function drawProgressChart(canvas: HTMLCanvasElement, days: Day[], metric: Metri
   const selectedIndex = days.findIndex(day => day.date === selected);
   if (selectedIndex >= 0) {
     const atX = x(selectedIndex);
-    context.fillStyle = '#e8f0eb';
+    context.fillStyle = token('--bg-selected');
     context.fillRect(atX - 2, paddingTop, 4, bottom - paddingTop);
   }
 
@@ -336,9 +339,9 @@ function drawProgressChart(canvas: HTMLCanvasElement, days: Day[], metric: Metri
       ctx.fill();
     });
   }
-  drawLine('scope', '#63796d', true);
-  drawLine('remaining', '#236c55', false);
-  context.fillStyle = '#526b5f';
+  drawLine('scope', token('--chart-7'), true);
+  drawLine('remaining', token('--chart-1'), false);
+  context.fillStyle = token('--fg-secondary');
   context.textAlign = 'center';
   context.textBaseline = 'top';
   const ticks = days.length < 3 ? days.map((_, index) => index) : [0, Math.floor((days.length - 1) / 2), days.length - 1];

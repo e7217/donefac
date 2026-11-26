@@ -2828,7 +2828,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             <div className="docs-paper">
               <div className="docs-document-meta"><span className={`docs-status-pill ${draft.status === 'published' ? 'is-published' : ''}`}>{draft.status === 'published' ? '공유 표시' : '초안'}</span><span>마지막 수정 {relativeTime((latestPage ?? selectedPage).updatedAt)}</span></div>
               <input ref={titleInput} className="docs-title-input" disabled={restoring || checklistReselecting} value={draft.title} onChange={event => updateDraft({ title: event.target.value })} placeholder="제목 없는 문서" aria-label="문서 제목" />
-              <div className="docs-author-row"><span className="docs-avatar" style={{ background: data.users.find(user => user.id === selectedPage.authorId)?.color || '#78849a' }}>{data.users.find(user => user.id === selectedPage.authorId)?.name.slice(0, 1) || '팀'}</span><span>{data.users.find(user => user.id === selectedPage.authorId)?.name || '팀원'}</span><span className="docs-meta-dot">·</span><span>{when(selectedPage.createdAt)}</span><span className="docs-meta-dot">·</span><span>버전 {draft.expectedVersion}</span></div>
+              <div className="docs-author-row"><span className="docs-avatar" style={{ background: data.users.find(user => user.id === selectedPage.authorId)?.color || 'var(--chart-7)' }}>{data.users.find(user => user.id === selectedPage.authorId)?.name.slice(0, 1) || '팀'}</span><span>{data.users.find(user => user.id === selectedPage.authorId)?.name || '팀원'}</span><span className="docs-meta-dot">·</span><span>{when(selectedPage.createdAt)}</span><span className="docs-meta-dot">·</span><span>버전 {draft.expectedVersion}</span></div>
               <DocumentLabels key={`${actorId}:${draft.id}`} labels={draft.labels} activeKey={documentLabel} disabled={restoring || checklistReselecting}
                 onChange={labels => updateDraft({ labels })} onFilter={onChangeDocumentLabel} />
 
@@ -3025,7 +3025,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   draft.id !== comment.resourceId || latestPage?.id !== comment.resourceId;
                 return <article className="docs-comment" id={`document-comment-${comment.id}`} tabIndex={-1} key={comment.id}>
                   <div className="docs-comment-head">
-                    <span className="docs-avatar" style={{ background: user?.color || '#78849a' }}>{user?.name.slice(0, 1) || '팀'}</span>
+                    <span className="docs-avatar" style={{ background: user?.color || 'var(--chart-7)' }}>{user?.name.slice(0, 1) || '팀'}</span>
                     <strong>{user?.name || '팀원'}</strong>
                     <time title={when(comment.createdAt)}>{relativeTime(comment.createdAt)}</time>
                     <CommentEditedMark comment={comment} />

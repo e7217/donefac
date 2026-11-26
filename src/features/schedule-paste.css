@@ -6,7 +6,7 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: #17352e66;
+  background: var(--bg-backdrop);
 }
 
 .schedule-paste-dialog {
@@ -15,13 +15,13 @@
   max-height: 92vh;
   display: flex;
   flex-direction: column;
-  border: 1px solid #cddfd7;
-  border-radius: 14px;
-  background: white;
-  box-shadow: 0 24px 80px #12392e30;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-3xl);
+  background: var(--bg-surface-1);
+  box-shadow: var(--shadow-lg);
   overflow: auto;
-  color: #264238;
-  font-size: 1rem;
+  color: var(--fg-primary);
+  font-size: var(--text-base);
   line-height: 1.55;
 }
 
@@ -35,7 +35,7 @@
 }
 
 .schedule-paste-dialog > header {
-  border-bottom: 1px solid #dce7e1;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .schedule-paste-dialog h2 {
@@ -43,28 +43,28 @@
   align-items: center;
   gap: 0.5rem;
   margin: 0;
-  font-size: 1.25rem;
+  font-size: var(--text-xl);
 }
 
 .schedule-paste-dialog h3 {
   margin: 0;
-  font-size: 1rem;
+  font-size: var(--text-lg);
 }
 
 .schedule-paste-dialog h4 {
   margin: 0 0 0.5rem;
-  font-size: 0.875rem;
+  font-size: var(--text-md);
 }
 
 .schedule-paste-dialog p {
   margin: 0.6rem 0;
-  font-size: 1rem;
+  font-size: var(--text-base);
 }
 
 .schedule-paste-dialog .btn,
 .schedule-paste-dialog .field,
 .schedule-paste-dialog label {
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 
 .schedule-paste-dialog .btn {
@@ -89,7 +89,7 @@
 
 .schedule-paste-input label {
   display: block;
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   margin-bottom: 0.5rem;
 }
 
@@ -103,7 +103,7 @@
 }
 
 .schedule-paste-input textarea:focus-visible {
-  outline: 2px solid #177c72;
+  outline: 2px solid var(--brand);
   outline-offset: 2px;
 }
 
@@ -120,8 +120,8 @@
 
 .schedule-paste-dialog .schedule-paste-follow-up p {
   margin: 0.25rem 0 0;
-  color: #526f62;
-  font-size: 0.8125rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .schedule-paste-team-follow-up {
@@ -131,23 +131,23 @@
 .schedule-paste-examples {
   margin: 0.75rem 0 1rem;
   padding: 0.75rem 1rem;
-  border: 1px solid #d6e4dc;
-  border-radius: 7px;
-  font-size: 0.875rem;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
 }
 
 .schedule-paste-examples summary {
   cursor: pointer;
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .schedule-paste-examples pre {
   white-space: pre;
   overflow-x: auto;
   padding: 0.6rem;
-  font-size: 0.8125rem;
-  background: #f3f8f5;
-  border-radius: 4px;
+  font-size: var(--text-sm);
+  background: var(--bg-layer-1);
+  border-radius: var(--radius-sm);
   tab-size: 4;
 }
 
@@ -155,7 +155,7 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  color: #146c5e;
+  color: var(--brand-fg);
 }
 
 .schedule-paste-error,
@@ -166,22 +166,22 @@
 .schedule-paste-success,
 .schedule-paste-key-mappings,
 .schedule-paste-noop {
-  border: 1px solid #d2e3da;
-  border-radius: 7px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
   padding: 0.85rem 1rem;
   margin: 0 0 1rem;
 }
 
 .schedule-paste-error,
 .schedule-paste-rejected {
-  color: #913c40;
-  border-color: #e7c4c6;
-  background: #fff4f4;
+  color: var(--danger-fg);
+  border-color: var(--danger-border);
+  background: var(--danger-subtle);
 }
 
 .schedule-paste-sheet-conflicts {
-  border-color: #e7d6b0;
-  background: #fff9eb;
+  border-color: var(--warning-border);
+  background: var(--warning-subtle);
 }
 
 .schedule-paste-sheet-conflicts ul {
@@ -191,7 +191,7 @@
 }
 
 .schedule-paste-sheet-conflicts li + li {
-  border-top: 1px solid #e7d6b0;
+  border-top: 1px solid var(--warning-border);
 }
 
 .schedule-paste-sheet-conflicts label {
@@ -210,7 +210,7 @@
 .schedule-paste-rejected li,
 .schedule-paste-warnings li {
   margin: 0.4rem 0;
-  font-size: 0.875rem;
+  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 
@@ -219,7 +219,7 @@
 }
 
 .schedule-paste-key-mappings {
-  background: #f5f9f6;
+  background: var(--bg-layer-1);
 }
 
 .schedule-paste-key-mappings ul {
@@ -228,7 +228,7 @@
 }
 
 .schedule-paste-key-mappings li {
-  font-size: 0.875rem;
+  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 
@@ -241,32 +241,32 @@
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0.25rem 0.45rem;
-  color: #476357;
+  color: var(--fg-secondary);
 }
 
 .schedule-paste-key-mappings .schedule-paste-key-guidance {
-  color: #73501c;
-  font-size: 0.875rem;
+  color: var(--warning-fg);
+  font-size: var(--text-sm);
 }
 
 .schedule-paste-key-conflict {
   padding: 0.14rem 0.4rem;
-  border-radius: 4px;
-  background: #fff0ce;
-  color: #73501c;
+  border-radius: var(--radius-sm);
+  background: var(--warning-subtle);
+  color: var(--warning-fg);
 }
 
 .schedule-paste-warnings,
 .schedule-paste-stale {
-  color: #7f5e28;
-  background: #fff9ee;
-  border-color: #e8d5b1;
+  color: var(--warning-fg);
+  background: var(--warning-subtle);
+  border-color: var(--warning-border);
 }
 
 .schedule-paste-success,
 .schedule-paste-noop {
-  color: #176c5a;
-  background: #edf7f1;
+  color: var(--success-fg);
+  background: var(--success-subtle);
 }
 
 .schedule-paste-review-heading {
@@ -279,22 +279,22 @@
 
 .schedule-paste-review-heading p,
 .schedule-paste-dialog > footer > span {
-  font-size: 0.8125rem;
-  color: #526f62;
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
 }
 
 .schedule-paste-approval {
   flex-shrink: 0;
   padding: 0.3rem 0.6rem;
-  font-size: 0.8125rem;
-  border-radius: 5px;
-  color: #805e2b;
-  background: #fff4dd;
+  font-size: var(--text-sm);
+  border-radius: var(--radius-sm);
+  color: var(--warning-fg);
+  background: var(--warning-subtle);
 }
 
 .schedule-paste-approval.is-valid {
-  color: #146a58;
-  background: #e5f4eb;
+  color: var(--success-fg);
+  background: var(--success-subtle);
 }
 
 .schedule-paste-table-scroll {
@@ -302,28 +302,28 @@
 }
 
 .schedule-paste-table-scroll:focus-visible {
-  outline: 2px solid #177c72;
+  outline: 2px solid var(--brand);
   outline-offset: -2px;
 }
 
 .schedule-paste-change-table table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.875rem;
+  font-size: var(--text-base);
 }
 
 .schedule-paste-change-table th,
 .schedule-paste-change-table td {
   text-align: left;
   vertical-align: top;
-  border-bottom: 1px solid #dce7e1;
+  border-bottom: 1px solid var(--border-subtle);
   padding: 0.8rem 0.6rem;
 }
 
 .schedule-paste-change-table thead th {
-  color: #536b60;
-  background: #f5f9f6;
-  font-size: 0.8125rem;
+  color: var(--fg-secondary);
+  background: var(--bg-layer-1);
+  font-size: var(--text-sm);
   white-space: nowrap;
 }
 
@@ -337,24 +337,24 @@
 .schedule-paste-date small,
 .schedule-paste-dependency-rule small {
   display: block;
-  font-size: 0.8125rem;
-  font-weight: 400;
-  color: #526d5d;
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-normal);
+  color: var(--fg-secondary);
 }
 
 .schedule-paste-change-table tbody th strong {
   display: block;
   margin-top: 0.2rem;
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 .schedule-paste-change-table tbody th .schedule-paste-follow-up-label {
   display: inline-block;
   margin-top: 0.3rem;
   padding: 0.1rem 0.35rem;
-  border-radius: 4px;
-  color: #1d5d4c;
-  background: #e3f2ea;
+  border-radius: var(--radius-sm);
+  color: var(--brand-fg);
+  background: var(--brand-subtle);
 }
 
 .schedule-paste-date {
@@ -365,23 +365,23 @@
 }
 
 .schedule-paste-date strong {
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 .schedule-paste-date.is-changed,
 .schedule-paste-dependency-rule.is-changed {
-  color: #146c5c;
+  color: var(--brand-fg);
 }
 
 .schedule-paste-date.is-removed,
 .schedule-paste-date.is-removed small,
 .schedule-paste-dependency-rule.is-removed,
 .schedule-paste-dependency-rule.is-removed small {
-  color: #9a4747;
+  color: var(--danger-fg);
 }
 
 .schedule-paste-date.is-unchanged {
-  color: #62766b;
+  color: var(--fg-tertiary);
 }
 
 .schedule-paste-change-table + .schedule-paste-dependency-table {
@@ -414,7 +414,7 @@
 .schedule-paste-dependency-arrow {
   display: block;
   margin: 0.35rem 0;
-  color: #526d5d;
+  color: var(--fg-secondary);
 }
 
 .schedule-paste-dependency-rule {
@@ -424,13 +424,13 @@
 }
 
 .schedule-paste-dependency-rule strong {
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 .schedule-paste-dialog > footer {
   align-items: center;
   justify-content: flex-end;
-  border-top: 1px solid #dce7e1;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .schedule-paste-dialog > footer > span {
@@ -442,7 +442,7 @@
   align-items: center;
   gap: 0.5rem;
   margin-top: 0.75rem;
-  font-size: 0.8125rem;
+  font-size: var(--text-sm);
 }
 
 .schedule-paste-pagination > span {
@@ -471,7 +471,7 @@
 .schedule-blocker-toolbar,
 .schedule-blocker-selected,
 .schedule-blocker-rule {
-  font-size: 0.8125rem;
+  font-size: var(--text-sm);
 }
 
 .schedule-blocker-selected {
@@ -492,8 +492,8 @@
 .schedule-blocker-list {
   max-height: min(40vh, 23rem);
   overflow-y: auto;
-  border: 1px solid #dce7e1;
-  border-radius: 7px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
 }
 
 .schedule-blocker-list > li {
@@ -501,7 +501,7 @@
 }
 
 .schedule-blocker-list > li + li {
-  border-top: 1px solid #dce7e1;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .schedule-paste-input .schedule-blocker-list label {
@@ -509,7 +509,7 @@
   align-items: flex-start;
   gap: 0.65rem;
   margin: 0;
-  font-weight: 400;
+  font-weight: var(--font-weight-normal);
   cursor: pointer;
 }
 
@@ -536,11 +536,11 @@
   flex-wrap: wrap;
   gap: 0 0.55rem;
   margin-left: 1.45rem;
-  color: #456559;
+  color: var(--fg-secondary);
 }
 
 .schedule-blocker-changed {
-  color: #844b1f;
+  color: var(--warning-fg);
 }
 
 .schedule-paste-dialog button:disabled {
@@ -550,15 +550,15 @@
 
 .schedule-bulk-targets {
   margin-bottom: 1rem;
-  border: 1px solid #d6e4dc;
-  border-radius: 7px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
   padding: 0.55rem 0.7rem;
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 
 .schedule-bulk-targets summary {
   cursor: pointer;
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .schedule-bulk-targets ul {
@@ -570,15 +570,15 @@
 }
 
 .schedule-bulk-targets li span {
-  color: #526f62;
+  color: var(--fg-secondary);
 }
 
 .schedule-bulk-project {
   display: block;
   margin: 0.12rem 0 0.3rem;
-  color: #526f62;
-  font-weight: 400;
-  font-size: 0.8125rem;
+  color: var(--fg-secondary);
+  font-weight: var(--font-weight-normal);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 
@@ -652,8 +652,8 @@
   margin: 0;
   padding: 0;
   list-style: none;
-  border: 1px solid #cddfd7;
-  border-radius: 8px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
 }
 
 .schedule-bulk-link-dates > ul > li {
@@ -662,7 +662,7 @@
 }
 
 .schedule-bulk-link-dates > ul > li + li {
-  border-top: 1px solid #dce7e1;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .schedule-paste-input .schedule-bulk-link-dates label {
@@ -676,12 +676,12 @@
   margin: 0.3rem 0;
   padding-inline-start: 1.35rem;
   list-style: none;
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 
 .schedule-bulk-link-date-conflict {
   display: block;
-  color: #526f62;
+  color: var(--fg-secondary);
 }
 
 .schedule-bulk-link-date-choices {
@@ -702,8 +702,8 @@
 }
 
 .schedule-bulk-chain li::marker {
-  color: #365b4c;
-  font-weight: 600;
+  color: var(--fg-secondary);
+  font-weight: var(--font-weight-semibold);
 }
 
 .schedule-bulk-chain-row {
@@ -713,9 +713,9 @@
   gap: 0.5rem;
   min-width: 0;
   padding: 0.25rem 0.45rem;
-  border: 1px solid #d6e4dc;
-  border-radius: 6px;
-  background: #fff;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-1);
   overflow-wrap: anywhere;
 }
 
@@ -739,10 +739,10 @@
   gap: 0.5rem;
   padding: 0.5rem 0.7rem;
   margin-top: 0.5rem;
-  border: 1px solid #cfe2d9;
-  border-radius: 7px;
-  background: #edf7f1;
-  font-size: 0.875rem;
+  border: 1px solid var(--brand-border);
+  border-radius: var(--radius-md);
+  background: var(--bg-selected);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 
@@ -767,12 +767,12 @@
   width: 100%;
   min-height: 36px;
   padding: 0.4rem 0.65rem;
-  border: 1px solid #d6e4dc;
-  border-radius: 6px;
-  background: #fff;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-1);
   color: inherit;
   font: inherit;
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
   text-align: left;
   overflow-wrap: anywhere;
   cursor: pointer;
@@ -780,14 +780,14 @@
 
 .schedule-bulk-link-results button:hover,
 .schedule-bulk-link-results button:focus-visible {
-  background: #edf7f1;
-  outline: 2px solid #177c72;
+  background: var(--bg-layer-1-hover);
+  outline: 2px solid var(--brand);
   outline-offset: -2px;
 }
 
 .gantt-candidate-alias {
   display: block;
-  color: #4d685b;
+  color: var(--fg-secondary);
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
@@ -820,8 +820,8 @@
 .schedule-paste-date-previous {
   display: block;
   margin-bottom: 0.15rem;
-  color: #526f62;
-  font-size: 0.8125rem;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 @media (max-width: 700px) {
@@ -878,6 +878,6 @@
   .schedule-bulk-date-table th,
   .schedule-bulk-date-table td {
     padding: 0.55rem 0.3rem;
-    font-size: 0.8125rem;
+    font-size: var(--text-sm);
   }
 }

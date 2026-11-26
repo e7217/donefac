@@ -3,8 +3,8 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: #4e6458;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .issue-board-group-picker {
@@ -13,7 +13,7 @@
 
 .issue-board-group-picker select:focus-visible,
 .issue-board-grouped:focus-visible {
-  outline: 2px solid #2c7d65;
+  outline: 2px solid var(--brand);
   outline-offset: 2px;
 }
 
@@ -23,7 +23,7 @@
 }
 
 .issue-board-empty-toggle input {
-  accent-color: #2c7d65;
+  accent-color: var(--brand);
 }
 
 .issue-board.issue-board-grouped {
@@ -64,11 +64,11 @@
   max-width: 244px;
   margin: 0 0 7px;
   padding: 7px 10px;
-  border: 1px solid #e1ece5;
-  border-radius: 7px;
-  background: #f7faf8;
-  color: #3d594b;
-  font-size: 13px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-2);
+  color: var(--fg-primary);
+  font-size: var(--text-base);
 }
 
 .issue-board-lane-person {
@@ -80,9 +80,9 @@
 
 .issue-board-lane-person small,
 .issue-board-lane-count {
-  color: #596e63;
-  font-size: 11px;
-  font-weight: 400;
+  color: var(--fg-tertiary);
+  font-size: var(--text-xs);
+  font-weight: var(--font-weight-normal);
 }
 
 .issue-board-lane-count {
@@ -95,8 +95,8 @@
   align-items: center;
   gap: 6px;
   padding: 8px 2px;
-  color: #536c5a;
-  font-size: 11px;
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
 }
 
 .issue-board-cell-heading > :last-child {
@@ -125,7 +125,7 @@
 
 .issue-board-grouped .issue-column-empty {
   padding: 12px 0;
-  color: #63786a;
+  color: var(--fg-tertiary);
 }
 
 @media (max-width: 700px), (pointer: coarse) {

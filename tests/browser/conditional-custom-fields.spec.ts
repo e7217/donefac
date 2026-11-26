@@ -36,7 +36,7 @@ test('360px에서 속성 조건을 저장하고, 새 업무·상세·간트에�
     } });
     expect(workflowSetup.status(), await workflowSetup.text()).toBe(200);
 
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const settings = page.getByRole('region', { name: '업무 유형·사용자 정의 속성 설정', exact: true });
     await settings.getByRole('button', { name: /^사용자 정의 속성/ }).click();
     await settings.getByRole('button', { name: '속성 2 세부 설정', exact: true }).click();

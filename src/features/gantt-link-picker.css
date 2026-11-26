@@ -1,7 +1,7 @@
 .gantt-link-picker-trigger[aria-pressed='true'] {
-  background: #e6f2eb;
-  border-color: #719e85;
-  color: #245c42;
+  background: var(--bg-selected);
+  border-color: var(--brand-border);
+  color: var(--brand-fg);
 }
 
 .gantt-link-prompt {
@@ -12,9 +12,9 @@
   gap: 8px 16px;
   margin: 10px 0;
   padding: 10px 12px;
-  border: 1px solid #bed8c9;
-  border-radius: 7px;
-  background: #f0f7f3;
+  border: 1px solid var(--brand-border);
+  border-radius: var(--radius-md);
+  background: var(--brand-subtle);
 }
 
 .gantt-link-instructions {
@@ -24,15 +24,15 @@
 
 .gantt-link-instructions p {
   margin: 0;
-  color: #315d47;
-  font-size: 12px;
+  color: var(--fg-primary);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 
 .gantt-link-instructions p + p {
   margin-top: 3px;
-  color: #526559;
-  font-size: 11px;
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
 }
 
 .gantt-link-prompt-actions {
@@ -43,11 +43,11 @@
 
 .gantt-feature .gantt-link-source-row > .gantt-left,
 .gantt-feature .gantt-link-source-row > .gantt-row-timeline {
-  background-color: #e7f4ec;
+  background-color: var(--bg-selected);
 }
 
 .gantt-link-pick-row .gantt-issue-name:not(:disabled) {
-  color: #245c42;
+  color: var(--brand-fg);
 }
 
 .gantt-link-pick-row .gantt-issue-name:not(:disabled) strong {
@@ -89,29 +89,29 @@
 .gantt-link-endpoint > span {
   max-width: 100%;
   padding: 1px 6px;
-  border: 1px solid #719e85;
-  border-radius: 5px;
-  background: white;
-  color: #254f3c;
-  font-size: 11px;
+  border: 1px solid var(--brand-border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-1);
+  color: var(--brand-fg);
+  font-size: var(--text-xs);
   line-height: 16px;
   white-space: nowrap;
 }
 
 .gantt-link-endpoint[data-endpoint='endDate'] > span {
-  border-color: #8b9fbd;
-  color: #385779;
+  border-color: var(--info-border);
+  color: var(--info-fg);
 }
 
 .gantt-link-endpoint:hover:not(:disabled) > span,
 .gantt-link-endpoint:focus-visible > span {
-  border-color: #206554;
-  background: #206554;
-  color: white;
+  border-color: var(--brand);
+  background: var(--brand);
+  color: var(--fg-on-color);
 }
 
 .gantt-link-endpoint:focus-visible,
 .gantt-link-pick-row .gantt-issue-name:focus-visible {
-  outline: 2px solid #206554;
+  outline: 2px solid var(--brand);
   outline-offset: -2px;
 }

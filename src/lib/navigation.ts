@@ -4,6 +4,8 @@ type NavigationPreservation = {
   preserveTeamBoard?: boolean;
   preserveGantt?: true | 'dateDrafts' | 'issueOverlay';
   preserveDevelopment?: boolean;
+  /** Switching workspace settings sections keeps every section mounted, so drafts stay. */
+  preserveSettingsDrafts?: boolean;
 };
 
 export function dispatchWorkspaceNavigation(detail?: NavigationPreservation) {
@@ -44,4 +46,13 @@ export function isDevelopmentReviewNavigation(event: Event): boolean {
 /** Other forms may still cancel the same synchronous navigation dispatch. */
 export function afterAcceptedNavigation(event: Event, discard: () => void) {
   queueMicrotask(() => { if (!event.defaultPrevented) discard(); });
+}
+
+/**
+ * A settings section switch: guards still block while a request is in flight or a
+ * result needs the user's attention, but keep drafts without asking (the hidden
+ * section stays mounted).
+ */
+export function isSettingsSectionNavigation(event: Event): boolean {
+  return event instanceof CustomEvent && event.detail?.preserveSettingsDrafts === true;
 }

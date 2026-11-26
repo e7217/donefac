@@ -13,7 +13,7 @@ import type {
 import { issueTypeMeta, projectIssueTypes } from '../../shared/issue-schema';
 import { projectStatuses, statusMeta } from '../../shared/workflow-helpers';
 import { ApiError, api } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isSettingsSectionNavigation } from '../lib/navigation';
 import { errorMessage } from './schedule-utils';
 import './automation-settings.css';
 import './issue-assignment-rules.css';
@@ -150,6 +150,8 @@ function ProjectAssignmentRules({ data, projectId, actorId, notify, openIssue }:
       if (pending.current) {
         event.preventDefault();
         notify('담당자 배정 요청이 끝난 뒤 이동해 주세요.', 'error');
+      } else if (isSettingsSectionNavigation(event)) {
+        return;
       } else if (dirty) {
         if (window.confirm('작성 중인 배정 규칙과 미리보기를 버리고 이동할까요?')) {
           afterAcceptedNavigation(event, resetEditor);

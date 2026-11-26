@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Archive, ChevronLeft, ChevronRight, FileSearch, Loader2, RefreshCw, Search, Trash2, Upload, X } from 'lucide-react';
 import type { FeatureProps, LegacyDiagnosticPage, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacyRecordKind, LegacyRecordPage } from '../../shared/types';
 import { api } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isSettingsSectionNavigation } from '../lib/navigation';
 import { LegacyRecordDetail, legacyRecordKindLabels as KINDS } from './LegacyRecordDetail';
 import { LegacyImportBatch } from './LegacyImportBatch';
 import { LEGACY_FILE_ACCEPT, MAX_LEGACY_FILE_BYTES, MAX_LEGACY_INSTANCE_LENGTH, legacyFileProblem, legacySizeLabel as sizeLabel, uploadLegacyFile, type LegacyImportProduct as Product } from './legacy-import-upload';
@@ -97,6 +97,7 @@ function ActorLegacyImportSettings({ actorId, notify, onPackageInventoryChange, 
     const navigate = (event: Event) => {
       if (event.defaultPrevented) return;
       if (busy.current) { event.preventDefault(); notify('원본 분석·삭제가 끝난 뒤 이동해 주세요.', 'error'); return; }
+      if (isSettingsSectionNavigation(event)) return;
       if (dirty.current || batchDraft.current) {
         if (!window.confirm('선택한 원본 파일과 입력 중인 분석 설정을 버리고 이동할까요?')) event.preventDefault();
         else afterAcceptedNavigation(event, () => { resetDraft(); batchDraft.current?.(); });

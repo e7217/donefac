@@ -1,5 +1,5 @@
 .issue-status-dialog :focus-visible {
-  outline: 2px solid #288069;
+  outline: 2px solid var(--brand);
   outline-offset: 2px;
 }
 
@@ -7,15 +7,15 @@
   width: min(450px, calc(100% - 24px));
   max-height: 88dvh;
   padding: 0;
-  border: 1px solid #dce7df;
-  border-radius: 12px;
-  background: #fff;
-  color: #314d40;
-  box-shadow: 0 16px 46px #243b302f;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2xl);
+  background: var(--bg-surface-1);
+  color: var(--fg-primary);
+  box-shadow: var(--shadow-lg);
 }
 
 .issue-status-dialog::backdrop {
-  background: #19372b66;
+  background: var(--bg-backdrop);
 }
 
 .issue-status-dialog header,
@@ -29,24 +29,24 @@
 
 .issue-status-dialog header {
   justify-content: space-between;
-  border-bottom: 1px solid #e7eee9;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .issue-status-dialog footer {
   justify-content: flex-end;
-  border-top: 1px solid #e7eee9;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .issue-status-dialog h2 {
   margin: 0;
-  font-size: 17px;
+  font-size: var(--text-xl);
 }
 
 .issue-status-dialog-body {
   display: grid;
   gap: 10px;
   padding: 12px clamp(12px, 4vw, 18px);
-  font-size: 13px;
+  font-size: var(--text-base);
 }
 
 .issue-status-dialog-body p {
@@ -67,8 +67,8 @@
   display: grid;
   gap: 4px;
   min-width: 0;
-  color: #435a50;
-  font-size: 12px;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
 }
 
 .issue-status-dialog-body .field {
@@ -83,13 +83,13 @@
   min-width: 0;
   margin: 0;
   padding: 8px;
-  border: 1px solid #dce7df;
-  border-radius: 6px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
 }
 
 .issue-status-properties legend {
   padding-inline: 4px;
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .issue-status-properties textarea {
@@ -106,9 +106,9 @@
   display: grid;
   gap: 4px;
   padding: 8px;
-  border: 1px solid #e6d6ae;
-  border-radius: 6px;
-  background: #fffbef;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-md);
+  background: var(--warning-subtle);
 }
 
 .issue-status-property-conflict blockquote {
@@ -137,8 +137,8 @@
 }
 
 .issue-status-handoff label span {
-  color: #546e61;
-  font-weight: 400;
+  color: var(--fg-tertiary);
+  font-weight: var(--font-weight-normal);
 }
 
 .issue-status-handoff textarea {
@@ -151,7 +151,7 @@
 }
 
 .issue-status-recovery h2 {
-  font-size: 16px;
+  font-size: var(--text-lg);
   margin: 0 0 8px;
 }
 
@@ -166,7 +166,7 @@
 .issue-status-recovery li {
   display: grid;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--text-base);
   overflow-wrap: anywhere;
 }
 

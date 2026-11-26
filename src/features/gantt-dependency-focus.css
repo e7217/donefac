@@ -7,10 +7,10 @@
   min-width: 0;
   margin-block: 10px;
   padding: 10px 12px;
-  border: 1px solid #b9d7cb;
-  border-radius: 8px;
-  background: #f1f8f5;
-  color: #225348;
+  border: 1px solid var(--brand-border);
+  border-radius: var(--radius-lg);
+  background: var(--brand-subtle);
+  color: var(--fg-primary);
 }
 
 .gantt-dependency-focus-summary {
@@ -23,12 +23,12 @@
   align-items: center;
   gap: 7px;
   margin: 0;
-  font-size: 14px;
+  font-size: var(--text-md);
 }
 
 .gantt-dependency-focus-work {
   margin: 4px 0 0;
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -43,27 +43,27 @@
 
 .gantt-dependency-focus-counts {
   margin: 5px 0 0;
-  color: #425a52;
-  font-size: 11px;
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
 
 .gantt-dependency-focus-counts > span {
   padding: 2px 6px;
-  border-radius: 4px;
-  background: #e7efeb;
+  border-radius: var(--radius-sm);
+  background: var(--bg-layer-2);
 }
 
 .gantt-dependency-focus-counts > .gantt-dependency-focus-extra {
-  background: #fff0d6;
-  color: #754710;
+  background: var(--warning-subtle);
+  color: var(--warning-fg);
 }
 
 .gantt-focus-team-blockers {
   display: grid;
   gap: 5px;
   margin-top: 8px;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .gantt-focus-team-blockers > label {
@@ -91,30 +91,30 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 2px 4px;
-  color: #46565e;
-  font-size: 10px;
-  font-weight: 600;
+  color: var(--fg-secondary);
+  font-size: var(--text-2xs);
+  font-weight: var(--font-weight-semibold);
   line-height: 1.25;
 }
 
 .gantt-dependency-focus-labels > span {
   padding: 1px 4px;
-  border-radius: 3px;
-  background: #e9eef2;
+  border-radius: var(--radius-xs);
+  background: var(--bg-layer-2);
   white-space: nowrap;
 }
 
 .gantt-dependency-focus-labels > span[data-direction='successor'] {
-  background: #e3f0ec;
-  color: #265c4e;
+  background: var(--brand-subtle);
+  color: var(--brand-fg);
 }
 
 .gantt-dependency-focus-labels > span[data-direction='anchor'] {
-  background: #d0eadf;
-  color: #184f40;
+  background: var(--bg-selected-hover);
+  color: var(--brand-fg);
 }
 
 .gantt-feature .gantt-row[data-dependency-focus-row='anchor'] > .gantt-left {
-  box-shadow: inset 3px 0 #347f67;
-  background: #ebf7f0;
+  box-shadow: inset 3px 0 var(--brand);
+  background: var(--bg-selected);
 }

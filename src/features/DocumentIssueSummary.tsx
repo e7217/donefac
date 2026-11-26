@@ -11,8 +11,8 @@ import { issueListAttrs, keepDocumentSelection, matchingDocumentIssues } from '.
 const number = new Intl.NumberFormat('ko-KR');
 const percentage = new Intl.NumberFormat('ko-KR', { style: 'percent', maximumFractionDigits: 1 });
 const priorityOrder: Priority[] = ['urgent', 'high', 'medium', 'low'];
-const priorityColors: Record<Priority, string> = { urgent: '#b65448', high: '#aa7738', medium: '#5f887b', low: '#71848c' };
-const defaultColor = '#728a80';
+const priorityColors: Record<Priority, string> = { urgent: 'var(--danger)', high: 'var(--warning)', medium: 'var(--chart-1)', low: 'var(--chart-7)' };
+const defaultColor = 'var(--fg-tertiary)';
 const unknownGroupOrder = Number.MAX_SAFE_INTEGER;
 
 type Group = { id: string; label: string; color: string; issues: Issue[] };

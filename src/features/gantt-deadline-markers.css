@@ -1,18 +1,18 @@
 .gantt-row-deadline,
 .gantt-deadline-marker,
 .gantt-deadline-legend-mark {
-  --gantt-deadline-color: #1d6865;
-  --gantt-deadline-background: #ecf7f5;
+  --gantt-deadline-color: var(--brand-fg);
+  --gantt-deadline-background: var(--brand-subtle);
 }
 
 [data-gantt-deadline='late'] {
-  --gantt-deadline-color: #963b31;
-  --gantt-deadline-background: #fff1eb;
+  --gantt-deadline-color: var(--danger-fg);
+  --gantt-deadline-background: var(--danger-subtle);
 }
 
 [data-gantt-deadline='missing'] {
-  --gantt-deadline-color: #785719;
-  --gantt-deadline-background: #fff7df;
+  --gantt-deadline-color: var(--warning-fg);
+  --gantt-deadline-background: var(--warning-subtle);
 }
 
 .gantt-row-deadline {
@@ -26,16 +26,16 @@
   min-height: 44px;
   padding: 4px;
   border: 1px solid var(--gantt-deadline-color);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   color: var(--gantt-deadline-color);
   background: var(--gantt-deadline-background);
-  font-size: 10px;
+  font-size: var(--text-2xs);
   font-variant-numeric: tabular-nums;
   line-height: 1.15;
   cursor: pointer;
 }
 
-.gantt-row-deadline:hover:not(:disabled) { background: white; }
+.gantt-row-deadline:hover:not(:disabled) { background: var(--bg-surface-1); }
 .gantt-row-deadline:disabled { opacity: .55; cursor: default; }
 .gantt-row-deadline:focus-visible,
 .gantt-deadline-marker:focus-visible { outline: 2px solid var(--gantt-deadline-color); outline-offset: 2px; }

@@ -25,7 +25,7 @@ test('360px에서 상태별 자동 목표 마감일을 저장하고 업무 상�
     const made = await request.post('/api/issues', { data: { projectId: project.id, title, status: 'todo' } });
     expect(made.ok(), await made.text()).toBe(true);
     created = (await made.json()) as Issue;
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const settings = page.getByRole('region', { name: '프로젝트 워크플로 설정' });
     const setting = settings.getByLabel(`자동 목표 마감일 (근무일) ${target.label}`, { exact: true });
     const saveSetting = settings.getByRole('button', { name: '워크플로 저장', exact: true });

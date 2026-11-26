@@ -38,7 +38,7 @@ test('워크플로 편집의 작업자 전환과 검색 이동 승인은 남아 
   const baseline=await(await request.get(`/api/projects/${project.id}/workflow`)).json() as ProjectWorkflow;
   const issue=await(await request.post('/api/issues',{data:{projectId:project.id,title:`설정에서 검색 이동 ${randomUUID()}`,cycleId:data.planningItems?.find(item=>item.projectId===project.id&&item.kind==='cycle')?.id}})).json() as Issue;
   try{
-    await page.goto(`/#/${project.id}/settings`);
+    await page.goto(`/#/${project.id}/settings?section=work`);
     const workflow=page.getByRole('region',{name:'프로젝트 워크플로 설정'});
     const name=workflow.getByLabel('상태 1 이름',{exact:true});
     await expect(name).toHaveValue(baseline.statuses[0].label);
@@ -60,6 +60,8 @@ test('워크플로 편집의 작업자 전환과 검색 이동 승인은 남아 
     await expect(page).toHaveURL(new RegExp(`/issues\\?issue=${issue.id}$`));
     await page.getByRole('button',{name:'업무 상세 닫기',exact:true}).click();
     await page.getByRole('button',{name:'워크스페이스 설정',exact:true}).click();
+    // The sidebar opens the default section; the workflow editor is in '업무 구성'.
+    await page.getByRole('navigation',{name:'설정 섹션'}).getByRole('button',{name:'업무 구성',exact:true}).click();
     await expect(name).toHaveValue(baseline.statuses[0].label);
     const stored=await(await request.get(`/api/projects/${project.id}/workflow`)).json() as ProjectWorkflow;
     expect(stored).toEqual(baseline);
