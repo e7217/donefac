@@ -1138,6 +1138,34 @@ test('failure at an existing-issue receipt rolls back its source snapshot, relat
   assert.equal(saved.activities.filter(activity => !before.activities.some(old => old.id === activity.id)).length, 1);
 });
 
+test('decision link confirmation survives restart and an earlier request cannot attach to a restored matching document', async t => {
+  const { call, restart } = await fixture(t);
+  const document = await call<DocPage>('/documents', 'POST', { projectId, title: '복원 세대를 검사할 결정', content }, 201);
+  const issue = await call<Issue>('/issues', 'POST', { projectId, title: '복원 뒤 결정 근거를 다시 볼 업무' }, 201);
+  const { restoreGeneration } = await call<WorkspaceSnapshot>('/workspace');
+  const before = await call<Backup>('/export');
+  assert.ok(restoreGeneration);
+  const path = decisionPathFor(document.id);
+  const input = { ...decisionLink(document, issue), expectedRestoreGeneration: restoreGeneration };
+  const first = await call<Created>(path, 'POST', input, 201);
+  await restart();
+  assert.deepEqual(await call<Created>(path, 'POST', input), { ...first, duplicate: true });
+  await call(path, 'POST', { ...input, expectedRestoreGeneration: null }, 400);
+  await call(path, 'POST', input, 409, { 'X-Actor-Id': 'user-min' });
+
+  const { trashEntryId } = await call<{ trashEntryId: string }>(`/documents/${document.id}`, 'DELETE');
+  await call(`/trash/${trashEntryId}`, 'DELETE');
+  await call('/import', 'POST', { data: before });
+  const restored = await call<WorkspaceSnapshot>('/workspace');
+  assert.notEqual(restored.restoreGeneration, input.expectedRestoreGeneration);
+  assert.equal(restored.documents.find(item => item.id === document.id)?.version, input.expectedDocumentVersion);
+  const blocked = await call<{ details?: { reason: string } }>(path, 'POST', input, 409);
+  assert.equal(blocked.details?.reason, 'workspace_restored');
+  assert.equal((await call<WorkspaceSnapshot>('/workspace')).resourceLinks.some(link => link.documentId === document.id), false);
+  const relinked = await call<Created>(path, 'POST', { ...decisionLink(document, issue), expectedRestoreGeneration: restored.restoreGeneration }, 201);
+  assert.equal(relinked.link.documentSource?.text, input.sourceSelection.text);
+});
+
 test('an existing-issue decision link preserves its exact source in live and trashed native backups', async t => {
   const { call } = await fixture(t);
   const doc = await call<DocPage>('/documents', 'POST', { projectId, title: '결정 당시 원문', content }, 201);

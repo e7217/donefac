@@ -2,44 +2,46 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Link2, X } from 'lucide-react';
-import type { DocPage, DocumentDecisionSource, DocumentIssueLinkResult, DocumentSourceSelection, FeatureProps } from '../../shared/types';
+import type { DocumentIssueLinkResult, FeatureProps } from '../../shared/types';
 import { issueSearchAliasLabel, matchingIssueSearchAliases, normalizeWorkspaceSearchKey } from '../../shared/workspace-search';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
+import type { DecisionLinkAttempt, DecisionLinkSource } from './document-decision-link-attempt';
 import './document-decision-link.css';
-
-export type DecisionLinkSource = Pick<DocPage, 'id' | 'title' | 'version' | 'projectId'> & (
-  { sourceSelection: DocumentSourceSelection } | { comment: { id: string; source: DocumentDecisionSource } }
-);
 
 type Props = Pick<FeatureProps, 'data' | 'actorId' | 'refresh' | 'notify'> & {
   source: DecisionLinkSource;
+  generation: string;
+  initialAttempt?: DecisionLinkAttempt;
+  onAttemptChange: (attempt: DecisionLinkAttempt, next: DecisionLinkAttempt | null) => void;
   onClose: () => void;
   reloadComments: () => void;
 };
-type Attempt = { actorId: string; issueId: string; body: string };
 
 const RESULTS_LIMIT = 40;
 const UNKNOWN_RESULT = '연결 결과를 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.';
-const CONFIRM_UNKNOWN_CLOSE = '연결이 저장됐을 수 있습니다. 문서의 연결 목록에서 확인할 수 있습니다. 창을 닫을까요?';
+const REFRESH_NEEDED = '결정 근거를 연결했습니다. 목록을 다시 불러와 결과를 확인해 주세요.';
+const outcomeMessage = (attempt: DecisionLinkAttempt) => attempt.confirmedIssueKey ? REFRESH_NEEDED : UNKNOWN_RESULT;
 
-export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, notify, onClose, reloadComments }: Props) {
+export function DocumentDecisionLinkDialog({ source, generation, initialAttempt, onAttemptChange,
+  data, actorId, refresh, notify, onClose, reloadComments }: Props) {
   const titleId = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const submitButton = useRef<HTMLButtonElement>(null);
   const pending = useRef(false);
-  const attempt = useRef<Attempt | null>(null);
+  const attempt = useRef<DecisionLinkAttempt | null>(initialAttempt ?? null);
   const [project, setProject] = useState(source.projectId ?? '');
   const [query, setQuery] = useState('');
-  const [selectedId, setSelectedId] = useState('');
+  const [selectedId, setSelectedId] = useState(initialAttempt?.issueId ?? '');
   const [busy, setBusy] = useState(false);
-  const [recovering, setRecovering] = useState(false);
+  const [recovery, setRecovery] = useState(() => initialAttempt ? initialAttempt.confirmedIssueKey ? 'workspace' : 'request' : null);
+  const recovering = recovery !== null;
   const [replayRejected, setReplayRejected] = useState(false);
   const [sourceConflict, setSourceConflict] = useState(false);
   const [issueConflict, setIssueConflict] = useState<{ issueId: string; message: string } | null>(null);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(() => initialAttempt ? outcomeMessage(initialAttempt) : '');
   const excerpt = 'comment' in source ? source.comment.source : source.sourceSelection;
 
   const matches = useMemo(() => {
@@ -70,9 +72,9 @@ export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, not
     const element = dialog.current;
     if (!element) return;
     element.showModal();
-    searchInput.current?.focus({ preventScroll: true });
+    (initialAttempt ? submitButton.current : searchInput.current)?.focus({ preventScroll: true });
     return () => element.close();
-  }, []);
+  }, [initialAttempt]);
 
   useEffect(() => {
     function guard(event: Event) {
@@ -80,7 +82,7 @@ export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, not
       if (pending.current) {
         event.preventDefault();
         notify('연결 결과를 확인한 뒤 이동해 주세요.', 'error');
-      } else if (attempt.current && !window.confirm('연결이 저장됐을 수 있습니다. 돌아와서 문서의 연결 목록을 확인할 수 있습니다. 이동할까요?')) {
+      } else if (attempt.current && !window.confirm('연결이 저장됐을 수 있습니다. 이 탭에서 문서로 돌아와 결과를 확인할 수 있습니다. 이동할까요?')) {
         event.preventDefault();
       } else {
         afterAcceptedNavigation(event, onClose);
@@ -102,54 +104,72 @@ export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, not
 
   function close() {
     if (pending.current) return;
-    const unknown = Boolean(attempt.current);
-    if (unknown && !window.confirm(CONFIRM_UNKNOWN_CLOSE)) return;
+    if (attempt.current && !window.confirm('연결 결과는 이 탭에서 문서를 다시 열어 확인할 수 있습니다. 창을 닫을까요?')) return;
     onClose();
-    if (unknown) void refresh().catch(() => notify('연결 목록을 불러오지 못했습니다. 문서를 다시 열어 확인해 주세요.', 'error'));
+  }
+
+  function endRecovery() {
+    const request = attempt.current;
+    if (!request || pending.current || !window.confirm('연결이 저장됐을 수 있습니다. 이 요청의 결과 확인을 종료할까요?')) return;
+    attempt.current = null;
+    onAttemptChange(request, null);
+    onClose();
+    void refresh().catch(() => notify('연결 목록을 불러오지 못했습니다. 문서를 다시 열어 확인해 주세요.', 'error'));
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (pending.current || sourceConflict || replayRejected || (!attempt.current && (!selected || issueError))) return;
     const replay = Boolean(attempt.current);
-    const request = attempt.current ?? { actorId, issueId: selectedId, body: JSON.stringify({
-      requestId: newRequestId(), expectedDocumentVersion: source.version, issueId: selectedId,
-      ...('comment' in source ? { sourceComment: { commentId: source.comment.id, revisionId: source.comment.source.revisionId } }
-        : { sourceSelection: source.sourceSelection }),
-    }) };
-    let confirmed = false;
+    let request = attempt.current;
+    if (!request) {
+      if (!selected) return;
+      request = { actorId, source, expectedRestoreGeneration: generation, issueId: selectedId,
+        issueLabel: `${selected.key} ${selected.title}`, requestId: newRequestId() };
+    }
     pending.current = true;
     attempt.current = request;
+    onAttemptChange(request, request);
     setBusy(true);
     setError('');
     try {
-      const result = await api<DocumentIssueLinkResult>(`/documents/${encodeURIComponent(source.id)}/decision-links`, {
-        method: 'POST', headers: { 'X-Actor-Id': request.actorId }, body: request.body,
-      });
-      const saved = result?.link?.documentSource;
-      const { from, to, text } = excerpt;
-      if (result?.issue?.id !== request.issueId || result.link?.issueId !== request.issueId || result.link.documentId !== source.id
-        || !saved?.revisionId || saved.from !== from || saved.to !== to || saved.text !== text
-        || ('comment' in source && saved.revisionId !== source.comment.source.revisionId)) throw new Error(UNKNOWN_RESULT);
-      confirmed = true;
+      if (!request.confirmedIssueKey) {
+        const { requestId, issueId, expectedRestoreGeneration } = request;
+        const result = await api<DocumentIssueLinkResult>(`/documents/${encodeURIComponent(source.id)}/decision-links`, {
+          method: 'POST', headers: { 'X-Actor-Id': request.actorId }, signal: AbortSignal.timeout(12_000),
+          body: JSON.stringify({ requestId, expectedDocumentVersion: source.version, expectedRestoreGeneration, issueId,
+            ...('comment' in source ? { sourceComment: { commentId: source.comment.id, revisionId: source.comment.source.revisionId } }
+              : { sourceSelection: source.sourceSelection }) }),
+        });
+        const saved = result?.link?.documentSource;
+        const { from, to, text } = excerpt;
+        if (result?.issue?.id !== issueId || !result.issue.key || result.link?.issueId !== issueId || result.link.documentId !== source.id
+          || !saved?.revisionId || saved.from !== from || saved.to !== to || saved.text !== text
+          || ('comment' in source && saved.revisionId !== source.comment.source.revisionId)) throw new Error(UNKNOWN_RESULT);
+        request = { ...request, confirmedIssueKey: result.issue.key };
+        attempt.current = request;
+        onAttemptChange(request, request);
+      }
       await refresh();
       attempt.current = null;
+      onAttemptChange(request, null);
       onClose();
-      notify(`${result.issue.key} 업무에 결정 근거를 연결했습니다.`, 'success');
+      notify(`${request.confirmedIssueKey} 업무에 결정 근거를 연결했습니다.`, 'success');
     } catch (cause) {
-      const knownFailure = !confirmed && cause instanceof ApiError && [400, 401, 403, 404, 409, 422].includes(cause.status);
+      const knownFailure = !request.confirmedIssueKey && cause instanceof ApiError && [400, 401, 403, 404, 409, 422].includes(cause.status);
       if (knownFailure) {
         attempt.current = null;
-        setRecovering(false);
+        onAttemptChange(request, null);
+        setRecovery(null);
         const details = cause.details as { currentVersion?: number; reason?: string } | undefined;
         const unavailableComment = details?.reason === 'comment_source_unavailable';
         const staleSource = unavailableComment || (cause.status === 409 &&
-          (Number.isSafeInteger(details?.currentVersion) || details?.reason === 'source_selection_changed'));
+          (Number.isSafeInteger(details?.currentVersion) || details?.reason === 'source_selection_changed' || details?.reason === 'workspace_restored'));
         if (staleSource) setSourceConflict(true);
         if (replay) setReplayRejected(true);
         if (!staleSource && !replay && (cause.status === 409 || cause.status === 404)) {
           setIssueConflict({ issueId: request.issueId, message: cause.message });
-        } else if (unavailableComment) {
+        } else if (unavailableComment || details?.reason === 'workspace_restored') {
           setError(cause.message);
         } else if (staleSource) {
           setError('comment' in source ? '문서의 저장본이 변경됐습니다. 최신 문서의 댓글에서 다시 열어 주세요.'
@@ -160,8 +180,8 @@ export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, not
         if (unavailableComment) reloadComments();
         if (staleSource) await refresh().catch(() => {});
       } else {
-        setRecovering(true);
-        setError(confirmed ? '결정 근거를 연결했습니다. 목록을 다시 불러와 결과를 확인해 주세요.' : UNKNOWN_RESULT);
+        setRecovery(request.confirmedIssueKey ? 'workspace' : 'request');
+        setError(outcomeMessage(request));
         requestAnimationFrame(() => submitButton.current?.focus({ preventScroll: true }));
       }
     } finally {
@@ -183,6 +203,7 @@ export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, not
       <section className="document-decision-link-excerpt" aria-label={'comment' in source ? '댓글이 달린 본문' : '선택한 본문'}>
         <blockquote tabIndex={0}>{excerpt.text}</blockquote>
       </section>
+      {initialAttempt && !selected && <p className="document-decision-link-empty">연결을 요청한 업무 · {initialAttempt.issueLabel}</p>}
       <fieldset disabled={busy || recovering || sourceConflict || replayRejected} className="document-decision-link-controls">
         <div className="document-decision-link-filters">
           <label>프로젝트<select className="field" value={project} onChange={event => { setProject(event.target.value); setSelectedId(''); setError(''); }}>
@@ -211,10 +232,11 @@ export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, not
       </fieldset>
       {displayedError && <p className="document-decision-link-error" role="alert">{displayedError}</p>}
       <footer>
+        {recovering && <button type="button" className="btn btn-ghost" disabled={busy} onClick={endRecovery}>결과 확인 종료</button>}
         <button type="button" className="btn btn-ghost" disabled={busy} onClick={close}>취소</button>
         <button ref={submitButton} type="submit" className="btn btn-primary"
           disabled={busy || sourceConflict || replayRejected || (!recovering && (!selected || Boolean(issueError)))}>
-          <Link2 size={16} aria-hidden="true" />{busy ? '연결 중…' : recovering ? '연결 결과 다시 확인' : '선택한 업무에 연결'}
+          <Link2 size={16} aria-hidden="true" />{busy ? '연결 중…' : recovery === 'workspace' ? '연결 목록 다시 불러오기' : recovering ? '연결 결과 다시 확인' : '선택한 업무에 연결'}
         </button>
       </footer>
     </form>

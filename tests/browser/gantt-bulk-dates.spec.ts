@@ -83,6 +83,62 @@ function selection(issues: Issue[]) {
   return issues.map(({ id, version }) => ({ id, expectedVersion: version })).sort((a, b) => a.id.localeCompare(b.id));
 }
 
+test('간트에서 연속 선택한 화면 행만 일괄 편집하고 검색 밖 선택은 유지한다', async ({ page, request }) => {
+  const fixture = await makeFixture(request);
+  try {
+    const prefix = `${fixture.prefix} 범위`;
+    const originalDates = { startDate: date(1), endDate: date(4), dueDate: null };
+    const shown: Issue[] = [];
+    for (const suffix of ['가', '나', '다', '라']) shown.push(await fixture.create(`${prefix} ${suffix}`, originalDates));
+    const hidden = await fixture.create(`${fixture.prefix} 별도 선택`, originalDates);
+    const { search, chart, selected, open, dialog } = await openChart(page, fixture.projectId, fixture.prefix);
+    await selected(hidden).check();
+    await search.fill(prefix);
+    await expect(selected(hidden)).toHaveCount(0);
+    const rows = chart.locator('.gantt-row[data-issue-id]');
+    await expect(rows).toHaveCount(4);
+    const ids = await rows.evaluateAll(elements => elements.map(row => row.getAttribute('data-issue-id')));
+    const visible = ids.map(id => shown.find(issue => issue.id === id)!);
+    const [first, second, third, fourth] = visible.map(selected);
+    const selectAll = chart.getByRole('checkbox', { name: '표시된 업무 전체 선택', exact: true });
+
+    await first.check();
+    await third.click({ modifiers: ['Shift'] });
+    for (const checkbox of [first, second, third]) await expect(checkbox).toBeChecked();
+    await expect(fourth).not.toBeChecked();
+    expect(await selectAll.evaluate((input: HTMLInputElement) => input.indeterminate)).toBe(true);
+    await selectAll.click();
+    for (const checkbox of [first, second, third, fourth]) await expect(checkbox).toBeChecked();
+    await selectAll.click();
+    for (const checkbox of [first, second, third, fourth]) await expect(checkbox).not.toBeChecked();
+    await expect(open).toBeDisabled();
+
+    await fourth.press('Space');
+    await second.press('Shift+Space');
+    for (const checkbox of [second, third, fourth]) await expect(checkbox).toBeChecked();
+    await expect(first).not.toBeChecked();
+    await open.click();
+    await dialog.getByLabel('종료일 변경', { exact: true }).selectOption('set');
+    await dialog.getByLabel('종료일 값', { exact: true }).fill(date(12));
+    const reviewing = nextPost(page, previewRoute);
+    await dialog.getByRole('button', { name: previewName, exact: true }).click();
+    const response = await reviewing;
+    const input = response.request().postDataJSON() as ScheduleBulkDateInput;
+    expect(input.issues.sort((a, b) => a.id.localeCompare(b.id))).toEqual(selection(visible.slice(1)));
+    expect((await readJson<SchedulePastePreview>(response, 200)).errors).toEqual([]);
+    const applying = nextPost(page, applyRoute);
+    await dialog.getByRole('button', { name: applyName, exact: true }).click();
+    await readJson<SchedulePasteApplyResult>(await applying, 200);
+    await expect(dialog).toHaveCount(0);
+
+    await search.fill(fixture.prefix);
+    await expect(selected(hidden)).toBeChecked();
+    const edited = new Set(visible.slice(1).map(issue => issue.id));
+    expect(await fixture.stored()).toEqual([...shown, hidden].map(issue => edited.has(issue.id)
+      ? { ...values(issue), version: issue.version + 1, endDate: date(12) } : values(issue)));
+  } finally { await fixture.close(); }
+});
+
 test('일정 일괄 편집에서 날짜별 충돌을 다시 확인하고 저장값을 공통 날짜보다 우선한다', async ({ page, request }) => {
   const fixture = await makeFixture(request);
   try {

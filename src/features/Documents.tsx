@@ -64,7 +64,8 @@ import { DocumentBlockOrder } from './DocumentBlockOrder';
 import { DocumentPageSuggestions } from './DocumentPageSuggestions';
 import { exitDocumentColumnLayout, insertDocumentColumnLayout, unwrapDocumentColumnLayout } from './document-column-layout';
 import { DocumentSelectionCommentDialog, type SelectionCommentSource } from './DocumentSelectionCommentDialog';
-import { DocumentDecisionLinkDialog, type DecisionLinkSource } from './DocumentDecisionLinkDialog';
+import { DocumentDecisionLinkDialog } from './DocumentDecisionLinkDialog';
+import { readDecisionLinkAttempt, writeDecisionLinkAttempt, type DecisionLinkAttempt, type DecisionLinkSource } from './document-decision-link-attempt';
 import { DocumentLinkedWork } from './DocumentLinkedWork';
 import { ResourceLinkPicker } from './ResourceLinkPicker';
 import { NewIssueModal, type FollowUpSource } from './NewIssueModal';
@@ -107,7 +108,8 @@ type Props = FeatureProps & {
   commentFocus?: { commentId: string; activation: number };
   onCopyCommentLink?: (commentId: string) => void;
 };
-type DocumentAction = { kind: 'create'; source: FollowUpSource } | { kind: 'link'; source: DecisionLinkSource }
+type DocumentAction = { kind: 'create'; source: FollowUpSource } |
+  { kind: 'link'; source: DecisionLinkSource; actorId: string; generation: string; initialAttempt?: DecisionLinkAttempt }
   | { kind: 'comment'; source: SelectionCommentSource; initialDraft: CommentDraft };
 type Draft = DocumentMetadata & {
   id: string; content: RichContent; plainText: string;
@@ -491,6 +493,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [linkBusy, setLinkBusy] = useState(false);
   const linkBusyRef = useRef(false);
   const [documentAction, setDocumentAction] = useState<DocumentAction | null>(null);
+  const [decisionLinkAttempt, setDecisionLinkAttempt] = useState<DecisionLinkAttempt | null>(null);
   const [checklistReselecting, setChecklistReselecting] = useState(false);
   const documentActionOpener = useRef<HTMLButtonElement>(null);
   const closeDocumentAction = useCallback((restoreFocus = true) => {
@@ -522,6 +525,18 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const selectedPage = data.documents.find(page => page.id === selectedDocumentId);
   const selectedPageId = selectedPage?.id;
   const publicationOpen = Boolean(selectedPage && (publicationLink || selectedPage.id === publicationDocumentId));
+  const pendingDecisionLink = decisionLinkAttempt?.source.id === selectedPageId && decisionLinkAttempt?.actorId === actorId &&
+    decisionLinkAttempt?.expectedRestoreGeneration === data.restoreGeneration ? decisionLinkAttempt : null;
+  useEffect(() => {
+    const generation = data.restoreGeneration;
+    setDecisionLinkAttempt(selectedPageId && generation ? readDecisionLinkAttempt(actorId, selectedPageId, generation) : null);
+  }, [actorId, selectedPageId, data.restoreGeneration]);
+  const rememberDecisionLink = useCallback((attempt: DecisionLinkAttempt, next: DecisionLinkAttempt | null) => {
+    if (activeActorRef.current === attempt.actorId && activeGeneration.current === attempt.expectedRestoreGeneration &&
+        draftRef.current?.id === attempt.source.id) setDecisionLinkAttempt(next);
+    try { writeDecisionLinkAttempt(attempt, next); }
+    catch { setStorageProblem(true); }
+  }, []);
 
   useLayoutEffect(() => {
     setMigratedIssueLink(null);
@@ -2343,15 +2358,22 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     const source = comment.documentSource;
     if (!source || comment.resourceType !== 'document' || comment.parentCommentId !== undefined || latestPage?.id !== comment.resourceId) return;
     const { id, title, projectId, version } = latestPage;
-    documentActionOpener.current = opener;
     const page = { id, title, projectId, version };
     const evidence = { id: comment.id, source: { ...source } };
-    if (kind === 'link') setDocumentAction({ kind, source: { ...page, comment: evidence } });
-    else setDocumentAction({ kind, source: { ...page, comment: { ...evidence, body: comment.body } } });
+    if (kind === 'link') openDecisionLinkAction({ ...page, comment: evidence }, opener);
+    else {
+      documentActionOpener.current = opener;
+      setDocumentAction({ kind, source: { ...page, comment: { ...evidence, body: comment.body } } });
+    }
   }
   function openDecisionLink(page: DocPage, opener: HTMLButtonElement, sourceSelection: DocumentSourceSelection) {
+    openDecisionLinkAction({ id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection }, opener);
+  }
+  function openDecisionLinkAction(source: DecisionLinkSource, opener: HTMLButtonElement) {
+    const generation = data.restoreGeneration;
+    if (!generation || source.id !== selectedPageId) return;
     documentActionOpener.current = opener;
-    setDocumentAction({ kind: 'link', source: { id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection } });
+    setDocumentAction({ kind: 'link', source: pendingDecisionLink?.source ?? source, actorId, generation, initialAttempt: pendingDecisionLink ?? undefined });
   }
   function openSelectionComment(page: DocPage, opener: HTMLButtonElement, sourceSelection: DocumentSourceSelection) {
     documentActionOpener.current = opener;
@@ -2604,6 +2626,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             </div>
           </div>
 
+          {pendingDecisionLink && !documentAction && !publicationOpen && <div className="docs-notice" role="status">
+            {pendingDecisionLink.confirmedIssueKey ? '결정 근거를 연결했습니다. 연결 목록을 다시 불러올 수 있습니다.' : '결정 근거 연결 응답을 확인하지 못했습니다.'}
+            <button type="button" className="btn btn-ghost" disabled={saving || issueDrawerOpen}
+              onClick={event => openDecisionLinkAction(pendingDecisionLink.source, event.currentTarget)}>결정 근거 연결 결과 다시 확인</button>
+          </div>}
           {!reading && <>
           {confirmingSave && !saving && <div className="docs-notice" role="status">문서 저장 응답을 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.</div>}
           {(!sidebarOpen || sideTab !== 'history') && restoreRecovery}
@@ -2985,8 +3012,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       actorId={actorId} refresh={refresh} openDocument={openDocument} onNavigationChange={recordArchiveImportNavigation} onClose={closeArchiveImport} />}
     {documentAction?.kind === 'create' && <NewIssueModal data={data} projectId={projectId} actorId={actorId} refresh={refresh} notify={notify} openIssue={openIssue}
       sourceDocument={documentAction.source} selectingChecklist={checklistReselecting} onReselectChecklist={reselectChecklistSource} onClose={closeDocumentAction} />}
-    {documentAction?.kind === 'link' && <DocumentDecisionLinkDialog source={documentAction.source} data={data} actorId={actorId}
-      refresh={refresh} notify={notify} onClose={closeDocumentAction}
+    {documentAction?.kind === 'link' && documentAction.actorId === actorId && documentAction.generation === data.restoreGeneration && documentAction.source.id === selectedPageId &&
+      <DocumentDecisionLinkDialog source={documentAction.source} generation={documentAction.generation} initialAttempt={documentAction.initialAttempt}
+      data={data} actorId={actorId} refresh={refresh} notify={notify} onClose={closeDocumentAction} onAttemptChange={rememberDecisionLink}
       reloadComments={() => window.dispatchEvent(new Event(COMMENT_LIST_CHANGED))} />}
     {documentAction?.kind === 'comment' && <DocumentSelectionCommentDialog source={documentAction.source} initialDraft={documentAction.initialDraft}
       actorId={actorId} users={data.users} refresh={refresh} notify={notify} onClose={closeDocumentAction} onSaved={showSavedSelectionComment} onReselect={reselectCommentSource} />}

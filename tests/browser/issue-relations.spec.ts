@@ -146,6 +146,74 @@ test('360px 티켓에서 다른 프로젝트의 업무 관계를 편집하고 �
   }
 });
 
+test('업무 관계 수정 응답이 끊기면 같은 요청을 확인하고 이후 동료의 관계를 표시한다', async ({ page, request }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const before = await snapshot(request);
+  const [project, otherProject] = before.projects;
+  const [actor, peer] = before.users;
+  const prefix = `관계 수정 결과 확인 ${randomUUID().slice(0, 8)}`;
+  const issues: Issue[] = [];
+  try {
+    const source = await createDatedIssue(request, project.id, `${prefix} 출발`);
+    issues.push(source);
+    const target = await createDatedIssue(request, otherProject.id, `${prefix} 대상`);
+    issues.push(target);
+    const path = `/api/issues/${source.id}/relations`;
+    const created = await request.post(path, { data: { otherIssueId: target.id, type: 'related', direction: 'outgoing' } });
+    expect(created.status(), await created.text()).toBe(201);
+    const relation = await created.json() as IssueRelation;
+    const editPath = `${path}/${relation.id}`;
+    const attempts: string[] = [];
+    let applied: IssueRelation | undefined;
+    await page.route(`**${editPath}`, async route => {
+      if (route.request().method() !== 'PATCH') return route.continue();
+      attempts.push(route.request().postData() ?? '');
+      if (attempts.length > 1) return route.continue();
+      const saved = await route.fetch();
+      expect(saved.ok(), await saved.text()).toBeTruthy();
+      applied = await saved.json() as IssueRelation;
+      await route.abort('failed');
+    });
+
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/#/${project.id}/issues?issue=${source.id}`);
+    const panel = page.getByRole('dialog', { name: source.title, exact: true });
+    const title = panel.getByRole('textbox', { name: '제목', exact: true });
+    const comment = panel.getByRole('textbox', { name: '댓글 내용', exact: true });
+    const relations = panel.getByRole('region', { name: '업무 관계', exact: true });
+    await title.fill('저장하지 않은 업무 제목');
+    await comment.fill('등록하지 않은 업무 댓글');
+    await relations.getByRole('button', { name: `${target.key} 관계 수정`, exact: true }).click();
+    const form = relations.getByRole('form', { name: '업무 관계 수정', exact: true });
+    const type = form.getByRole('combobox', { name: '업무 관계 유형', exact: true });
+    await type.selectOption('blocked-by');
+    await form.getByRole('button', { name: '관계 저장', exact: true }).click();
+    const recheck = form.getByRole('button', { name: '관계 수정 결과 확인', exact: true });
+    await expect(recheck).toBeEnabled();
+    await expect(type).toHaveValue('blocked-by');
+    await expect(type).toBeDisabled();
+    expect(applied).toMatchObject({ type: 'blocks', sourceIssueId: target.id, targetIssueId: source.id });
+
+    const changed = await request.patch(editPath, { headers: { 'X-Actor-Id': peer.id }, data: {
+      expectedVersion: applied!.version, type: 'duplicates', direction: 'outgoing',
+    } });
+    expect(changed.ok(), await changed.text()).toBeTruthy();
+    const latest = await changed.json() as IssueRelation;
+    await recheck.click();
+    await expect(form).toHaveCount(0);
+    await expect(relations.getByText('이 업무가 중복임', { exact: true })).toBeVisible();
+    await expect(title).toHaveValue('저장하지 않은 업무 제목');
+    await expect(comment).toHaveValue('등록하지 않은 업무 댓글');
+    expect(attempts).toEqual([attempts[0], attempts[0]]);
+    expect(JSON.parse(attempts[0])).toMatchObject({ expectedRestoreGeneration: before.restoreGeneration, requestId: expect.any(String) });
+    expect(await (await request.get(path)).json()).toEqual([latest]);
+    const history = (await snapshot(request)).activities.filter(event => event.resourceId === source.id && event.action === '업무 관계 수정');
+    expect(history.map(event => event.actorId).sort()).toEqual([actor.id, peer.id].sort());
+  } finally {
+    await purgeCreatedIssues(request, issues);
+  }
+});
+
 test('같은 프로젝트 차단 관계에서 동시 방향 변경을 확인하고 최신 방향으로 일정 연결을 저장한다', async ({ page, request }) => {
   test.setTimeout(80_000);
   await page.setViewportSize({ width: 360, height: 820 });

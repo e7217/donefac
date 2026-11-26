@@ -9,6 +9,7 @@ import type {
 } from '../shared/types.js';
 import { readDocumentChecklistItem, readDocumentSelection } from './document-content.js';
 import type { Store } from './store.js';
+import { workspaceRestoreGeneration } from './workspace-revisions.js';
 
 type IssueInput = Record<string, unknown>;
 type RequestInput = { documentId: string; actorId: string; body: unknown };
@@ -27,7 +28,7 @@ type DecisionLinkReceipt = Receipt & { revisionId: string };
 
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
-type FollowUpErrorReason = 'source_selection_changed' | 'decision_source_exists' | 'comment_source_unavailable';
+type FollowUpErrorReason = 'source_selection_changed' | 'decision_source_exists' | 'comment_source_unavailable' | 'workspace_restored';
 
 export class DocumentFollowUpError extends Error {
   constructor(public status: number, message: string, public details?: { reason: FollowUpErrorReason } | { currentVersion: number }) { super(message); }
@@ -89,18 +90,21 @@ function parse(body: unknown) {
 }
 
 function parseDecisionLink(body: unknown) {
-  if (!record(body) || Object.keys(body).some(key => !['requestId', 'expectedDocumentVersion', 'issueId', 'actorId', 'sourceSelection', 'sourceComment'].includes(key))) {
+  if (!record(body) || Object.keys(body).some(key => !['requestId', 'expectedDocumentVersion', 'expectedRestoreGeneration', 'issueId', 'actorId', 'sourceSelection', 'sourceComment'].includes(key))) {
     throw new DocumentFollowUpError(400, '결정 근거 연결 요청을 확인해 주세요.');
   }
-  const { requestId, expectedDocumentVersion, issueId } = body;
+  const { requestId, expectedDocumentVersion, expectedRestoreGeneration, issueId } = body;
   if (typeof requestId !== 'string' || !uuid.test(requestId)) {
     throw new DocumentFollowUpError(400, '결정 근거 연결 요청 ID를 확인해 주세요.');
   }
   if (typeof expectedDocumentVersion !== 'number' || !Number.isSafeInteger(expectedDocumentVersion) || expectedDocumentVersion < 1) {
     throw new DocumentFollowUpError(400, '연결할 문서의 버전을 확인해 주세요.');
   }
+  if (expectedRestoreGeneration !== undefined && !isSourceId(expectedRestoreGeneration)) {
+    throw new DocumentFollowUpError(400, '결정 근거를 연결할 워크스페이스 세대를 확인해 주세요.');
+  }
   if (typeof issueId !== 'string' || !issueId.length) throw new DocumentFollowUpError(400, '연결할 업무를 확인해 주세요.');
-  const request = { requestId: requestId.toLowerCase(), expectedDocumentVersion, issueId };
+  const request = { requestId: requestId.toLowerCase(), expectedDocumentVersion, expectedRestoreGeneration, issueId };
   if (Object.hasOwn(body, 'sourceComment')) {
     const sourceComment = parseSourceComment(body.sourceComment);
     if (Object.hasOwn(body, 'sourceSelection') || !sourceComment) {
@@ -415,10 +419,15 @@ export class DocumentFollowUpService {
   }
 
   linkExisting({ documentId, actorId, body }: RequestInput, hooks: DecisionLinkHooks): DocumentIssueLinkResult {
-    const { requestId, expectedDocumentVersion, issueId, selection, sourceComment } = parseDecisionLink(body);
+    const { requestId, expectedDocumentVersion, expectedRestoreGeneration, issueId, selection, sourceComment } = parseDecisionLink(body);
     // Existing selection receipts use the selection object directly in the fingerprint.
-    const fingerprint = createHash('sha256').update(JSON.stringify([expectedDocumentVersion, issueId, selection ?? { sourceComment }])).digest('hex');
+    const fingerprintInput = [expectedDocumentVersion, issueId, selection ?? { sourceComment }];
+    if (expectedRestoreGeneration !== undefined) fingerprintInput.push(expectedRestoreGeneration);
+    const fingerprint = createHash('sha256').update(JSON.stringify(fingerprintInput)).digest('hex');
     return this.store.transaction(() => {
+      if (expectedRestoreGeneration !== undefined && expectedRestoreGeneration !== workspaceRestoreGeneration(this.store)) {
+        throw new DocumentFollowUpError(409, '워크스페이스가 복원되었습니다. 새로고침한 뒤 연결을 다시 확인해 주세요.', { reason: 'workspace_restored' });
+      }
       const receipt = this.store.db.prepare(`SELECT document_id AS documentId, actor_id AS actorId, fingerprint,
         issue_id AS issueId, link_id AS linkId, revision_id AS revisionId FROM document_decision_link_requests WHERE id=?`)
         .get(requestId) as DecisionLinkReceipt | undefined;

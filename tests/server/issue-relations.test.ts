@@ -141,6 +141,41 @@ test('team issue links are symmetric or directional as requested, idempotent, ve
   assert.ok(events.every(event => [a.id, b.id].includes(event.resourceId) && event.actorId === actor));
 });
 
+test('confirmed relation edit replay leaves a later edit untouched and rejects mismatched or restored inputs', async t => {
+  const f = await fixture(t);
+  const a = await f.create('관계를 편집하는 업무');
+  const b = await f.create('관계가 편집될 다른 프로젝트 업무', secondary);
+  const added = await f.call<IssueRelation>(pathFor(a.id), { method: 'POST', body: add(b.id) }, 201);
+  const path = child(a.id, added.id);
+  const { restoreGeneration } = await f.call<WorkspaceSnapshot>('/workspace');
+  const body = { expectedVersion: added.version, type: 'blocks', direction: 'incoming', requestId: randomUUID(),
+    expectedRestoreGeneration: restoreGeneration };
+  const update = { method: 'PATCH', body };
+  await f.call(path, { ...update, body: { ...body, requestId: undefined } }, 400);
+  const concurrent = await Promise.all([f.call<IssueRelation>(path, update), f.call<IssueRelation>(path, update)]);
+  assert.deepEqual(concurrent[0], concurrent[1]);
+  const applied = concurrent[0];
+  assert.equal(applied.sourceIssueId, b.id);
+  assert.equal(applied.targetIssueId, a.id);
+  await f.call(path, { ...update, headers: { 'X-Actor-Id': otherActor } }, 409);
+  await f.call(path, { ...update, body: { ...body, direction: 'outgoing' } }, 409);
+  await f.call(child(b.id, added.id), update, 409);
+
+  const later = await f.call<IssueRelation>(path, { method: 'PATCH', headers: { 'X-Actor-Id': otherActor }, body: {
+    expectedVersion: applied.version, type: 'duplicates', direction: 'outgoing',
+  } });
+  assert.deepEqual(await f.call(path, update), later);
+  const snapshot = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.equal(snapshot.activities.filter(event => event.resourceId === a.id && event.action === '업무 관계 수정').length, 2);
+  const backup = await f.call<Backup>('/export');
+  await f.call('/import', { method: 'POST', body: { data: backup } });
+  const [restored] = await f.call<IssueRelation[]>(pathFor(a.id));
+  assert.equal(restored.type, later.type);
+  await f.call(path, update, 409);
+  await f.call(path, { ...update, body: { ...body, requestId: randomUUID(), expectedVersion: restored.version } }, 409);
+  assert.deepEqual(await f.call(pathFor(a.id)), [restored]);
+});
+
 test('creating a cross-project blocked issue commits both resources and replays exactly once', async t => {
   const f = await fixture(t);
   const source = await f.create('검토할 선행 티켓');

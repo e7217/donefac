@@ -6,7 +6,8 @@ import { issueRelationScheduleMode, type IssueRelationScheduleMode } from '../..
 import type { FeatureProps, Issue, IssueCloseAsDuplicateInput, IssueCloseAsDuplicateResult, IssueRelation, IssueRelationDirection, IssueRelationType, IssueRelationView, WorkspaceSnapshot } from '../../shared/types';
 import { allowedNextStatuses, isTerminalStatus, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
 import { issueSearchAliasLabel, searchIssueCandidates } from '../../shared/workspace-search';
-import { api, ApiError, patch, post, remove } from '../lib/api';
+import { api, ApiError, post, remove } from '../lib/api';
+import { newRequestId } from '../lib/request-id';
 import './issue-relations.css';
 
 const CHOICES = {
@@ -22,12 +23,13 @@ const dateFormat = new Intl.DateTimeFormat('ko-KR', { dateStyle: 'medium' });
 
 type Choice = keyof typeof CHOICES;
 type TargetDraft = { otherIssueId: string; query: string };
-type Draft = TargetDraft & { original?: IssueRelation; choice: Choice };
+type Draft = TargetDraft & { original?: IssueRelation; choice: Choice; restoreGeneration?: string };
+type UpdateAttempt = { relationId: string; choice: Choice; body: string };
 type DuplicateDraft = TargetDraft & Omit<IssueCloseAsDuplicateInput, 'originalIssueId' | 'expectedOriginalVersion'> & {
   expectedOriginalVersion: number | null;
 };
 export interface IssueRelationsHandle { focusBlockers: () => void }
-type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'refresh' | 'notify'> & {
+type Props = Pick<FeatureProps, 'data' | 'actorId' | 'openIssue' | 'refresh' | 'notify'> & {
   issue: Issue;
   refreshKey: number;
   disabled: boolean;
@@ -56,6 +58,10 @@ function errorMessage(cause: unknown) {
   return cause instanceof Error ? cause.message : '업무 관계를 처리하지 못했습니다.';
 }
 
+function resultUnknown(cause: unknown) {
+  return !(cause instanceof ApiError) || cause.status >= 500 || [408, 425, 429, 499].includes(cause.status);
+}
+
 function lastOffset(count: number) {
   return Math.max(0, Math.floor((count - 1) / PAGE_SIZE) * PAGE_SIZE);
 }
@@ -65,7 +71,7 @@ export function IssueRelations(props: Props) {
 }
 
 function RelationList({
-  issue: currentIssue, refreshKey, data, openIssue, refresh, notify, disabled, duplicateCloseDisabled, hasUnsavedStatus,
+  issue: currentIssue, refreshKey, data, actorId, openIssue, refresh, notify, disabled, duplicateCloseDisabled, hasUnsavedStatus,
   highlightOpenBlockers, controlsRef, onReviewSchedule, onDraftChange, onDuplicateClosed, onCreateBlockedIssue,
 }: Props) {
   const { id: issueId } = currentIssue;
@@ -77,6 +83,7 @@ function RelationList({
   const [offset, setOffset] = useState(0);
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [updateAttempt, setUpdateAttempt] = useState<UpdateAttempt | null>(null);
   const [duplicateDraft, setDuplicateDraft] = useState<DuplicateDraft | null>(null);
   const [duplicateNeedsReview, setDuplicateNeedsReview] = useState(false);
   const [unlinkTarget, setUnlinkTarget] = useState<IssueRelation | null>(null);
@@ -196,6 +203,7 @@ function RelationList({
 
   const discard = useCallback(() => {
     setDraft(null);
+    setUpdateAttempt(null);
     setDuplicateDraft(null);
     setDuplicateNeedsReview(false);
     setUnlinkTarget(null);
@@ -224,7 +232,8 @@ function RelationList({
     opener.current = button;
     setActionError('');
     setUnlinkTarget(null);
-    setDraft({ original, otherIssueId: original ? otherId(original, issueId) : '', choice: original ? choiceFor(original, issueId) : 'related', query: '' });
+    setDraft({ original, otherIssueId: original ? otherId(original, issueId) : '', choice: original ? choiceFor(original, issueId) : 'related',
+      query: '', restoreGeneration: data.restoreGeneration });
     requestAnimationFrame(() => (original ? typeSelect : searchInput).current?.focus());
   }
 
@@ -275,19 +284,56 @@ function RelationList({
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (updateAttempt) {
+      submitUpdate(updateAttempt, true);
+      return;
+    }
     if (!draft || !selectedIssue || !edited || stale) return;
     const { type, direction } = CHOICES[draft.choice];
-    const original = draft.original;
+    if (draft.original) {
+      if (!draft.restoreGeneration) return;
+      submitUpdate({ relationId: draft.original.id, choice: draft.choice, body: JSON.stringify({ expectedVersion: draft.original.version, type,
+        direction, expectedRestoreGeneration: draft.restoreGeneration, requestId: newRequestId() }) });
+      return;
+    }
     void mutate(async () => {
-      const row = original
-        ? await patch<IssueRelation>(`${path}/${encodeURIComponent(original.id)}`, { expectedVersion: original.version, type, direction })
-        : await post<IssueRelation>(path, { otherIssueId: draft.otherIssueId, type, direction });
+      const row = await post<IssueRelation>(path, { otherIssueId: draft.otherIssueId, type, direction });
       reflectRelation(row);
       closeAction();
-      notify(original ? '업무 관계를 수정했습니다.' : '업무 관계를 저장했습니다.');
+      notify('업무 관계를 저장했습니다.');
       void load();
       void refresh().catch(() => undefined);
     });
+  }
+
+  function submitUpdate(attempt: UpdateAttempt, checking = false) {
+    void mutate(async () => {
+      const row = await api<IssueRelation>(`${path}/${encodeURIComponent(attempt.relationId)}`, {
+        method: 'PATCH', headers: { 'X-Actor-Id': actorId }, body: attempt.body, signal: AbortSignal.timeout(12_000),
+      });
+      if (row?.id !== attempt.relationId || row.origin !== 'teamspace' ||
+          (row.sourceIssueId !== issueId && row.targetIssueId !== issueId)) throw new Error('업무 관계 수정 응답을 확인하지 못했습니다.');
+      reflectRelation(row);
+      closeAction();
+      if (!checking) notify('업무 관계를 수정했습니다.');
+      else notify(choiceFor(row, issueId) === attempt.choice ? '업무 관계 수정 결과를 확인했습니다.' :
+        '업무 관계 수정 결과를 확인했습니다. 이후 변경된 최신 관계를 표시했습니다.');
+      void load();
+      void refresh().catch(() => undefined);
+    }, async cause => {
+      if (resultUnknown(cause)) {
+        setUpdateAttempt(attempt);
+        setActionError('업무 관계 수정 응답을 확인하지 못했습니다. 같은 요청으로 결과를 확인할 수 있습니다.');
+      } else {
+        setUpdateAttempt(null);
+        if (cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) await load();
+      }
+    });
+  }
+
+  function cancelRelationEdit() {
+    if (updateAttempt && !window.confirm('업무 관계가 이미 수정되었을 수 있습니다. 결과 확인을 중단할까요?')) return;
+    closeAction();
   }
 
   function duplicateClosed({ issue, relation }: IssueCloseAsDuplicateResult, observed = false) {
@@ -315,7 +361,7 @@ function RelationList({
       if (cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) {
         setDuplicateNeedsReview(true);
         await Promise.allSettled([load(), refresh()]);
-      } else if (!(cause instanceof ApiError) || cause.status >= 500 || [408, 425, 429, 499].includes(cause.status)) {
+      } else if (resultUnknown(cause)) {
         setDuplicateNeedsReview(true);
         setActionError('중복 처리 결과를 확인하지 못했습니다. 최신 정보를 확인해 주세요.');
       }
@@ -367,6 +413,7 @@ function RelationList({
   const actionsOpen = Boolean(draft || duplicateDraft || unlinkTarget);
   const targetName = unlinkTarget && issueById.get(otherId(unlinkTarget, issueId))?.key;
   const staleMessage = '다른 작업자가 업무 관계를 변경했습니다. 최신 관계를 열어 확인해 주세요.';
+  const draftError = !updateAttempt && stale ? staleMessage : actionError;
   function optionLabel(issue: Issue) {
     return `${issue.key} · ${issue.title} · ${projectsById.get(issue.projectId)?.name ?? '프로젝트 없음'}`;
   }
@@ -414,22 +461,25 @@ function RelationList({
       {loading ? '업무 관계를 불러오는 중…' : '연결된 업무 관계가 없습니다.'}
     </p>}
     {draft && <form className="issue-relations-editor" aria-labelledby={editHeading} aria-busy={busy} onSubmit={submit}
-      onKeyDown={event => { if (event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); if (!busy) closeAction(); } }}>
+      onKeyDown={event => { if (event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); if (!busy) cancelRelationEdit(); } }}>
       <h4 id={editHeading}>{draft.original ? '업무 관계 수정' : '업무 관계 추가'}</h4>
       {draft.original ? <p className="issue-relations-fixed">{selectedIssue ? optionLabel(selectedIssue) : '현재 목록에 없는 업무'}</p>
         : targetPicker(draft, '연결할 업무 검색', '연결할 업무', changes => setDraft({ ...draft, ...changes }))}
       <label className="issue-form-label">업무 관계 유형
-        <select className="field" ref={typeSelect} value={draft.choice} disabled={controlsDisabled}
+        <select className="field" ref={typeSelect} value={draft.choice} disabled={controlsDisabled || Boolean(updateAttempt)}
           onChange={event => setDraft({ ...draft, choice: event.target.value as Choice })}>
           {Object.entries(CHOICES).map(([key, choice]) => <option key={key} value={key}>{choice.label}</option>)}
         </select>
       </label>
-      {(stale || actionError) && <p className="issue-form-error" role="alert">{stale ? staleMessage : actionError}</p>}
+      {draftError && <p className="issue-form-error" role="alert">{draftError}</p>}
       <footer className="issue-relations-actions">
-        <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => closeAction()}>취소</button>
-        {stale && current && <button className="btn" type="button" disabled={controlsDisabled}
+        <button className="btn btn-ghost" type="button" disabled={busy} onClick={cancelRelationEdit}>취소</button>
+        {!updateAttempt && stale && current && <button className="btn" type="button" disabled={controlsDisabled}
           onClick={() => { if (opener.current) editRelation(opener.current, current); }}>최신 관계 열기</button>}
-        <button className="btn btn-primary" type="submit" disabled={controlsDisabled || stale || !selectedIssue || !edited}>관계 저장</button>
+        <button className="btn btn-primary" type="submit" disabled={controlsDisabled || (!updateAttempt &&
+          (stale || !selectedIssue || !edited || Boolean(draft.original && !draft.restoreGeneration)))}>
+          {updateAttempt ? '관계 수정 결과 확인' : '관계 저장'}
+        </button>
       </footer>
     </form>}
     {duplicateDraft && <form className="issue-relations-editor" aria-labelledby={duplicateHeading} aria-busy={busy} onSubmit={submitDuplicate}

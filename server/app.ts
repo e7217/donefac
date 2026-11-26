@@ -3096,7 +3096,8 @@ export function createApp(options: {
     res.status(created?201:200).json(relation);
   });
   app.patch('/api/issues/:id/relations/:relationId',(req,res)=>{
-    res.json(issueRelations.update(req.params.id,req.params.relationId,req.body,relationAudit(req),relationNotification(req)));
+    const relation = issueRelations.update(req.params.id, req.params.relationId, actor(req), req.body, relationAudit(req), relationNotification(req));
+    res.set('Cache-Control','no-store').json(relation);
   });
   app.delete('/api/issues/:id/relations/:relationId',(req,res)=>{
     issueRelations.remove(req.params.id,req.params.relationId,req.query.expectedVersion,relationAudit(req),relationNotification(req));

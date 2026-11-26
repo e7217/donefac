@@ -328,6 +328,7 @@ function ProjectGantt(props: GanttProps) {
   const aliasQuery = normalizeWorkspaceSearchKey(query);
   const [zoom, setZoom] = useState<GanttZoom>(timelineLink?.zoom ?? 'day');
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const rangeAnchor = useRef<{ issueId: string; scope: ScheduleFocus | string | null }>(null);
   const [scheduleFocus, setScheduleFocus] = useState<ScheduleFocus | null>(null);
   const [selectionViewId, setSelectionViewId] = useState(ganttViewId);
   const [manualReview, setManualReview] = useState<ManualReview | null>(null);
@@ -728,6 +729,7 @@ function ProjectGantt(props: GanttProps) {
       setManualReview(null); setManualProblem(null); setDatePreviewFocusTarget(null);
       setBlockedIssueCreation(null); setCreatedBlockedIssue(null);
       setRowScheduleEdit(null); setScheduleFocus(null); setShiftMode(null); setSelected(new Set());
+      rangeAnchor.current = null;
       clearInlineDates();
       setDraftEpoch(value => value + 1);
     };
@@ -1648,7 +1650,30 @@ function ProjectGantt(props: GanttProps) {
   function outside(date: string) { const day = dayNumber(date); return day < range.start || day > range.end; }
   function capturedStyle(startDate: string, endDate: string): CSSProperties { const start = Math.max(range.start, dayNumber(startDate)), end = Math.min(range.end, dayNumber(endDate)); return end < start ? { display: 'none' } : { left: (start - range.start) * dayWidth + 2, width: Math.max(3, (end - start + 1) * dayWidth - 4) }; }
 
-  function toggleSelected(id: string) { setSelected(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; }); }
+  function updateSelection(rows: readonly Issue[], checked: boolean) {
+    setSelected(previous => {
+      const next = new Set(previous);
+      for (const { id } of rows) {
+        if (checked) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
+  }
+  function selectRow(issue: Issue, checked: boolean, extend: boolean) {
+    const scope = scheduleFocus ?? ganttViewId;
+    const anchor = rangeAnchor.current;
+    const first = extend && anchor?.scope === scope ? issueRows.get(anchor.issueId) : undefined;
+    const last = issueRows.get(issue.id);
+    if (first && last) {
+      const start = Math.min(first.index, last.index);
+      const end = Math.max(first.index, last.index);
+      updateSelection(issues.slice(start, end + 1), checked);
+    } else {
+      rangeAnchor.current = { issueId: issue.id, scope };
+      updateSelection([issue], checked);
+    }
+  }
   function openSchedulePaste() {
     if (busyRef.current || !sheetScope || (!canKeepInlineDateDrafts() && !canLeave())) return;
     queueMicrotask(() => {
@@ -2906,7 +2931,18 @@ function ProjectGantt(props: GanttProps) {
           reconsider();
         }
       }}><div className="gantt-canvas" style={{ width: LEFT_WIDTH + timelineWidth, '--gantt-day-width': `${dayWidth}px` } as CSSProperties}>
-      <div className="gantt-chart-header"><div className="gantt-left gantt-left-header"><label><input type="checkbox" aria-label="표시된 업무 전체 선택" checked={issues.length > 0 && issues.every(i => selected.has(i.id))} onChange={e => setSelected(e.target.checked ? new Set(issues.map(i => i.id)) : new Set())} /></label><span>업무 <small>{issues.length}</small></span><span>시작일</span><span>종료일</span></div><div className="gantt-date-header" style={{ width: timelineWidth }}><div className="gantt-months">{months.map((tick, index) => <span key={tick.iso} style={{ left: tick.index * dayWidth, width: ((months[index + 1]?.index ?? range.days) - tick.index) * dayWidth }}>{tick.date.getUTCFullYear()}년 {tick.date.getUTCMonth() + 1}월</span>)}</div><div className="gantt-days">{ticks.map(tick => <span key={tick.iso} data-date={tick.iso} className={`${tick.nonworking ? 'weekend' : ''} ${tick.iso === todayDate() ? 'today' : ''}`} style={{ width: dayWidth }}>{chartZoom === 'day' ? <>{tick.date.getUTCDate()}<small>{['일', '월', '화', '수', '목', '금', '토'][tick.weekday]}</small></> : chartZoom === 'week' && (tick.weekday === 1 || tick.index === 0) ? tick.date.getUTCDate() : chartZoom === 'month' && tick.date.getUTCDate() === 15 ? '15' : ''}</span>)}</div></div></div>
+      <div className="gantt-chart-header">
+        <div className="gantt-left gantt-left-header">
+          <label><input type="checkbox" aria-label="표시된 업무 전체 선택" disabled={!issues.length}
+            ref={element => { if (element) element.indeterminate = selectedIssues.length > 0 && selectedIssues.length < issues.length; }}
+            checked={issues.length > 0 && selectedIssues.length === issues.length} onChange={event => {
+              rangeAnchor.current = null;
+              updateSelection(issues, event.currentTarget.checked);
+            }} /></label>
+          <span>업무 <small>{issues.length}</small></span><span>시작일</span><span>종료일</span>
+        </div>
+        <div className="gantt-date-header" style={{ width: timelineWidth }}><div className="gantt-months">{months.map((tick, index) => <span key={tick.iso} style={{ left: tick.index * dayWidth, width: ((months[index + 1]?.index ?? range.days) - tick.index) * dayWidth }}>{tick.date.getUTCFullYear()}년 {tick.date.getUTCMonth() + 1}월</span>)}</div><div className="gantt-days">{ticks.map(tick => <span key={tick.iso} data-date={tick.iso} className={`${tick.nonworking ? 'weekend' : ''} ${tick.iso === todayDate() ? 'today' : ''}`} style={{ width: dayWidth }}>{chartZoom === 'day' ? <>{tick.date.getUTCDate()}<small>{['일', '월', '화', '수', '목', '금', '토'][tick.weekday]}</small></> : chartZoom === 'week' && (tick.weekday === 1 || tick.index === 0) ? tick.date.getUTCDate() : chartZoom === 'month' && tick.date.getUTCDate() === 15 ? '15' : ''}</span>)}</div></div>
+      </div>
       {nonworkingTicks.map(tick => <div key={tick.iso} className="gantt-weekend-band" style={{ left: LEFT_WIDTH + tick.index * dayWidth, width: dayWidth, top: HEADER_HEIGHT, height: chartRowCount * ROW_HEIGHT }} />)}
       {todayPosition >= 0 && todayPosition < timelineWidth && <div className="gantt-today-line" style={{ left: LEFT_WIDTH + todayPosition + dayWidth / 2, top: HEADER_HEIGHT, height: chartRowCount * ROW_HEIGHT }} />}
       <svg className="gantt-dependency-lines" width={timelineWidth} height={issues.length * ROW_HEIGHT} style={{ left: LEFT_WIDTH, top: HEADER_HEIGHT + planningRows.length * ROW_HEIGHT }} aria-hidden="true">
@@ -2966,7 +3002,15 @@ function ProjectGantt(props: GanttProps) {
         return <div data-issue-id={issue.id} data-focused-issue={isFocused || undefined} data-dependency-focus-row={traceRole} data-hierarchy-focus-row={hierarchyRole}
           className={`gantt-row ${selected.has(issue.id) ? 'is-selected' : ''}${linkPicker ? ' gantt-link-pick-row' : ''}${isSource ? ' gantt-link-source-row' : ''}`} key={issue.id}>
           <div className="gantt-left">
-            <label><input type="checkbox" aria-label={`${issue.key} 선택`} checked={selected.has(issue.id)} onChange={() => toggleSelected(issue.id)} /></label>
+            <label title="Shift+클릭 또는 Shift+Space로 연속 선택">
+              <input type="checkbox" aria-label={`${issue.key} 선택`} aria-keyshortcuts="Shift+Space" checked={selected.has(issue.id)}
+                onChange={event => selectRow(issue, event.currentTarget.checked, 'shiftKey' in event.nativeEvent && event.nativeEvent.shiftKey === true)}
+                onKeyDown={event => {
+                  if (event.key !== ' ' || !event.shiftKey) return;
+                  event.preventDefault();
+                  if (!event.repeat) selectRow(issue, !event.currentTarget.checked, true);
+                }} />
+            </label>
             <div className="gantt-issue-cell">
               {!linkPicker && <button type="button" className="issue-icon-button gantt-row-schedule-trigger"
                 aria-label={`${issue.key} 일정과 연결 편집`} title="일정과 연결 편집" data-schedule-owner={issue.id}

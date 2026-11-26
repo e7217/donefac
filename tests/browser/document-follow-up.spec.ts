@@ -60,6 +60,70 @@ async function selectFirstParagraph(editor: Locator, from: number, to: number) {
   }, { from, to });
 }
 
+test('360px 문서에서 새로고침 후 선택한 티켓의 결정 근거 연결 결과를 확인한다', async ({ page, request }) => {
+  const snapshot = await workspace(request);
+  const project = snapshot.projects[0];
+  const suffix = randomUUID();
+  const issueTitle = `결정 근거 재확인 업무 ${suffix}`;
+  const document = await createDecision(request, project.id, `결정 근거 재확인 문서 ${suffix}`);
+  try {
+    const created = await request.post('/api/issues', { data: { projectId: project.id, title: issueTitle } });
+    expect(created.status(), await created.text()).toBe(201);
+    const issue = await created.json() as Issue;
+    const path = `/api/documents/${document.id}/decision-links`;
+    const attempts: Record<string, unknown>[] = [];
+    let failNextWorkspaceLoad = false;
+    await page.route('**/api/workspace', async route => {
+      if (!failNextWorkspaceLoad) return route.continue();
+      failNextWorkspaceLoad = false;
+      await route.abort('failed');
+    });
+    await page.route(`**${path}`, async route => {
+      if (route.request().method() !== 'POST') return route.continue();
+      attempts.push(route.request().postDataJSON());
+      const response = await route.fetch();
+      if (attempts.length === 1) {
+        expect(response.status()).toBe(201);
+        await route.abort('failed');
+      } else {
+        expect(response.status()).toBe(200);
+        failNextWorkspaceLoad = true;
+        await route.fulfill({ response });
+      }
+    });
+    await openDecision(page, document, project.id);
+    const draftTitle = `${document.title} 다음 회의 준비`;
+    const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
+    await title.fill(draftTitle);
+    await selectFirstParagraph(page.locator('.docs-prose'), 0, document.plainText.length);
+    await page.getByRole('button', { name: '선택한 본문을 기존 업무에 연결', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '기존 업무에 결정 근거 연결', exact: true });
+    await dialog.getByRole('textbox', { name: '업무 키 또는 제목 검색', exact: true }).fill(issue.key);
+    await dialog.getByRole('radio', { name: `${issue.key} ${issueTitle}`, exact: true }).check();
+    await dialog.getByRole('button', { name: '선택한 업무에 연결', exact: true }).click();
+    await expect(dialog.getByRole('button', { name: '연결 결과 다시 확인', exact: true })).toBeVisible();
+    page.once('dialog', dialog => void dialog.accept());
+    await page.reload();
+    await expect(title).toHaveValue(draftTitle);
+
+    const resume = page.getByRole('button', { name: '결정 근거 연결 결과 다시 확인', exact: true });
+    await resume.click();
+    await expect(dialog.locator('blockquote')).toHaveText(document.plainText);
+    await expect(dialog.getByRole('radio', { name: `${issue.key} ${issueTitle}`, exact: true })).toBeChecked();
+    await dialog.getByRole('button', { name: '연결 결과 다시 확인', exact: true }).click();
+    await dialog.getByRole('button', { name: '연결 목록 다시 불러오기', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(resume).toHaveCount(0);
+    await expect(title).toHaveValue(draftTitle);
+    expect(attempts).toEqual([attempts[0], attempts[0]]);
+    expect(attempts[0]).toMatchObject({ issueId: issue.id, expectedDocumentVersion: document.version,
+      expectedRestoreGeneration: snapshot.restoreGeneration });
+    const current = await workspace(request);
+    expect(current.resourceLinks.filter(link => link.documentId === document.id)).toMatchObject([{ issueId: issue.id, documentSource: { text: document.plainText } }]);
+    expect(current.activities.filter(activity => activity.resourceId === issue.id && activity.action === '문서 결정 근거 연결')).toHaveLength(1);
+  } finally { await cleanupDecision(request, document.id, issueTitle); }
+});
+
 test('360px 문서에서 원래 Jira 키로 업무에 결정 근거를 붙이고 팀 보고서에서 찾는다', async ({ page, request }) => {
   test.setTimeout(80_000);
   const suffix = randomUUID().slice(0, 7).toUpperCase();

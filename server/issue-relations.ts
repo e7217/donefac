@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { isIssueRelationDirection, isIssueRelationType, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, type TeamspaceIssueRelation } from '../shared/issue-relations.js';
 import type { Issue, IssueRelation, IssueRelationView, TeamScheduleBlocker } from '../shared/types.js';
+import { creationRequestFingerprint, creationRequestId } from './creation-request.js';
 import { findTeamspaceIssueRelation, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
 import type { SourcePreservationService } from './source-preservation.js';
 import type { Store } from './store.js';
+import { workspaceRestoreGeneration } from './workspace-revisions.js';
 
 type RelationChange = '업무 관계 추가' | '업무 관계 수정' | '업무 관계 해제';
 type Audit = (issueId: string, action: RelationChange, detail: string) => void;
@@ -16,15 +18,17 @@ export class IssueRelationError extends Error {
 }
 
 function relationInput(input: unknown, key: 'otherIssueId' | 'expectedVersion') {
+  const allowed = ['type', 'direction', key, 'actorId'];
+  if (key === 'expectedVersion') allowed.push('requestId', 'expectedRestoreGeneration');
   if (!input || typeof input !== 'object' || Array.isArray(input) ||
-      Object.keys(input).some(field => !['type', 'direction', key, 'actorId'].includes(field))) {
+      Object.keys(input).some(field => !allowed.includes(field))) {
     throw new IssueRelationError(400, '업무 관계 요청을 확인해 주세요.');
   }
-  const { type, direction, [key]: value } = input as Record<string, unknown>;
+  const { type, direction, [key]: value, requestId, expectedRestoreGeneration } = input as Record<string, unknown>;
   if (!isIssueRelationType(type) || !isIssueRelationDirection(direction)) {
     throw new IssueRelationError(400, '업무 관계 유형과 방향을 확인해 주세요.');
   }
-  return { type, direction, value };
+  return { type, direction, value, requestId, expectedRestoreGeneration };
 }
 
 function verifyVersion(relation: IssueRelation, version: unknown) {
@@ -100,7 +104,11 @@ const labels = {
 } as const;
 
 export class IssueRelationsService {
-  constructor(private readonly store: Store, private readonly sources: Pick<SourcePreservationService, 'jiraIssueBlockers'>) {}
+  constructor(private readonly store: Store, private readonly sources: Pick<SourcePreservationService, 'jiraIssueBlockers'>) {
+    store.db.exec(`CREATE TABLE IF NOT EXISTS issue_relation_update_requests (
+      id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, applied_version INTEGER NOT NULL
+    )`);
+  }
 
   list(issueId: string, allowedProjects: readonly string[] | null = null): IssueRelationView[] {
     const issue = this.requireIssue(issueId);
@@ -231,13 +239,23 @@ export class IssueRelationsService {
     return { relation, created: true };
   }
 
-  update(issueId: string, relationId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): IssueRelation {
-    const { type, direction, value: expectedVersion } = relationInput(input, 'expectedVersion');
+  update(issueId: string, relationId: string, actorId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): IssueRelation {
+    const { type, direction, value: expectedVersion, requestId, expectedRestoreGeneration } = relationInput(input, 'expectedVersion');
     return this.store.transaction(() => {
+      const receipt = this.relationUpdateRequest(requestId, expectedRestoreGeneration, {
+        scope: [actorId, issueId, relationId], type, direction, expectedVersion, expectedRestoreGeneration,
+      });
       const { issue, other, relation } = this.requireLocalRelation(issueId, relationId);
+      if (receipt?.appliedVersion !== undefined) {
+        if (relation.version < receipt.appliedVersion) {
+          throw new IssueRelationError(409, '수정한 업무 관계의 현재 버전을 확인할 수 없습니다.');
+        }
+        return relation;
+      }
       verifyVersion(relation, expectedVersion);
       const endpoints = issueRelationEndpoints(issue.id, other.id, type, direction);
       if (relation.type === type && relation.sourceIssueId === endpoints.sourceIssueId && relation.targetIssueId === endpoints.targetIssueId) {
+        this.recordRelationUpdate(receipt, relation.version);
         return relation;
       }
       if (findTeamspaceIssueRelation(this.store, { ...endpoints, type })) throw new IssueRelationError(409, '같은 업무 관계가 이미 있습니다.');
@@ -248,8 +266,33 @@ export class IssueRelationsService {
       recordIssueRelationVersion(this.store, updated.version);
       this.recordActivity(issue, other, updated, '업무 관계 수정', audit);
       notifyChange(relation, updated);
+      this.recordRelationUpdate(receipt, updated.version);
       return updated;
     });
+  }
+
+  private relationUpdateRequest(requestId: unknown, generation: unknown, payload: Record<string, unknown>) {
+    if (requestId === undefined && generation === undefined) return undefined;
+    if (typeof requestId !== 'string' || !creationRequestId.test(requestId) || typeof generation !== 'string' || !generation) {
+      throw new IssueRelationError(400, '업무 관계 수정 요청 ID와 워크스페이스 세대를 확인해 주세요.');
+    }
+    if (generation !== workspaceRestoreGeneration(this.store)) {
+      throw new IssueRelationError(409, '워크스페이스가 복원되었습니다. 새로고침한 뒤 현재 업무 관계를 확인해 주세요.');
+    }
+    const id = requestId.toLowerCase();
+    const fingerprint = creationRequestFingerprint(payload);
+    const receipt = this.store.db.prepare(`SELECT fingerprint,applied_version AS appliedVersion
+      FROM issue_relation_update_requests WHERE id=?`).get(id) as { fingerprint: string; appliedVersion: number } | undefined;
+    if (receipt && receipt.fingerprint !== fingerprint) {
+      throw new IssueRelationError(409, '이미 사용한 업무 관계 수정 요청입니다. 현재 업무 관계를 확인해 주세요.');
+    }
+    return { id, fingerprint, appliedVersion: receipt?.appliedVersion };
+  }
+
+  private recordRelationUpdate(request: { id: string; fingerprint: string } | undefined, version: number) {
+    if (!request) return;
+    this.store.db.prepare('INSERT INTO issue_relation_update_requests(id,fingerprint,applied_version) VALUES(?,?,?)')
+      .run(request.id, request.fingerprint, version);
   }
 
   remove(issueId: string, relationId: string, expected: unknown, audit: Audit, notifyChange: NotifyChange): void {

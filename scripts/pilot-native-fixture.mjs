@@ -106,8 +106,44 @@ export async function prepareNativeTeamPilot(pilot, actorIds) {
     member: { id: keyOwnerId, email }, key: { id: issued.key.id, request: keyRequest, token: issued.token, revokedAt: revoked.revokedAt } };
 }
 
+async function verifyNativeCycle(api, workspace, projectId, evidence) {
+  assert.ok(evidence?.recordId && evidence.documentId && evidence.destinationId && evidence.cycleId);
+  const { cycleId, cycleVersion, destinationId, recordId, documentId, ownerId, carry, done } = evidence;
+  const [record, revisions] = await Promise.all([
+    api(`/projects/${projectId}/cycle-completion-records/${recordId}`), api(`/documents/${documentId}/revisions`),
+  ]);
+  const cycle = workspace.planningItems.find(item => item.id === cycleId);
+  const destination = workspace.planningItems.find(item => item.id === destinationId);
+  const carried = workspace.issues.find(issue => issue.id === carry.id);
+  const completed = workspace.issues.find(issue => issue.id === done.id);
+  const document = workspace.documents.find(item => item.id === documentId);
+  assert.ok(cycle && destination && carried && completed && document);
+  assert.equal(cycle.projectId, projectId);
+  assert.equal(destination.projectId, projectId);
+  assert.deepEqual([cycle.status, cycle.version, destination.status], ['completed', cycleVersion, 'planned']);
+  for (const [live, previous, expectedCycleId, version] of [[carried, carry, destinationId, carry.version + 1], [completed, done, cycleId, done.version]]) {
+    assert.equal(live.projectId, projectId);
+    assert.equal(live.cycleId, expectedCycleId);
+    assert.deepEqual([live.version, live.status, live.assigneeId, live.startDate, live.endDate],
+      [version, previous.status, previous.assigneeId, previous.startDate, previous.endDate]);
+  }
+  assert.deepEqual([record.id, record.projectId, record.actorId, record.cycle.id, record.destination.id, record.retrospectiveDocumentId],
+    [recordId, projectId, ownerId, cycleId, destinationId, documentId]);
+  assert.deepEqual(record.counts, { carry: 1, done: 1, cancelled: 0 });
+  const carriedEntry = record.issues.find(value => value.id === carry.id);
+  const completedEntry = record.issues.find(value => value.id === done.id);
+  assert.ok(carriedEntry && completedEntry);
+  assert.deepEqual([carriedEntry.disposition, carriedEntry.assigneeId], ['carry', carry.assigneeId]);
+  assert.deepEqual([completedEntry.disposition, completedEntry.assigneeId], ['done', done.assigneeId]);
+  assert.deepEqual([document.projectId, document.authorId, document.version], [projectId, ownerId, 1]);
+  assert.ok([destination.name, carried.title, completed.title].every(value => document.plainText.includes(value)));
+  assert.equal(revisions.length, 1);
+  assert.deepEqual(revisions[0].content, document.content);
+  return { cycle, destination, carried, completed, record, document, revisions };
+}
+
 /** Re-read exact native evidence in the same workspace, after restart, and after physical recovery. */
-export async function verifyNativeTeamData(pilot, seed, knowledge) {
+export async function verifyNativeTeamData(pilot, seed, knowledge, cycleEvidence) {
   const api = pilot.api;
   assert.ok(knowledge && knowledge.projectId === seed.issue.projectId && knowledge.issueId === seed.issue.id);
   assert.notEqual(knowledge.documentId, seed.document.id);
@@ -162,5 +198,6 @@ export async function verifyNativeTeamData(pilot, seed, knowledge) {
     headers: { Authorization: `Bearer ${seed.key.token}` }, status: 401,
   });
 
-  return digest(JSON.stringify({ storedIntake, notice, home, attachment: seed.attachment, link, draft, publication, revision, latestRevision, member, revoked }));
+  const cycle = await verifyNativeCycle(api, workspace, projectId, cycleEvidence);
+  return digest(JSON.stringify({ storedIntake, notice, home, attachment: seed.attachment, link, draft, publication, revision, latestRevision, member, revoked, cycle }));
 }

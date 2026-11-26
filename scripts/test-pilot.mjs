@@ -768,7 +768,7 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   assert.deepEqual(handoffChanges.assigneeId, [actorIds[0], actorIds[1]]);
   const baseline = await teamSnapshot(pilot.api, fixture, evidence);
   const verifyDetails = native
-    ? running => verifyNativeTeamData(running, native, evidence.knowledge)
+    ? running => verifyNativeTeamData(running, native, evidence.knowledge, evidence.cycle)
     : (running, dataDir) => verifyTeamMigration(running, migration, dataDir, fixture);
   const dataBaseline = await verifyDetails(pilot, source);
   await stop(pilot);
@@ -796,7 +796,7 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   assert.equal(await verifyDetails(copy, restored), dataBaseline, 'The separate restoration changed the team workflow evidence.');
   await stop(copy);
   const records = native
-    ? 'native intake, published and draft documents, attachment bytes, member email, revoked API key and GitLab read and webhook evidence by Teamspace key'
+    ? 'native intake, cycle carryover and retrospective, published and draft documents, attachment bytes, member email, revoked API key and GitLab read and webhook evidence by Teamspace key'
     : 'Jira and Confluence records, attachment bytes and GitLab links by original Jira key';
   console.log(`Team pilot passed: ${evidence.peerCount} independent HTTPS browser sessions, ${evidence.rounds} rounds, ${evidence.editCount} retained edits, ` +
     `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched ${records}, ` +

@@ -10,6 +10,7 @@ import { prepareGitlabTraffic } from './gitlab-traffic';
 import { verifyIssueHandoff } from './issue-handoff';
 import { verifyWorkspaceTraffic, type ScheduledSuccessorPlan } from './workspace-traffic';
 import { verifyNativeKnowledge } from './native-knowledge';
+import { verifyNativeCycle } from './native-cycle';
 
 type Fixture = {
   actorIds: string[];
@@ -431,9 +432,13 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     if (!workspaceTraffic) throw new Error('The team pilot did not run project traffic.');
     if (!gitlabTraffic) throw new Error('The team pilot did not verify signed GitLab activity.');
     await verifyGantt(peers[0].context, fixture.projectId, workspaceTraffic);
+    const cycle = fixture.source === 'native' ? await verifyNativeCycle(peers[0].context, peers[1].context, baseURL, {
+      projectId: fixture.projectId, ownerId: peers[0].actorId, observerId: peers[1].actorId, workingDate: workspaceTraffic.workingDate,
+    }) : undefined;
     keepConnected();
     console.log(`Independent HTTPS sessions handed off a ${fixture.source} issue and verified the board, assignee and change history.`);
     console.log('The protected Gantt saved a successor with reviewed dates and rendered the resolved dependency. Signed GitLab pipeline events applied one workflow transition.');
+    if (cycle) console.log('The next cycle retained the carried assignment and dates. A second actor opened its retrospective, exact ticket and Gantt schedule.');
 
     const delayed = peers.at(-1)!;
     const onlinePeers = peers.slice(0, -1);
@@ -512,7 +517,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     await writeFile(fixture.evidencePath, JSON.stringify({
       documentId: fixture.documentId, originalEpoch, finalEpoch, documentVersion: final.version,
       plainText: final.plainText, staleMarker, recoveryDocumentId: copied.id, recoveryText: copied.plainText,
-      rounds, peerCount: peers.length, elapsedMs, editCount: storedEdits.length, issueReference: issueReferenceEvidence, knowledge, workspaceTraffic, gitlabTraffic,
+      rounds, peerCount: peers.length, elapsedMs, editCount: storedEdits.length, issueReference: issueReferenceEvidence, knowledge, cycle, workspaceTraffic, gitlabTraffic,
       authentication: { transport: 'https', browserSessions: sessionTokens.size },
     }), { flag: 'wx', mode: 0o600 });
     console.log('Team pilot restored its checkpoint, saved the stale edit as a separate copy, and synchronized twenty fresh edits.');

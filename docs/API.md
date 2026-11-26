@@ -109,6 +109,8 @@ Jira의 원본 설치 주소와 티켓 키에 해당하는 이관 영수증·업
 
 직접 만든 관계에는 `origin: "teamspace"`가 있다. `PATCH /api/issues/:id/relations/:relationId`에 `{expectedVersion,type,direction}`을 보내 유형과 방향을 변경한다. `DELETE`는 같은 경로의 `?expectedVersion=…`을 사용한다. 버전이 바뀌면 `409`로 최신 버전을 알려준다. 이관한 관계는 원래 이름을 반환하며 읽기 전용이다. 관계 자체와 양쪽 활동 이력은 함께 저장한다. 자체 백업 형식 51은 직접 만든 관계를 보존하고 복원 시 버전을 높인다.
 
+관계 수정 본문에 UUID v4 `requestId`와 현재 워크스페이스의 `expectedRestoreGeneration`을 함께 보낼 수 있다. 같은 작업자가 같은 요청으로 적용 결과를 다시 확인하면 현재 관계를 반환한다. 이후 동료가 저장한 관계의 유형과 방향도 현재 값으로 반환한다. 요청 ID를 다른 입력에 사용하거나 복원 이전 세대에서 보낸 요청은 `409`로 응답한다.
+
 `/api/v1`의 동일한 경로에서 양쪽 프로젝트가 키의 허용 범위에 있어야 한다. 조회에는 읽기 키를 사용할 수 있으며, 관계 추가·수정·해제에는 쓰기 키가 필요하다.
 
 Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `verifiedBlockerDirection`을 포함한다. 값은 요청한 티켓 기준 `incoming` 또는 `outgoing`이다. 이관한 관계의 `sourceIssueId`, `targetIssueId`, `type`은 원래 저장값을 반환한다. 같은 방향의 직접 만든 차단 관계가 있으면 그 관계를 우선하며, Jira 관계는 원래 이름으로 계속 조회할 수 있다.
@@ -560,6 +562,8 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 `POST /api/v1/documents/:id/decision-links`와 브라우저용 `POST /api/documents/:id/decision-links`에 `{requestId, expectedDocumentVersion, issueId}`와 함께 `sourceSelection` 또는 `sourceComment` 중 하나를 보낸다. `requestId`는 UUID v4다. `sourceSelection`은 후속 업무와 같은 `{from,to,text}` 형식이며, 서버는 현재 저장 버전의 선택 범위를 읽어 발췌를 확인한다. `sourceComment`는 이 문서의 활성 문장 댓글과 그때 고정한 원문을 지정하는 `{commentId,revisionId}`다. 문서가 이후 편집됐어도 `expectedDocumentVersion`에는 현재 버전을 보내고 댓글의 발췌는 고정한 저장본에서 확인한다. 기존 문서 연결이 있으면 ID와 관계 유형을 유지하면서 근거를 추가한다. 연결이 없으면 `결정 근거` 관계를 만들고, 원문 저장본이 필요하면 같은 트랜잭션에 기록한다.
 
 발췌를 처음 저장하면 `201`과 `{issue,link,duplicate:false}`를 반환한다. 작업자와 요청 내용이 같은 재시도, 또는 같은 저장본의 동일한 발췌는 `200`과 `duplicate:true`를 반환한다. 저장된 버전이나 선택한 텍스트가 다른 경우, 또는 문서와 티켓 사이에 다른 결정 근거가 이미 있는 경우 `409`를 반환한다. 새 요청에서 댓글이나 고정 원문을 확인할 수 없으면 `details.reason`에 `comment_source_unavailable`을 반환한다. 저장 후 댓글이 보관돼도 연결과 원문에 접근할 수 있으면 같은 요청으로 결과를 확인한다. 연결을 해제한 뒤 이전 요청을 보내면 `409`를 반환한다. 자체 백업 형식 48은 기존 업무에 저장된 발췌와 원문 저장본을 보존하고, 복원할 때 재시도 기록을 초기화한다.
+
+`expectedRestoreGeneration`을 보내면 선택하거나 검토한 워크스페이스 세대에서만 연결한다. 복원 이후 이전 세대의 요청이 도착하면 `409`와 `details.reason: workspace_restored`를 반환한다. 브라우저는 연결 요청에 이 값을 포함하고, 연결 응답을 받지 못하면 같은 탭에서 요청을 다시 확인할 수 있다.
 
 두 `/api/v1` 요청에는 문서와 업무 프로젝트를 포함하는 쓰기 키가 필요하다. 공통 문서는 전체 프로젝트 쓰기 키로 연결한다. 발췌를 저장할 때는 선택한 문서 본문의 참조 범위를 확인한다. 결과를 반환하거나 재시도할 때는 문서와 현재 업무, 실제 고정 저장본을 다시 검사한다. 범위 밖 프로젝트 또는 원문이면 `403`을 반환한다. 허용된 고정 저장본은 문서의 `/api/v1/documents/:id/revisions`에서 읽을 수 있다.
 

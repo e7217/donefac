@@ -1441,7 +1441,7 @@ function IssuePanelContent(props: IssuePanelProps) {
           <span className="issue-related-status" style={{ color: status.color }}>{status.label}</span><ChevronRight size={14} aria-hidden="true" />
         </button>)}
       </section>
-      <IssueRelations issue={savedRelationIssue} data={data} openIssue={navigateIssue} refresh={refresh} notify={notify}
+      <IssueRelations issue={savedRelationIssue} data={data} actorId={props.actorId} openIssue={navigateIssue} refresh={refresh} notify={notify}
         refreshKey={relationsRefreshKey} disabled={saving || dependencyBusy} controlsRef={relationControls} highlightOpenBlockers={Boolean(error?.openBlockers)}
         duplicateCloseDisabled={conflict || baseDraft?.version !== savedRelationIssue.version}
         hasUnsavedStatus={draft.status !== baseDraft?.status} onDuplicateClosed={reflectDuplicateClosure}
