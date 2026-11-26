@@ -2534,7 +2534,7 @@ function ProjectGantt(props: GanttProps) {
       <button type="button" className="issue-icon-button" aria-label="새 업무 안내 닫기" onClick={() => setPastedIssueIds([])}><X size={14} aria-hidden="true" /></button>
     </div>}
     {reservationsOpen && hasProject && <TimeReservations key={draftEpoch} projectId={projectId} issues={projectIssues}
-      initialIssue={selectedIssues.length === 1 ? selectedIssues[0] : undefined} actorId={props.actorId} users={data.users}
+      initialIssue={selectedIssues.length === 1 ? selectedIssues[0] : undefined} actorId={props.actorId} users={data.users} restoreGeneration={data.restoreGeneration}
       notify={notify} openIssue={openIssue} onDraftChange={trackReservationDraft} onChanged={refresh} refreshVersion={refreshCount} />}
     <div className="gantt-stats"><div><span className="gantt-stat-dot" /><strong>{scopedIssues.filter(i => i.startDate && i.endDate).length}</strong><span>일정이 잡힌 업무</span></div><div><span className="gantt-stat-dot is-empty" /><strong>{scopedIssues.filter(i => !i.startDate || !i.endDate).length}</strong><span>일정 미정</span></div><div><Link2 size={13} /><strong>{projectDependencyCount}</strong><span>업무 연결</span></div><span className="gantt-manual-badge">직접 계획 · 자동 제안</span></div>
     {allProjects && <div className="gantt-team-scope">

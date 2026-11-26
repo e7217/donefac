@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
-import { ExternalLink, GitBranch, RefreshCw } from 'lucide-react';
+import { ArrowRight, ExternalLink, GitBranch, RefreshCw } from 'lucide-react';
 import { gitlabObjectSha, isGitlabBranchName } from '../../shared/gitlab-links';
 import type { FeatureProps, GitlabIssueBranchResult, GitlabIssueBranchReview, GitlabIssueBranchTarget, GitlabLink, GitlabSettings } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
@@ -18,6 +18,7 @@ type Props = Pick<FeatureProps, 'refresh'> & {
   onClose: () => void;
   onDraftChange: (dirty: boolean, pending: boolean) => void;
   onLinked: (link: GitlabLink) => void;
+  onRevealBranch: (link: GitlabLink) => void;
 };
 type Action = 'preview' | 'apply' | 'reconcile' | 'refresh';
 type Lookup = { repositoryId: number; branch: string };
@@ -65,7 +66,7 @@ function matchesTarget(value: GitlabIssueBranchReview, target: Lookup) {
 }
 
 export function IssueGitlabBranchCreate({ issueId, issueKey, settings, loadingSettings, settingsError,
-  disabled, reloadSettings, refresh, onClose, onDraftChange, onLinked }: Props) {
+  disabled, reloadSettings, refresh, onClose, onDraftChange, onLinked, onRevealBranch }: Props) {
   const id = useId();
   const branchInput = useRef<HTMLInputElement>(null);
   const tokenInput = useRef<HTMLInputElement>(null);
@@ -86,7 +87,8 @@ export function IssueGitlabBranchCreate({ issueId, issueKey, settings, loadingSe
   const defaultRepository = settings?.projectIds.length === 1 ? String(settings.projectIds[0]) : '';
   const ready = review?.state === 'ready' ? review : null;
   const result = review && review.state !== 'ready' ? review : null;
-  const linked = Boolean(result?.link && (result.state === 'created' || result.state === 'found'));
+  const linkedBranch = result?.state === 'created' || result?.state === 'found' ? result.link : undefined;
+  const linked = Boolean(linkedBranch);
   const canCheck = result?.state === 'pending' || result?.state === 'link_needed' || result?.state === 'conflict';
   const outstanding = result?.state === 'pending' || result?.state === 'link_needed';
   const repository = outstanding ? String(result.target.repositoryId) : selectedRepository || defaultRepository;
@@ -314,6 +316,10 @@ export function IssueGitlabBranchCreate({ issueId, issueKey, settings, loadingSe
     {refreshFailed && <p className="issue-form-error" role="alert">브랜치 연결은 저장되었습니다. 활동 목록을 다시 불러오세요.</p>}
     <div className="gitlab-activity-actions">
       <button className="btn btn-ghost" type="button" disabled={busy !== null} onClick={close}>닫기</button>
+      {linkedBranch && <button className="btn btn-primary" type="button" disabled={disabled || busy !== null}
+        onClick={() => onRevealBranch(linkedBranch)}>
+        <ArrowRight size={15} aria-hidden="true" />티켓에서 연결한 브랜치 보기
+      </button>}
       {!linked && <button className="btn" type="button" disabled={disabled || busy !== null || loadingSettings} onClick={() => {
         if (ready) changeInput();
         setReadToken('');

@@ -60,6 +60,7 @@ test('360px 티켓에서 GitLab 브랜치 응답 유실을 확인하고 삭제 �
     calls.push({ method: req.method, path, credential });
     if (req.method !== 'GET' || credential === 'unknown') return send({}, 403);
     if (path === projectPath) return send({ id: repoId, path_with_namespace: repositoryPath, web_url: `${baseUrl}/${repositoryPath}`, default_branch: defaultBranch });
+    if (path === `${projectPath}/merge_requests`) return send([]);
     if (path === `${branchCollection}/${defaultBranch}`) return send({ name: defaultBranch, commit: { id: defaultHead } });
     if (path === targetBranchPath && remoteHead) return send({ name: branch, commit: { id: remoteHead } });
     return send({}, 404);
@@ -176,6 +177,12 @@ test('360px 티켓에서 GitLab 브랜치 응답 유실을 확인하고 삭제 �
         project: { id: repoId, web_url: `${baseUrl}/${repositoryPath}`, path_with_namespace: repositoryPath } },
     }));
     expect(deleted.linked).toBe(1);
+    const activityScope = gitlab.getByRole('combobox', { name: 'GitLab 활동 범위', exact: true });
+    const activitySearch = gitlab.getByRole('searchbox', { name: 'GitLab 활동 검색', exact: true });
+    await activityScope.selectOption('pipeline');
+    await activitySearch.fill('existing pipeline query');
+    await gitlab.getByRole('button', { name: '검색', exact: true }).click();
+    await expect(branchActivity).toHaveCount(0);
     await opener.click();
     await expect(form.getByRole('textbox', { name: '브랜치 이름', exact: true })).toHaveValue(branch);
     const replacementResponse = waitForAction('preview');
@@ -192,11 +199,26 @@ test('360px 티켓에서 GitLab 브랜치 응답 유실을 확인하고 삭제 �
     expect(calls.filter(call => call.method === 'POST').map(call => call.input)).toEqual([
       { branch, ref: sha }, { branch, ref: defaultHead },
     ]);
-    await form.getByRole('button', { name: '닫기', exact: true }).click();
-    await expect(branchActivity.getByRole('link', { name: `${branch} GitLab에서 새 탭으로 열기`, exact: true }))
+    const callsBeforeHandoff = calls.length;
+    await form.getByRole('button', { name: '티켓에서 연결한 브랜치 보기', exact: true }).click();
+    await expect(form).toHaveCount(0);
+    const revealedBranch = branchActivity.locator(`[data-gitlab-link-id="${recreated.link?.id}"]`);
+    await expect(revealedBranch).toBeFocused();
+    await expect(revealedBranch.getByRole('link', { name: `${branch} GitLab에서 새 탭으로 열기`, exact: true }))
       .toHaveAttribute('href', `${branchUrl}?ref_type=heads`);
+    await expect(gitlab.getByText('현재 활동 필터 범위 밖의 브랜치를 함께 표시했습니다.', { exact: true })).toBeVisible();
+    await expect(activityScope).toHaveValue('pipeline');
+    await expect(activitySearch).toHaveValue('existing pipeline query');
+    expect(calls).toHaveLength(callsBeforeHandoff);
+    await revealedBranch.getByRole('button', { name: '브랜치 MR 확인', exact: true }).click();
+    await expect(revealedBranch.getByRole('region', { name: 'GitLab 브랜치 MR', exact: true }))
+      .toContainText('이 브랜치에 열린 MR이 없습니다.');
+    expect(calls.slice(callsBeforeHandoff).every(call => call.method === 'GET' && call.credential === 'read')).toBeTruthy();
     await expect(issueTitle).toHaveValue(titleDraft);
     await expect(comment).toHaveValue(commentDraft);
+    expect(page.url()).toBe(ticketLocation);
+    await activityScope.selectOption('commit');
+    await expect(branchActivity).toHaveCount(0);
   } finally {
     try {
       const removed = await request.delete(`/api/issues/${issue.id}`, { headers });

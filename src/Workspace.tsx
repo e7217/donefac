@@ -211,10 +211,11 @@ function routeHash(route: WorkspaceRoute) {
   }
   if (route.view === 'documents' && route.documentLabel) query.set('label', route.documentLabel);
   if (route.view === 'teamoverview' && route.teamOverviewFilters) {
-    const { projectId, memberId, date, issueMetric, issueOffset } = route.teamOverviewFilters;
+    const { projectId, memberId, date, deadlineOffset, issueMetric, issueOffset } = route.teamOverviewFilters;
     if (projectId) query.set('teamProject', projectId);
     if (memberId) query.set('teamMember', memberId);
     if (date) query.set('teamDate', date);
+    if (deadlineOffset) query.set('teamDeadlineOffset', String(deadlineOffset));
     if (issueMetric) {
       query.set('teamQueue', issueMetric);
       if (issueOffset) query.set('teamQueueOffset', String(issueOffset));
@@ -286,6 +287,7 @@ function isDocumentLinkedWorkRoute(route: WorkspaceRoute): boolean {
 
 function issueReviewHistoryKey(route: WorkspaceRoute) {
   if (route.view === 'mywork') return 'teamspaceMyWorkReview';
+  if (route.view === 'teamoverview') return 'teamspaceOverviewIssueReview';
   if (route.view === 'backlog') return 'teamspaceCycleBoardIssueReview';
   if (route.view === 'development') return 'teamspaceDevelopmentIssueReview';
   if (isDocumentLinkedWorkRoute(route)) return 'teamspaceDocumentIssueReview';
@@ -295,6 +297,7 @@ function readIssueReviewHistory(value: unknown, route: WorkspaceRoute, index: nu
   if (!value || typeof value !== 'object' || !route.issueId) return;
   const entry = value as Partial<IssueReviewHistory>;
   const review = entry.review;
+  if (route.view === 'teamoverview' && review?.projectScope !== (route.teamOverviewFilters?.projectId || null)) return;
   if (route.view === 'development' && (review?.projectScope !== route.projectId ||
       typeof review.gitlabOpener?.linkId !== 'string' ||
       (review.gitlabOpener.action !== 'issue' && review.gitlabOpener.action !== 'activity') ||
@@ -337,12 +340,14 @@ function hasSameIssueOverlayContext(previous: WorkspaceRoute, next: WorkspaceRou
   const sameMilestone = Boolean(previous.ganttMilestoneId && previous.ganttMilestoneId === next.ganttMilestoneId) &&
     hasSameProjectGanttContext(previous, next);
   const sameDevelopment = hasSameDevelopmentProject(previous, next) && issueReviewContext(previous) === issueReviewContext(next);
+  const sameTeamOverview = previous.view === 'teamoverview' && next.view === 'teamoverview' &&
+    issueReviewContext(previous) === issueReviewContext(next);
   const sameMyWork = previous.view === 'mywork' && next.view === 'mywork' && previous.projectId === next.projectId;
-  return sameTeamGantt || sameMilestone || sameSearch || sameFavorites || sameDevelopment || sameMyWork ||
+  return sameTeamGantt || sameMilestone || sameSearch || sameFavorites || sameDevelopment || sameTeamOverview || sameMyWork ||
     hasSameDocumentContext(previous, next) || hasSameReportContext(previous, next) || hasSameTeamBoardContext(previous, next);
 }
 function isContextualIssueView(view: View): boolean {
-  return view === 'reports' || view === 'search' || view === 'favorites' || view === 'development' || view === 'mywork';
+  return view === 'reports' || view === 'search' || view === 'favorites' || view === 'development' || view === 'mywork' || view === 'teamoverview';
 }
 function hasContextualIssueOverlay(route: WorkspaceRoute | null): boolean {
   return Boolean(route?.issueId && isContextualIssueView(route.view));
@@ -497,15 +502,18 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const sectionId = view === 'documents' && documentId && !documentCommentId && isDocumentSectionId(section) ? section : null;
   const documentLabel = view === 'documents' ? normalizeDocumentLabelKey(parameters.get('label')) : null;
   const teamProject = parameters.get('teamProject'), teamMember = parameters.get('teamMember'), teamDate = parameters.get('teamDate');
-  const teamQueue = parameters.get('teamQueue'), teamQueueOffset = parameters.get('teamQueueOffset');
+  const teamQueue = parameters.get('teamQueue');
+  const readTeamOffset = (key: string) => {
+    const offset = parameters.get(key);
+    return offset && /^\d{1,7}$/.test(offset) && Number(offset) <= 1_000_000 ? Number(offset) || undefined : undefined;
+  };
   const issueMetric = isTeamOverviewIssueMetric(teamQueue) ? teamQueue : undefined;
-  const issueOffset = issueMetric && teamQueueOffset && /^\d{1,7}$/.test(teamQueueOffset) && Number(teamQueueOffset) <= 1_000_000
-    ? Number(teamQueueOffset) || undefined : undefined;
   const teamOverviewFilters: TeamOverviewFilters | undefined = view === 'teamoverview' ? {
     projectId: teamProject && snapshot.projects.some(project => project.id === teamProject) ? teamProject : '',
     memberId: teamMember && snapshot.users.some(member => member.id === teamMember) ? teamMember : '',
     date: teamDate && reservationDayRange(teamDate) ? teamDate : '',
-    issueMetric, issueOffset,
+    deadlineOffset: readTeamOffset('teamDeadlineOffset'), issueMetric,
+    issueOffset: issueMetric ? readTeamOffset('teamQueueOffset') : undefined,
   } : undefined;
   const boardProject = parameters.get('boardProject');
   const boardMember = parameters.get('boardMember');
@@ -592,7 +600,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const overlayIssueOpener = useRef<HTMLElement | null>(null);
   const workspaceMain = useRef<HTMLElement>(null);
   const ganttDateDraftsRef = useRef<GanttIssueDateDrafts>(null);
-  const boardIssueOpener = useRef<{ opener: HTMLElement; fallback: HTMLElement | null; reviewContext?: string; openerIssueId?: string } | null>(null);
+  const boardIssueOpener = useRef<{ opener: HTMLElement | null; fallback: HTMLElement | null; reviewContext?: string; openerIssueId?: string } | null>(null);
   const restoredDevelopmentReview = useRef<IssueReview | null>(null);
   const [boardDialogIssueId, setBoardDialogIssueId] = useState<string | null>(null);
 
@@ -677,7 +685,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const reviewHistoryKey = issueReviewHistoryKey(route);
     const sameReviewSource = previous && (route.view === 'mywork' ? previous.view === 'mywork'
       : route.view === 'backlog' ? issueReviewContext(previous) === issueReviewContext(route) : hasSameDocumentContext(previous, route));
-    const historyReview = mode === 'replace' && reviewHistoryKey && (route.view === 'development' || sameReviewSource)
+    const historyReview = mode === 'replace' && reviewHistoryKey && (route.view === 'development' || route.view === 'teamoverview' || sameReviewSource)
       ? readIssueReviewHistory(history.state?.[reviewHistoryKey], route, index, actorRef.current) : undefined;
     const previousDevelopmentReview = restoredDevelopmentReview.current;
     restoredDevelopmentReview.current = route.view === 'development' ? historyReview?.review ?? null : null;
@@ -705,13 +713,18 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
     const openerIssueId = historyReview?.review.openerIssueId;
     if (route.view !== 'development' && historyReview && openerIssueId && !boardIssueOpener.current && !previous?.issueId) {
-      const [listSelector, fallbackSelector] = route.view === 'documents' ? ['.document-linked-work', '.document-linked-work-header h3']
-        : route.view === 'backlog' ? ['.cycle-board', '.cycle-board-search input'] : ['.my-work-page', '.my-work-heading h1'];
-      const list = workspaceMain.current?.querySelector(listSelector);
-      const fallback = list?.querySelector<HTMLElement>(fallbackSelector);
-      if (list && fallback) {
-        const opener = list.querySelector<HTMLElement>(`[data-issue-review-id="${CSS.escape(openerIssueId)}"]`);
-        boardIssueOpener.current = { opener: opener ?? fallback, fallback, reviewContext: historyReview.review.context, openerIssueId };
+      if (route.view === 'teamoverview') {
+        // On reload the overview can load after the restored drawer.
+        boardIssueOpener.current = { opener: null, fallback: null, reviewContext: historyReview.review.context, openerIssueId };
+      } else {
+        const [listSelector, fallbackSelector] = route.view === 'documents' ? ['.document-linked-work', '.document-linked-work-header h3']
+          : route.view === 'backlog' ? ['.cycle-board', '.cycle-board-search input'] : ['.my-work-page', '.my-work-heading h1'];
+        const list = workspaceMain.current?.querySelector(listSelector);
+        const fallback = list?.querySelector<HTMLElement>(fallbackSelector);
+        if (list && fallback) {
+          const opener = list.querySelector<HTMLElement>(`[data-issue-review-id="${CSS.escape(openerIssueId)}"]`);
+          boardIssueOpener.current = { opener: opener ?? fallback, fallback, reviewContext: historyReview.review.context, openerIssueId };
+        }
       }
     }
     const boardTrigger = boardIssueOpener.current;
@@ -728,13 +741,15 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         if (sameSource) requestAnimationFrame(() => {
           const current = acceptedRouteRef.current;
           if (!current || current.issueId || !sameContext(current)) return;
-          const cycleRow = route.view === 'backlog' && boardTrigger.openerIssueId ? workspaceMain.current?.querySelector<HTMLElement>(
-            `.cycle-board [data-issue-review-id="${CSS.escape(boardTrigger.openerIssueId)}"]`) : null;
-          const target = [cycleRow, boardTrigger.opener, boardTrigger.fallback].find(element =>
+          const overview = route.view === 'teamoverview' ? workspaceMain.current?.querySelector('.team-overview-page') : null;
+          const reviewList = overview ?? (route.view === 'backlog' ? workspaceMain.current?.querySelector('.cycle-board') : null);
+          const reviewRow = boardTrigger.openerIssueId ? reviewList?.querySelector<HTMLElement>(
+            `[data-issue-review-id="${CSS.escape(boardTrigger.openerIssueId)}"]`) : null;
+          const target = [reviewRow, boardTrigger.opener, boardTrigger.fallback, overview?.querySelector<HTMLElement>('h1')].find(element =>
             element?.isConnected && !element.closest('[inert]') && !element.matches(':disabled'));
           if (target) {
             target.focus({ preventScroll: true });
-            if (target === cycleRow && target !== boardTrigger.opener) target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+            if (target === reviewRow && target !== boardTrigger.opener) target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
           }
           else if (boardTrigger.reviewContext || route.view === 'teamboard') workspaceMain.current?.focus({ preventScroll: true });
         });
@@ -750,7 +765,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         overlayIssueOpener.current = null;
         const savedDevelopmentOpener = route.view === 'development' && previousDevelopmentReview?.actorId === actorRef.current &&
           previousDevelopmentReview.context === issueReviewContext(route) ? previousDevelopmentReview.gitlabOpener : undefined;
-        const focusMain = route.view === 'teamboard' || route.view === 'search' || route.view === 'favorites' ||
+        const focusMain = route.view === 'teamboard' || route.view === 'teamoverview' || route.view === 'search' || route.view === 'favorites' ||
           route.view === 'development' || route.view === 'mywork';
         if (!boardTrigger && (opener || focusMain)) requestAnimationFrame(() => {
           const current = acceptedRouteRef.current;
@@ -768,6 +783,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const hash = routeHash(route);
     const state = { ...(history.state && typeof history.state === 'object' ? history.state : {}), teamspaceRouteIndex: index };
     delete state.teamspaceMyWorkReview;
+    delete state.teamspaceOverviewIssueReview;
     delete state.teamspaceCycleBoardIssueReview;
     delete state.teamspaceDocumentIssueReview;
     delete state.teamspaceDevelopmentIssueReview;
@@ -824,7 +840,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setSectionId(route.sectionId ?? null);
     const filters = route.teamOverviewFilters ?? emptyTeamOverviewFilters;
     setTeamOverviewFilters(previous => previous.projectId === filters.projectId && previous.memberId === filters.memberId &&
-      previous.date === filters.date && previous.issueMetric === filters.issueMetric && previous.issueOffset === filters.issueOffset ? previous : filters);
+      previous.date === filters.date && previous.deadlineOffset === filters.deadlineOffset &&
+      previous.issueMetric === filters.issueMetric && previous.issueOffset === filters.issueOffset ? previous : filters);
     const boardFilters = route.teamBoardFilters ?? emptyTeamBoardFilters;
     setTeamBoardFilters(previous => sameTeamBoardFilters(previous, boardFilters) ? previous : boardFilters);
     setCycleQuery(route.cycleQuery ?? '');
@@ -1065,7 +1082,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const gitlabActivity = source.gitlabActivity?.link;
     if (!current || current.issueId || !source.issueIds.includes(id) ||
         (current.view !== 'issues' && current.view !== 'backlog' && current.view !== 'teamboard' && current.view !== 'gantt' && current.view !== 'development' &&
-          current.view !== 'mywork' && !isDocumentLinkedWorkRoute(current))) {
+          current.view !== 'mywork' && current.view !== 'teamoverview' && !isDocumentLinkedWorkRoute(current))) {
       if (!gitlabActivity) openIssue(id);
       return;
     }
@@ -1077,8 +1094,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (!issue) return;
     const context = issueReviewContext(current);
     const projectScope = current.view === 'teamboard' ? current.teamBoardFilters?.projectId ?? null
-      : current.view === 'gantt' && current.ganttScope === 'team' ? (source.projectScope === undefined ? current.ganttProject ?? null : source.projectScope)
-        : current.view === 'mywork' || current.view === 'documents' ? source.projectScope ?? null : current.projectId;
+      : current.view === 'teamoverview' ? current.teamOverviewFilters?.projectId || null
+        : current.view === 'gantt' && current.ganttScope === 'team' ? (source.projectScope === undefined ? current.ganttProject ?? null : source.projectScope)
+          : current.view === 'mywork' || current.view === 'documents' ? source.projectScope ?? null : current.projectId;
     if (!requestRoute({ ...current, issueId: id, issueCommentId: null, gitlabActivityId: null, documentPreviewId: null })) return;
     const opened = acceptedRouteRef.current;
     if (!opened || opened.issueId !== id || issueReviewContext(opened) !== context) return;
@@ -1527,12 +1545,13 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         }}>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select></div>
       </div></header>
       <main className={`main-content view-${view}`} ref={workspaceMain}
-        tabIndex={teamBoard || view === 'issues' || view === 'gantt' || view === 'search' || view === 'favorites' || view === 'mywork' ? -1 : undefined}>
+        tabIndex={teamBoard || view === 'teamoverview' || view === 'issues' || view === 'gantt' || view === 'search' || view === 'favorites' || view === 'mywork' ? -1 : undefined}>
         {view === 'overview' && <Overview {...props} navigate={navigate}/>}
         {view === 'teamoverview' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>팀 개요를 불러오는 중입니다.</p></div>}>
           <TeamOverview {...props} filters={teamOverviewFilters} openPublication={openPublication}
             onFiltersChange={filters => requestRoute({projectId,view,documentId:null,issueId,teamOverviewFilters:filters})}
             openProject={(id, destination) => navigate(destination,id)} onOpenIssueSchedule={openIssueSchedule}
+            onOpenIssueForReview={openIssueForReview}
             openGitlabActivity={(id, memberId) => requestRoute({ projectId: id, view: 'development', documentId: null, issueId: null,
               gitlabActivityFilters: { ...DEFAULT_GITLAB_ACTIVITY_FILTERS, memberId: memberId || undefined } })}/>
         </Suspense>}

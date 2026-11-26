@@ -116,6 +116,11 @@ function matchesDeploymentReview(result: GitlabDeploymentReviewResult, selected:
     evidence.deployment.projectUrl === deployment.projectUrl && evidence.deployment.jobUrl === deployment.jobUrl;
 }
 
+function matchesActivitySelection(link: GitlabLink, selection: GitlabIssueReviewSelection) {
+  return link.id === selection.id && link.issueId === selection.issueId && link.projectId === selection.projectId &&
+    link.kind === selection.kind && link.iid === selection.iid && link.manualLinkId === selection.manualLinkId;
+}
+
 export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gitlabActivitySelection, gitlabActivityId, gitlabActivityFocusRef,
   onCopyActivityLink, commentActions, data, projectId, actorId, openIssue, refresh, notify, disabled, onDraftChange, isCurrentStatusSuggestion, canPrepareStatusSuggestion, onPrepareStatusSuggestion }: Props) {
   const formHeading = useId(), unlinkHeading = useId(), selectionMissingId = useId();
@@ -125,16 +130,20 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
   const [activityScope, setActivityScope] = useState<GitlabActivityScope>('all');
   const [activitySearch, setActivitySearch] = useState({ input: '', query: '', invalid: false });
   const [checkedActivity, setCheckedActivity] = useState<GitlabCheckedActivity>();
+  const [revealedBranch, setRevealedBranch] = useState<GitlabIssueReviewSelection>();
   const checkedActivityTrigger = useRef<HTMLButtonElement>(null);
   const activitySearchInput = useRef<HTMLInputElement>(null);
   const matchingLinks = useMemo(() => filterGitlabActivityLinks(undefined, visibleLinks,
     { scope: activityScope, query: activitySearch.query, pages: {} }), [visibleLinks, activityScope, activitySearch.query]);
+  const revealedLink = revealedBranch && visibleLinks.find(link => matchesActivitySelection(link, revealedBranch));
+  const revealedOutsideFilters = Boolean(revealedLink && !matchingLinks.includes(revealedLink));
+  const displayedLinks = revealedLink && revealedOutsideFilters ? [...matchingLinks, revealedLink] : matchingLinks;
   const hasActivityFilters = activityScope !== 'all' || Boolean(activitySearch.input || activitySearch.query);
   const selectionId = gitlabActivityId ?? gitlabActivitySelection?.id;
   const selectedLink = selectionId && visibleLinks.find(link => link.issueId === issueId && link.id === selectionId &&
-    (!gitlabActivitySelection || (link.issueId === gitlabActivitySelection.issueId && link.projectId === gitlabActivitySelection.projectId &&
-      link.kind === gitlabActivitySelection.kind && link.iid === gitlabActivitySelection.iid && link.manualLinkId === gitlabActivitySelection.manualLinkId)));
+    (!gitlabActivitySelection || matchesActivitySelection(link, gitlabActivitySelection)));
   const selectionMissing = Boolean(selectionId && !selectedLink);
+  const activeSelection = revealedLink ?? selectedLink;
   const focusKey = selectionId ? `${gitlabActivityId ? 'permalink' : 'review'}:${selectionId}` : null;
   const activityHeading = useRef<HTMLHeadingElement>(null);
   const selectedRow = useRef<HTMLLIElement>(null);
@@ -180,7 +189,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
   const addButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLButtonElement | null>(null);
   const focusAfterClose = useRef<{ target: HTMLButtonElement | null; revealStatusReview?: boolean; restoreCheckedActivity?: boolean;
-    fallbackToActivity?: boolean } | null>(null);
+    revealBranch?: boolean; fallbackToActivity?: boolean } | null>(null);
   const statusReviewResult = useRef<HTMLDivElement>(null);
   const linkInput = useRef<HTMLInputElement>(null);
   const cancelUnlink = useRef<HTMLButtonElement>(null);
@@ -219,8 +228,14 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
   }, [dirty, busy, branchDraft, discard, onDraftChange]);
   useLayoutEffect(() => {
     if (draft || unlinkTarget || branchOpen || busy || disabled || !focusAfterClose.current) return;
-    const { target, revealStatusReview, restoreCheckedActivity, fallbackToActivity } = focusAfterClose.current;
+    const { target, revealStatusReview, restoreCheckedActivity, revealBranch, fallbackToActivity } = focusAfterClose.current;
     focusAfterClose.current = null;
+    if (revealBranch) {
+      const branchRow = revealedLink ? selectedRow.current : null;
+      branchRow?.scrollIntoView({ block: 'nearest' });
+      (branchRow ?? activityHeading.current)?.focus({ preventScroll: true });
+      return;
+    }
     if (revealStatusReview && statusReviewResult.current) {
       statusReviewResult.current.focus();
       return;
@@ -230,7 +245,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
       return;
     }
     (target?.isConnected && !target.disabled ? target : fallbackToActivity ? activityHeading.current : addButton.current)?.focus({ preventScroll: true });
-  }, [draft, unlinkTarget, branchOpen, busy, disabled]);
+  }, [draft, unlinkTarget, branchOpen, busy, disabled, revealedLink]);
 
   function searchActivity(event: FormEvent) {
     event.preventDefault();
@@ -239,15 +254,20 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
       setActivitySearch(current => ({ ...current, invalid: true }));
       return;
     }
-    if (query !== activitySearch.query) setCheckedActivity(undefined);
+    if (query !== activitySearch.query) clearActivitySelection();
     setActivitySearch({ input: query, query, invalid: false });
   }
 
   function resetActivityFilters() {
     setActivityScope('all');
     setActivitySearch({ input: '', query: '', invalid: false });
-    setCheckedActivity(undefined);
+    clearActivitySelection();
     activitySearchInput.current?.focus({ preventScroll: true });
+  }
+
+  function clearActivitySelection() {
+    setCheckedActivity(undefined);
+    setRevealedBranch(undefined);
   }
 
   const trackBranchDraft = useCallback((dirty: boolean, pending: boolean) => {
@@ -307,6 +327,14 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
 
   function showLinkedActivity(link: GitlabLink) {
     setView(current => ({ source: current.source, rows: [...current.rows.filter(row => row.id !== link.id), link] }));
+  }
+
+  function revealLinkedBranch(link: GitlabLink) {
+    setRevealedBranch(link);
+    setCheckedActivity({ linkId: link.id, kind: link.kind, triggerRef: checkedActivityTrigger });
+    focusAfterClose.current = { target: null, revealBranch: true };
+    opener.current = null;
+    discard();
   }
 
   async function afterChange(message: string) {
@@ -598,7 +626,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
     </div>}
     {branchOpen && <IssueGitlabBranchCreate issueId={issueId} issueKey={issueKey} settings={settings} loadingSettings={loading}
       settingsError={settingsError} disabled={disabled || busy} reloadSettings={() => void readSettings(false)} refresh={refresh}
-      onClose={closeAction} onDraftChange={trackBranchDraft} onLinked={showLinkedActivity} />}
+      onClose={closeAction} onDraftChange={trackBranchDraft} onLinked={showLinkedActivity} onRevealBranch={revealLinkedBranch} />}
     {draft && <form className="gitlab-activity-editor" aria-labelledby={formHeading} aria-busy={busy} onSubmit={submit} onKeyDown={cancelOnEscape}>
       <h4 id={formHeading}>{draft.existing ? 'GitLab 링크 다시 확인' : 'GitLab 링크 추가'}</h4>
       {loading && <p className="gitlab-activity-hint" role="status">GitLab 설정을 불러오는 중입니다.</p>}
@@ -648,7 +676,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
           const scope = GITLAB_ACTIVITY_SCOPES.find(value => value === event.currentTarget.value);
           if (scope) {
             setActivityScope(scope);
-            setCheckedActivity(undefined);
+            clearActivitySelection();
           }
         }}>
           {GITLAB_ACTIVITY_SCOPES.map(value => <option value={value} key={value}>{GITLAB_ACTIVITY_SCOPE_LABELS[value]}</option>)}
@@ -668,9 +696,13 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
       </button>}
     </div>}
     {followUp.content}
-    {matchingLinks.length ? <GitlabActivityList key={JSON.stringify([activityScope, activitySearch.query])}
-      links={matchingLinks} issueVersions={new Map([[issueId, issueVersion]])}
-      selection={selectedLink && matchingLinks.includes(selectedLink) ? { link: selectedLink, rowRef: selectedRow } : undefined}
+    {revealedOutsideFilters && <p className="gitlab-activity-hint" role="status">현재 활동 필터 범위 밖의 브랜치를 함께 표시했습니다.</p>}
+    {revealedBranch && !revealedLink && <p className="gitlab-activity-hint" role="status">
+      연결한 브랜치를 현재 활동에서 찾을 수 없습니다. GitLab 활동을 새로고침해 주세요.
+    </p>}
+    {displayedLinks.length ? <GitlabActivityList key={JSON.stringify([activityScope, activitySearch.query])}
+      links={displayedLinks} issueVersions={new Map([[issueId, issueVersion]])}
+      selection={activeSelection && displayedLinks.includes(activeSelection) ? { link: activeSelection, rowRef: selectedRow } : undefined}
       checkedActivity={checkedActivity}
       onCopyActivityLink={onCopyActivityLink}
       commentActions={{ ...commentActions, disabled: commentActions.disabled || controlsDisabled || actionOpen }}

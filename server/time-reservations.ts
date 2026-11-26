@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import type { Express, Request } from 'express';
 import type { Issue, IssueTimeReservation, IssueTimeReservationEntry, User } from '../shared/types.js';
+import { creationRequestFingerprint, creationRequestId } from './creation-request.js';
 import type { Store } from './store.js';
+import { workspaceRestoreGeneration } from './workspace-revisions.js';
 
 const DAY_MS = 86_400_000;
 const MAX_CALENDAR_DAYS = 31;
@@ -21,6 +23,7 @@ interface BackupReferences { issues: readonly Issue[]; archivedIssues: readonly 
 type Fields = Pick<IssueTimeReservation, 'userId' | 'startAt' | 'endAt'>;
 type DisplayIssue = Pick<Issue, 'projectId' | 'key' | 'title'>;
 type CalendarRow = { json: string; projectId: string; key: string; title: string };
+type MutationAttempt = { id: string; fingerprint: string; appliedVersion?: number };
 interface Hooks {
   actor(request: Request): string;
   activity(request: Request, resourceType: string, resourceId: string, action: string, detail?: string): void;
@@ -98,6 +101,9 @@ export class TimeReservationService {
       CREATE INDEX IF NOT EXISTS issue_time_reservations_calendar ON issue_time_reservations(start_at,end_at,id)
         WHERE state='reserved' AND deleted_at IS NULL;
       CREATE TABLE IF NOT EXISTS retired_time_reservation_requests (id TEXT PRIMARY KEY, version INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS time_reservation_mutation_requests (
+        id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, applied_version INTEGER NOT NULL
+      );
     `);
   }
 
@@ -204,22 +210,56 @@ export class TimeReservationService {
     return previous;
   }
 
+  private mutationAttempt(input: Record<string, unknown>, scope: readonly string[]): MutationAttempt | undefined {
+    const { requestId, ...payload } = input;
+    const { expectedRestoreGeneration } = payload;
+    if (requestId === undefined && expectedRestoreGeneration === undefined) return undefined;
+    if (typeof requestId !== 'string' || !creationRequestId.test(requestId) ||
+        typeof expectedRestoreGeneration !== 'string' || !expectedRestoreGeneration) {
+      fail(400, '시간 배정 요청 ID와 워크스페이스 세대를 확인해 주세요.');
+    }
+    if (expectedRestoreGeneration !== workspaceRestoreGeneration(this.store)) {
+      fail(409, '워크스페이스가 복원되었습니다. 새로고침한 뒤 현재 시간 배정을 확인해 주세요.');
+    }
+    const id = requestId.toLowerCase();
+    const fingerprint = creationRequestFingerprint({ scope, payload });
+    const receipt = this.store.db.prepare('SELECT fingerprint,applied_version AS appliedVersion FROM time_reservation_mutation_requests WHERE id=?')
+      .get(id) as Omit<MutationAttempt, 'id'> | undefined;
+    if (receipt && receipt.fingerprint !== fingerprint) fail(409, '이미 사용한 시간 배정 요청입니다. 현재 배정을 확인해 주세요.');
+    return { id, fingerprint, appliedVersion: receipt?.appliedVersion };
+  }
+
+  private recordMutation(attempt: MutationAttempt | undefined, version: number): void {
+    if (!attempt) return;
+    this.store.db.prepare('INSERT INTO time_reservation_mutation_requests(id,fingerprint,applied_version) VALUES(?,?,?)')
+      .run(attempt.id, attempt.fingerprint, version);
+  }
+
   private edit(request: Request, issueId: string, id: string, hooks: Hooks): IssueTimeReservationEntry {
     const actorId = hooks.actor(request);
     inputRecord(request.query, []);
-    const body = inputRecord(request.body, [...FIELD_KEYS, 'expectedVersion']);
+    const body = inputRecord(request.body, [...FIELD_KEYS, 'expectedVersion', 'requestId', 'expectedRestoreGeneration']);
     const version = expectedVersion(body.expectedVersion);
     return this.store.transaction(() => {
+      const attempt = this.mutationAttempt(body, ['edit', issueId, id, actorId]);
       const issue = this.issue(issueId);
       const previous = this.forIssue(issueId, id);
       if (previous.deletedAt !== null) fail(404, '취소된 시간 배정입니다.');
+      if (attempt?.appliedVersion !== undefined) {
+        if (previous.version < attempt.appliedVersion) fail(409, '저장한 시간 배정의 현재 버전을 확인할 수 없습니다.');
+        return display(previous, issue);
+      }
       if (previous.version !== version) fail(409, '다른 작업자가 시간 배정을 변경했습니다. 최신 배정을 확인해 주세요.');
       const input = this.fields(body);
-      if (previous.state === 'reserved' && previous.userId === input.userId && previous.startAt === input.startAt && previous.endAt === input.endAt) return display(previous, issue);
+      if (previous.state === 'reserved' && previous.userId === input.userId && previous.startAt === input.startAt && previous.endAt === input.endAt) {
+        this.recordMutation(attempt, previous.version);
+        return display(previous, issue);
+      }
       this.requireVacancy(input, previous.id);
       const value: ReservationRecord = { ...previous, ...input, state: 'reserved', version: nextVersion(version),
         updatedById: actorId, updatedAt: new Date().toISOString() };
       this.write(value);
+      this.recordMutation(attempt, value.version);
       hooks.activity(request, 'issue', issueId, '시간 배정 수정', `${input.startAt} ~ ${input.endAt}`);
       return display(value, issue);
     });
@@ -228,18 +268,23 @@ export class TimeReservationService {
   private remove(request: Request, issueId: string, id: string, hooks: Hooks): { ok: true } {
     const actorId = hooks.actor(request);
     const { expectedVersion: queryVersion } = request.query;
-    inputRecord(request.query, ['expectedVersion']);
+    const query = inputRecord(request.query, ['expectedVersion', 'requestId', 'expectedRestoreGeneration']);
     const version = expectedVersion(typeof queryVersion === 'string' && /^\d{1,16}$/.test(queryVersion) ? Number(queryVersion) : undefined);
     return this.store.transaction(() => {
+      const attempt = this.mutationAttempt(query, ['delete', issueId, id, actorId]);
       this.issue(issueId);
       const previous = this.forIssue(issueId, id);
       if (previous.deletedAt !== null) {
-        if (previous.version === version + 1) return { ok: true };
+        const appliedVersion = attempt?.appliedVersion;
+        if ((appliedVersion !== undefined && previous.version >= appliedVersion) || (!attempt && previous.version === version + 1)) return { ok: true };
         fail(404, '취소된 시간 배정입니다.');
       }
+      if (attempt?.appliedVersion !== undefined) fail(409, '삭제 요청 이후 시간 배정이 변경되었습니다. 현재 배정을 확인해 주세요.');
       if (previous.version !== version) fail(409, '다른 작업자가 시간 배정을 변경했습니다. 최신 배정을 확인해 주세요.');
       const timestamp = new Date().toISOString();
-      this.write({ ...previous, version: nextVersion(version), updatedById: actorId, updatedAt: timestamp, deletedAt: timestamp });
+      const deletedVersion = nextVersion(version);
+      this.write({ ...previous, version: deletedVersion, updatedById: actorId, updatedAt: timestamp, deletedAt: timestamp });
+      this.recordMutation(attempt, deletedVersion);
       hooks.activity(request, 'issue', issueId, '시간 배정 취소', `${previous.startAt} ~ ${previous.endAt}`);
       return { ok: true };
     });

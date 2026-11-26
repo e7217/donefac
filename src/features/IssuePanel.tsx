@@ -1530,7 +1530,8 @@ function IssuePanelContent(props: IssuePanelProps) {
       <section className="issue-danger-zone">{deleteConfirm ? <><p><strong>{issue.key} 업무를 휴지통으로 옮길까요?</strong><br /><span>휴지통에서 업무를 복원할 수 있습니다. 이미 기록한 작업 시간은 프로젝트 보고서에 남습니다.{(dirty || commentDraft.body.trim() || commentEditing.dirty) && ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.'}</span></p><div><button className="btn btn-ghost" onClick={() => setDeleteConfirm(false)} disabled={saving}>취소</button><button className="btn issue-btn-danger" onClick={deleteIssue} disabled={saving || commenting || Boolean(commentEditing.operation)}>휴지통으로 이동</button></div></> : <button className="btn btn-ghost" onClick={() => setDeleteConfirm(true)}><Trash2 size={14} /> 업무 삭제</button>}</section>
     </> : tab === 'worklogs' ? <IssueWorklogs issueId={issue.id} actorId={props.actorId} users={data.users}
       notify={notify} onChanged={refresh} onDraftChange={trackChildDraft}/>
-    : tab === 'reservations' ? <TimeReservations issue={issue} actorId={props.actorId} users={data.users} notify={notify} onDraftChange={trackChildDraft} onChanged={refresh} />
+    : tab === 'reservations' ? <TimeReservations issue={issue} actorId={props.actorId} users={data.users} restoreGeneration={data.restoreGeneration}
+      notify={notify} onDraftChange={trackChildDraft} onChanged={refresh} />
     : tab === 'source' ? <>
       <JiraDeadlineRecovery issueId={issue.id} issueVersion={issue.version} actorId={props.actorId}
         blockedReason={deadlineRecoveryBlocked} onPendingChange={trackJiraDeadlinePending}

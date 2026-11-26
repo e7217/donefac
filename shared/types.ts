@@ -1193,6 +1193,7 @@ export interface TeamOverviewFilters {
   projectId: string;
   memberId: string;
   date: string;
+  deadlineOffset?: number;
   issueMetric?: TeamOverviewIssueMetric;
   issueOffset?: number;
 }

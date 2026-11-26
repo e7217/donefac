@@ -254,6 +254,85 @@ test('문서 편집·댓글이 저장되고 이전 내용 복구는 새 버전�
   expect(errors).toEqual([]);
 });
 
+test('360px 문서 이력 복구 응답이 끊겨도 새로고침 후 같은 복구를 확인하고 최신 본문과 초안을 유지한다', async ({ page, syntheticDocument }) => {
+  const { document, requests } = syntheticDocument;
+  const path = `/api/documents/${document.id}`;
+  const edited = await requests.patch(path, { data: { expectedVersion: document.version, content: richParagraph('복구 전에 저장한 문단') } });
+  expect(edited.ok()).toBe(true);
+  await page.setViewportSize({ width: 360, height: 820 });
+  await openDocument(page, document);
+  await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+  await page.getByRole('button', { name: '이력', exact: true }).click();
+  await page.locator('.docs-revision').filter({ hasText: '버전 1' }).click();
+
+  const attempts: unknown[] = [];
+  await page.route(`**${path}/restore`, async route => {
+    attempts.push(route.request().postDataJSON());
+    if (attempts.length === 1) {
+      const response = await route.fetch();
+      expect(response.ok()).toBe(true);
+      await route.abort('failed');
+    } else await route.continue();
+  });
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '이 버전으로 복구', exact: true }).click();
+  const retry = page.getByRole('button', { name: '버전 복구 결과 다시 확인', exact: true });
+  await expect(retry).toBeVisible();
+  await page.getByRole('button', { name: '문서 정보 패널 닫기', exact: true }).click();
+
+  const draftTitle = `${document.title} 확인 전 입력한 제목`;
+  const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
+  await title.fill(draftTitle);
+  const peerText = '복구 이후 동료가 저장한 최신 문단';
+  const peer = await requests.patch(path, { headers: { 'X-Actor-Id': 'user-seo' }, data: {
+    expectedVersion: 3, content: richParagraph(peerText),
+  } });
+  expect(peer.ok()).toBe(true);
+  await page.reload();
+  await expect(retry).toBeVisible();
+  await expect(title).toHaveValue(draftTitle);
+  await expect(page.locator('.docs-prose')).toHaveText(peerText);
+  await retry.click();
+  await expect(page.getByText('버전 3에 복구한 결과를 확인했습니다.', { exact: true })).toBeVisible();
+  await expect(title).toHaveValue(draftTitle);
+  await expect(page.locator('.docs-prose')).toHaveText(peerText);
+  await expect(page.locator('.docs-save-state')).toHaveText('저장 필요');
+  expect(attempts).toHaveLength(2);
+  expect(attempts[1]).toEqual(attempts[0]);
+
+  const revisions = await (await requests.get(`${path}/revisions`)).json() as DocRevision[];
+  expect(revisions.map(value => value.version)).toEqual([4, 3, 2, 1]);
+  expect(revisions.filter(value => value.summary === '버전 1에서 복구')).toHaveLength(1);
+  expect(revisions[0].plainText).toBe(peerText);
+});
+
+test('이력 조회가 실패하면 같은 문서에서 다시 불러올 수 있고 다른 문서의 버전을 표시하지 않는다', async ({ page, syntheticDocument }) => {
+  const { document, requests } = syntheticDocument;
+  const otherTitle = `${document.title} 다른 문서`;
+  const response = await requests.post('/api/documents', { data: { projectId: document.projectId, title: otherTitle, content: richParagraph('별개 이력') } });
+  expect(response.status()).toBe(201);
+  const other = await response.json() as DocPage;
+  await openDocument(page, document);
+  await page.getByRole('button', { name: '이력', exact: true }).click();
+  await page.locator('.docs-revision').click();
+  await expect(page.locator('.docs-history-preview')).toContainText(document.title);
+
+  let reads = 0;
+  await page.route(`**/api/documents/${other.id}/revisions`, async route => {
+    if (++reads === 1) await route.fulfill({ status: 503, json: { error: '문서 이력을 잠시 읽을 수 없습니다.' } });
+    else await route.continue();
+  });
+  await page.evaluate(hash => { window.location.hash = hash; }, `#/${other.projectId}/documents/${other.id}`);
+  const retry = page.getByRole('button', { name: '이력 다시 불러오기', exact: true });
+  await expect(retry).toBeVisible();
+  await expect(page.locator('.docs-revision')).toHaveCount(0);
+  await expect(page.locator('.docs-history-preview')).toHaveCount(0);
+  await retry.click();
+  await page.locator('.docs-revision').click();
+  await expect(page.locator('.docs-history-preview')).toContainText(otherTitle);
+  expect(reads).toBe(2);
+});
+
 test('360px 문서 댓글의 응답이 끊겨도 새로고침 뒤 같은 댓글만 확인하고 다음 초안을 보존한다', async ({ page, syntheticDocument }) => {
   const { document, requests } = syntheticDocument;
   await page.setViewportSize({ width: 360, height: 820 });

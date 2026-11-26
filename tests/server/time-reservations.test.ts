@@ -81,6 +81,41 @@ const list = (f: Fixture, issueId: string) => expectStatus(f.call<IssueTimeReser
 const calendar = (f: Fixture, low: string, high: string, userId?: string) => expectStatus(f.call<IssueTimeReservationEntry[]>(range(low, high, userId)));
 const backup = (f: Fixture) => expectStatus(f.call<Backup>('/export'));
 
+test('guarded time reservation mutations replay after restart and do not overwrite later edits or restored data', async t => {
+  const f = await fixture(t);
+  const issue = await createIssue(f, f.first.id, '수정 결과를 다시 확인할 배정 업무');
+  const created = await expectStatus(f.call<IssueTimeReservationEntry>(endpoint(issue.id), 'POST', input(iso(23, '03:00'), iso(23, '04:00'))), 201);
+  const path = endpoint(issue.id, created.id);
+  const expectedRestoreGeneration = (await expectStatus(f.call<WorkspaceSnapshot>('/workspace'))).restoreGeneration!;
+  const edit = { userId: member, startAt: created.startAt, endAt: iso(23, '04:30'), expectedVersion: created.version, expectedRestoreGeneration, requestId: randomUUID() };
+  const changed = await expectStatus(f.call<IssueTimeReservationEntry>(path, 'PATCH', edit));
+  await f.restart();
+  assert.deepEqual(await expectStatus(f.call<IssueTimeReservationEntry>(path, 'PATCH', edit)), changed);
+  await expectStatus(f.call(path, 'PATCH', edit, editor), 409);
+  await expectStatus(f.call(path, 'PATCH', { ...edit, endAt: iso(23, '04:45') }), 409);
+
+  const later = await expectStatus(f.call<IssueTimeReservationEntry>(path, 'PATCH', {
+    ...edit, requestId: randomUUID(), expectedVersion: changed.version, endAt: iso(23, '05:00'),
+  }, editor));
+  assert.deepEqual(await expectStatus(f.call<IssueTimeReservationEntry>(path, 'PATCH', edit)), later);
+  const activeBackup = await backup(f);
+  const deleteParams = { expectedVersion: String(later.version), expectedRestoreGeneration, requestId: randomUUID() };
+  const deletion = `${path}?${new URLSearchParams(deleteParams)}`;
+  await expectStatus(f.call(deletion, 'DELETE'));
+  await f.restart();
+  await expectStatus(f.call(deletion, 'DELETE'));
+  await expectStatus(f.call(deletion, 'DELETE', undefined, editor), 409);
+  await expectStatus(f.call(`${path}?${new URLSearchParams({ ...deleteParams, requestId: randomUUID() })}`, 'DELETE'), 404);
+  assert.deepEqual(await list(f, issue.id), []);
+
+  await expectStatus(f.call('/import', 'POST', { data: activeBackup }));
+  const [restored] = await list(f, issue.id);
+  assert.equal(restored.endAt, later.endAt);
+  await expectStatus(f.call(path, 'PATCH', { ...edit, requestId: randomUUID(), expectedVersion: restored.version }), 409);
+  await expectStatus(f.call(`${path}?${new URLSearchParams({ ...deleteParams, expectedVersion: String(restored.version) })}`, 'DELETE'), 409);
+  assert.deepEqual(await list(f, issue.id), [restored]);
+});
+
 test('ticket time reservations enforce strict intervals and cross-project overlap, retain separate effort, and edit with CAS', async t => {
   const f = await fixture(t);
   const issue = await createIssue(f, f.first.id, '계획 필드가 있는 시간 배정 업무', {

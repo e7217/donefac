@@ -9,6 +9,7 @@ import {
 } from '../../shared/types';
 import type { ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
 import { api } from '../lib/api';
+import type { OpenIssueForReview } from '../lib/issue-review';
 import { gitlabActivityKindLabel, gitlabActivityStateLabel, gitlabActivityUrl } from './GitlabActivity';
 import './team-overview.css';
 
@@ -19,17 +20,18 @@ type Props = Pick<FeatureProps, 'data' | 'openIssue'> & {
   openProject: (projectId: string, destination: 'overview' | 'gantt') => void;
   openGitlabActivity: (projectId: string, memberId: string) => void;
   onOpenIssueSchedule: (issueId: string, endpoint: ScheduleDependencyEndpoint) => boolean;
+  onOpenIssueForReview: OpenIssueForReview;
 };
-type SectionKey = 'deadlines' | 'reviews' | 'gitlab' | 'reservations';
+type SectionKey = 'reviews' | 'gitlab' | 'reservations';
 type Offsets = Partial<Record<SectionKey, number>>;
-type LoadResult = { requestKey: string; data: TeamOverviewResult | null; error: string };
+type LoadResult = { requestKey: string; snapshot: Props['data']; data: TeamOverviewResult | null; error: string };
 
 const metricLabels = {
   open: '열린 업무', overdue: '마감 초과', dueSoon: '오늘부터 7일 이내', unscheduled: '일정 미정', unassigned: '미배정',
 } satisfies Record<TeamOverviewIssueMetric, string>;
 const timingLabels = { overdue: '마감 초과', today: '오늘 마감', soon: '7일 이내', later: '마감 예정' };
 const issueSectionId = 'team-overview-issue-results';
-const offsetKeys = { deadlines: 'deadlineOffset', reviews: 'reviewOffset', gitlab: 'gitlabOffset', reservations: 'reservationOffset' } as const;
+const offsetKeys = { reviews: 'reviewOffset', gitlab: 'gitlabOffset', reservations: 'reservationOffset' } as const;
 const formatCount = (count: number) => count.toLocaleString('ko-KR');
 const todayInSeoul = () => reservationLocalDateTime(new Date().toISOString()).slice(0, 10);
 
@@ -70,31 +72,32 @@ export function TeamOverview(props: Props) {
   const [today, setToday] = useState(todayInSeoul);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const date = filters.date || today;
+  const firstPage = { ...filters, deadlineOffset: undefined, issueOffset: undefined };
   return <div className="page team-overview-page">
     <header className="page-heading team-overview-heading">
-      <div><h1>팀 개요</h1><p>기준일 <time dateTime={date}>{date}</time> · 서울 시간</p></div>
+      <div><h1 tabIndex={-1}>팀 개요</h1><p>기준일 <time dateTime={date}>{date}</time> · 서울 시간</p></div>
       <button className="btn btn-ghost" type="button" aria-label="팀 개요 새로고침"
         onClick={() => setRefreshVersion(value => value + 1)}><RefreshCw size={16} aria-hidden="true" />새로고침</button>
     </header>
 
     <div className="card team-overview-filters">
       <label>프로젝트<select className="field" aria-label="프로젝트 필터" value={filters.projectId}
-        onChange={event => onFiltersChange({ ...filters, projectId: event.target.value, issueOffset: undefined })}>
+        onChange={event => onFiltersChange({ ...firstPage, projectId: event.target.value })}>
         <option value="">전체 프로젝트</option>
         {data.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
       </select></label>
       <label>팀원<select className="field" aria-label="팀원 필터" value={filters.memberId}
-        onChange={event => onFiltersChange({ ...filters, memberId: event.target.value, issueOffset: undefined })}>
+        onChange={event => onFiltersChange({ ...firstPage, memberId: event.target.value })}>
         <option value="">전체 팀원</option>
         {data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}
       </select></label>
       <label>기준일<input className="field" type="date" value={date} min="0001-01-01" max="9999-12-30"
         onChange={event => {
-          if (event.target.value && event.target.validity.valid) onFiltersChange({ ...filters, date: event.target.value, issueOffset: undefined });
+          if (event.target.value && event.target.validity.valid) onFiltersChange({ ...firstPage, date: event.target.value });
         }} /></label>
       {filters.date && <button className="btn btn-ghost team-overview-today" type="button" onClick={() => {
         setToday(todayInSeoul());
-        onFiltersChange({ ...filters, date: '', issueOffset: undefined });
+        onFiltersChange({ ...firstPage, date: '' });
       }}>오늘</button>}
       {filters.memberId && <p className="team-overview-scope-note">업무와 GitLab은 담당·협력, 문서는 검토자, 시간 배정은 배정된 팀원을 기준으로 조회합니다.</p>}
     </div>
@@ -103,7 +106,8 @@ export function TeamOverview(props: Props) {
   </div>;
 }
 
-function OverviewContent({ data, filters, openIssue, openPublication, openProject, openGitlabActivity, onFiltersChange, onOpenIssueSchedule, refreshVersion, onDefaultDate }: Props & {
+function OverviewContent({ data, filters, openIssue, openPublication, openProject, openGitlabActivity, onFiltersChange,
+  onOpenIssueSchedule, onOpenIssueForReview, refreshVersion, onDefaultDate }: Props & {
   refreshVersion: number;
   onDefaultDate: (date: string) => void;
 }) {
@@ -116,6 +120,7 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
   if (filters.projectId) query.set('projectId', filters.projectId);
   if (filters.memberId) query.set('memberId', filters.memberId);
   if (filters.date) query.set('date', filters.date);
+  if (filters.deadlineOffset) query.set('deadlineOffset', String(filters.deadlineOffset));
   const issueMetric = filters.issueMetric;
   if (issueMetric) {
     query.set('issueMetric', issueMetric);
@@ -127,17 +132,17 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
   }
   const path = `/team-overview?${query}`;
   const requestKey = `${path}#${refreshVersion}:${revision}`;
-  const busy = loaded?.requestKey !== requestKey;
+  const busy = loaded?.requestKey !== requestKey || loaded.snapshot !== data;
 
   useEffect(() => {
     const controller = new AbortController();
     void api<TeamOverviewResult>(path, { signal: controller.signal }).then(result => {
       if (controller.signal.aborted) return;
-      setLoaded({ requestKey, data: result, error: '' });
+      setLoaded({ requestKey, snapshot: data, data: result, error: '' });
       if (!filters.date) onDefaultDate(result.date);
     }, cause => {
       if (!controller.signal.aborted) setLoaded(previous => ({
-        requestKey, data: previous?.data ?? null,
+        requestKey, snapshot: data, data: previous?.data ?? null,
         error: cause instanceof Error ? cause.message : '팀 개요를 불러오지 못했습니다.',
       }));
     });
@@ -153,6 +158,8 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
 
   const result = loaded?.data;
   const queue = result?.issueQueue?.metric === issueMetric ? result?.issueQueue : undefined;
+  const issueIds = (issueMetric ? queue : result?.deadlines)?.items.map(issue => issue.id) ?? [];
+  const issueActionsUnavailable = busy || Boolean(loaded?.error);
   const zone = result?.timeZone ?? DEFAULT_RESERVATION_TIME_ZONE;
   useEffect(() => {
     if (filters.date || !result?.date || result.date !== todayInSeoul()) return;
@@ -173,7 +180,10 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
     const endpoint = missingStart ? 'startDate' : missingEnd ? 'endDate' : null;
     const action = missingStart ? '시작일 입력' : '종료일 입력';
     return <li key={issue.id} className={isQueueItem ? 'team-overview-queue-row' : undefined}>
-      <button type="button" className="team-overview-row-button" onClick={() => openIssue(issue.id)}>
+      <button type="button" className="team-overview-row-button" data-issue-review-id={issue.id} disabled={issueActionsUnavailable}
+        onClick={event => onOpenIssueForReview(issue.id, {
+          issueIds, opener: event.currentTarget, fallback: null,
+        })}>
         <span className="team-overview-row-main">
           <strong><span className="issue-key">{issue.key}</span> {issue.title}</strong>
           <span className="team-overview-row-detail">{projectName(issue.projectId)} · {memberName(issue.assigneeId)} · <span className="status-dot"
@@ -191,7 +201,8 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
         <ChevronRight size={15} aria-hidden="true" />
       </button>
       {endpoint && <div className="team-overview-queue-actions">
-        <button type="button" className="btn" aria-label={`${issue.key} ${action}`} onClick={() => onOpenIssueSchedule(issue.id, endpoint)}>
+        <button type="button" className="btn" aria-label={`${issue.key} ${action}`} disabled={issueActionsUnavailable}
+          onClick={() => onOpenIssueSchedule(issue.id, endpoint)}>
           <SquareChartGantt size={15} aria-hidden="true" />{action}
         </button>
       </div>}
@@ -224,7 +235,8 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
               empty={busy ? '업무 목록을 불러오는 중입니다.' : loaded?.error ? '업무 목록을 불러오지 못했습니다.' : '조건에 맞는 열린 업무가 없습니다.'}
               renderItem={issueRow} />
           : <Section id={issueSectionId} title="마감 확인" icon={<CalendarDays size={18} aria-hidden="true" />} page={result.deadlines}
-              busy={busy} onPage={offset => pageTo('deadlines', offset)} empty="마감이 지났거나 7일 이내인 열린 업무가 없습니다."
+              busy={busy} onPage={offset => onFiltersChange({ ...filters, deadlineOffset: offset || undefined })}
+              empty="마감이 지났거나 7일 이내인 열린 업무가 없습니다."
               renderItem={issueRow} />}
 
         <Section title="검토 대기 문서" icon={<ClipboardCheck size={18} aria-hidden="true" />} page={result.reviews}

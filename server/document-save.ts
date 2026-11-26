@@ -23,14 +23,17 @@ export class DocumentSaveService {
     ); CREATE INDEX IF NOT EXISTS document_save_requests_document_id ON document_save_requests(document_id)`);
   }
 
-  parse(documentId: string, body: Record<string, unknown>, actorId: string): SaveRequest {
+  parse(documentId: string, body: Record<string, unknown>, actorId: string, operation: 'save' | 'restore' = 'save'): SaveRequest {
     const { requestId, expectedRestoreGeneration } = body;
     if (typeof requestId !== 'string' || !creationRequestId.test(requestId) ||
         typeof expectedRestoreGeneration !== 'string' || !expectedRestoreGeneration) {
       throw new DocumentSaveError(400, '문서 저장 요청 ID와 워크스페이스 세대를 확인해 주세요.');
     }
     let fingerprint: string;
-    try { fingerprint = creationRequestFingerprint(body); }
+    try {
+      fingerprint = creationRequestFingerprint(body);
+      if (operation === 'restore') fingerprint = `restore:${fingerprint}`;
+    }
     catch { throw new DocumentSaveError(400, '문서 저장 요청 내용을 확인해 주세요.'); }
     return { id: requestId.toLowerCase(), documentId, actorId, generation: expectedRestoreGeneration, fingerprint };
   }

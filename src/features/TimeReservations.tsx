@@ -16,14 +16,16 @@ type Scope = { issue: Ticket; projectId?: never; issues?: never; initialIssue?: 
   | { issue?: never; projectId: string; issues: Ticket[]; initialIssue?: Ticket; openIssue: FeatureProps['openIssue'] };
 type Props = Scope & Pick<FeatureProps, 'actorId' | 'notify'> & {
   users: User[];
+  restoreGeneration: FeatureProps['data']['restoreGeneration'];
   onDraftChange: TrackDraft;
   onChanged?: FeatureProps['refresh'];
   refreshVersion?: number;
 };
 type ReservationDraft = { issueId: string; userId: string; start: string; end: string };
-type ReservationEditor = { draft: ReservationDraft; initial: ReservationDraft; original: IssueTimeReservationEntry | null };
+type ReservationEditor = { draft: ReservationDraft; initial: ReservationDraft; original: IssueTimeReservationEntry | null; generation: Props['restoreGeneration'] };
+type ReservationDeletion = { entry: IssueTimeReservationEntry; generation: Props['restoreGeneration'] };
 type ReservationList = { key: string; entries: IssueTimeReservationEntry[]; error?: string };
-type CreateAttempt = { payload: string; requestId: string };
+type MutationAttempt = { fingerprint: string; requestId: string };
 const MIN_DATE = '0001-01-01', MAX_DATE = '9999-12-30';
 const CHANGE_EVENT = 'teamspace:time-reservations-changed';
 
@@ -61,20 +63,24 @@ function reservationError(cause: unknown) {
   return `${message} ${formatRange({ startAt: conflict.startAt, endAt: conflict.endAt })}`;
 }
 
+function resultUnknown(cause: unknown) {
+  return !(cause instanceof ApiError) || cause.status >= 500;
+}
+
 export function TimeReservations(props: Props) {
-  const { issue, initialIssue, issues = [], actorId, users, notify, onDraftChange, onChanged, refreshVersion } = props;
+  const { issue, initialIssue, issues = [], actorId, users, notify, onDraftChange, onChanged, refreshVersion, restoreGeneration } = props;
   const [date, setDate] = useState(() => validListDate(initialIssue?.startDate) ? initialIssue.startDate : todayInTeamTimeZone());
   const [userFilter, setUserFilter] = useState('');
   const [revision, setRevision] = useState(0);
   const [loaded, setLoaded] = useState<ReservationList | null>(null);
   const [editor, setEditor] = useState<ReservationEditor | null>(null);
-  const [deleting, setDeleting] = useState<IssueTimeReservationEntry | null>(null);
+  const [deleting, setDeleting] = useState<ReservationDeletion | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   const [conflict, setConflict] = useState(false);
   const [latest, setLatest] = useState<IssueTimeReservation | null>(null);
   const [uncertain, setUncertain] = useState(false);
-  const request = useRef<CreateAttempt | null>(null);
+  const request = useRef<MutationAttempt | null>(null);
   const acceptedRefresh = useRef(refreshVersion);
   const pendingRef = useRef(false);
   const addButton = useRef<HTMLButtonElement>(null);
@@ -132,7 +138,7 @@ export function TimeReservations(props: Props) {
     if (pendingRef.current) return false;
     if (!dirty) return true;
     return window.confirm(uncertain
-      ? '이전 배정이 저장됐을 수 있습니다. 결과 확인을 중단하고 입력을 버릴까요?'
+      ? '시간 배정 변경이 완료됐을 수 있습니다. 결과 확인을 중단할까요?'
       : '저장하지 않은 시간 배정 입력을 버릴까요?');
   }
 
@@ -150,7 +156,7 @@ export function TimeReservations(props: Props) {
     const userId = userFilter || selected?.assigneeId || (users.some(user => user.id === actorId) ? actorId : '');
     const draft = original ? fromReservation(original)
       : { issueId: selected?.id ?? '', userId, start: `${bookingDate}T09:00`, end: `${bookingDate}T10:00` };
-    setEditor({ draft, initial: draft, original });
+    setEditor({ draft, initial: draft, original, generation: restoreGeneration });
     requestAnimationFrame(() => form.current?.querySelector<HTMLElement>('select, input')?.focus());
   }
 
@@ -188,6 +194,11 @@ export function TimeReservations(props: Props) {
     requestAnimationFrame(() => addButton.current?.focus());
   }
 
+  function requestIdFor(fingerprint: string) {
+    if (request.current?.fingerprint !== fingerprint) request.current = { fingerprint, requestId: newRequestId() };
+    return request.current.requestId;
+  }
+
   async function save(event: FormEvent) {
     event.preventDefault();
     if (!editor || pendingRef.current || conflict) return;
@@ -204,14 +215,14 @@ export function TimeReservations(props: Props) {
     }
     const payload = { userId: draft.userId, startAt, endAt };
     const path = issueReservationsPath(target.id);
-    const fingerprint = JSON.stringify({ issueId: target.id, ...payload });
-    if (!original && request.current?.payload !== fingerprint) request.current = { payload: fingerprint, requestId: newRequestId() };
+    const edit = original ? { expectedVersion: original.version, expectedRestoreGeneration: editor.generation } : {};
+    const requestId = requestIdFor(JSON.stringify([target.id, original?.id, payload, edit]));
     startMutation();
     let remainsDirty = dirty, changed = false;
     try {
       const saved = await api<IssueTimeReservation>(original ? `${path}/${encodeURIComponent(original.id)}` : path, {
-        method: original ? 'PATCH' : 'POST', headers: { 'X-Actor-Id': actorId },
-        body: JSON.stringify(original ? { ...payload, expectedVersion: original.version } : { ...payload, requestId: request.current!.requestId }),
+        method: original ? 'PATCH' : 'POST', headers: { 'X-Actor-Id': actorId }, signal: AbortSignal.timeout(12_000),
+        body: JSON.stringify({ ...payload, ...edit, requestId }),
       });
       pendingRef.current = false;
       discard();
@@ -223,18 +234,19 @@ export function TimeReservations(props: Props) {
       }
       changed = true;
     } catch (cause) {
-      if (!original && (!(cause instanceof ApiError) || cause.status >= 500)) {
+      if (resultUnknown(cause)) {
         setUncertain(true);
         remainsDirty = true;
         setError('저장 응답을 확인하지 못했습니다. 같은 요청으로 결과를 확인할 수 있습니다.');
       } else {
         setError(reservationError(cause));
         setUncertain(false);
+        remainsDirty = hasDraftChanges(draft, editor.initial);
       }
       if (cause instanceof ApiError && (cause.status === 409 || cause.status === 404)) {
         setRevision(value => value + 1);
         if (original) {
-          const current = await api<IssueTimeReservation[]>(path, { headers: { 'X-Actor-Id': actorId } })
+          const current = await api<IssueTimeReservation[]>(path, { headers: { 'X-Actor-Id': actorId }, signal: AbortSignal.timeout(12_000) })
             .then(values => values.find(value => value.id === original.id)).catch(() => undefined);
           if (current && current.version !== original.version) {
             setLatest(current);
@@ -256,7 +268,7 @@ export function TimeReservations(props: Props) {
       start: editor.draft.start === editor.initial.start ? initial.start : editor.draft.start,
       end: editor.draft.end === editor.initial.end ? initial.end : editor.draft.end,
     };
-    setEditor({ draft, initial, original });
+    setEditor({ ...editor, draft, initial, original });
     setLatest(null);
     setConflict(false);
     setError('');
@@ -265,26 +277,37 @@ export function TimeReservations(props: Props) {
 
   async function deleteReservation() {
     if (!deleting || pendingRef.current) return;
+    const { entry, generation } = deleting;
+    const query = new URLSearchParams({ expectedVersion: String(entry.version), expectedRestoreGeneration: generation ?? '',
+      requestId: requestIdFor(JSON.stringify(['delete', entry.id, entry.version, generation])) });
     startMutation();
-    let changed = false;
+    let remainsDirty = false, changed = false;
     try {
-      await api(`${issueReservationsPath(deleting.issueId)}/${encodeURIComponent(deleting.id)}?expectedVersion=${deleting.version}`, {
-        method: 'DELETE', headers: { 'X-Actor-Id': actorId },
+      await api(`${issueReservationsPath(entry.issueId)}/${encodeURIComponent(entry.id)}?${query}`, {
+        method: 'DELETE', headers: { 'X-Actor-Id': actorId }, signal: AbortSignal.timeout(12_000),
       });
-      setDeleting(null);
+      pendingRef.current = false;
+      discard();
       changed = true;
     } catch (cause) {
-      setError(errorMessage(cause));
-      setDeleting(null);
-      setRevision(value => value + 1);
-    } finally { endMutation(false); }
+      if (resultUnknown(cause)) {
+        setUncertain(true);
+        remainsDirty = true;
+        setError('삭제 응답을 확인하지 못했습니다. 같은 요청으로 결과를 확인할 수 있습니다.');
+      } else {
+        setUncertain(false);
+        setError(errorMessage(cause));
+        setDeleting(null);
+        setRevision(value => value + 1);
+      }
+    } finally { endMutation(remainsDirty); }
     if (changed) reportChanged('시간 배정을 삭제했습니다.');
   }
 
   function askDelete(entry: IssueTimeReservationEntry) {
     if (!mayReplaceEditor()) return;
     discard();
-    setDeleting(entry);
+    setDeleting({ entry, generation: restoreGeneration });
     requestAnimationFrame(() => deleteCancel.current?.focus());
   }
 
@@ -362,9 +385,9 @@ export function TimeReservations(props: Props) {
         <button className="btn btn-primary" type="submit" disabled={pending || conflict}>{pending ? '저장 중…' : uncertain ? '배정 저장 결과 확인' : '배정 저장'}</button></div>
     </form>}
     {deleting && <div className="time-reservation-delete" role="group" aria-label="배정 삭제 확인">
-      <p>{deleting.issueKey} · {formatRange(deleting)} 배정을 삭제할까요?</p>
+      <p>{deleting.entry.issueKey} · {formatRange(deleting.entry)} 배정을 삭제할까요?</p>
       <div className="time-reservation-actions"><button ref={deleteCancel} type="button" className="btn btn-ghost" disabled={pending} onClick={cancelEditor}>취소</button>
-        <button type="button" className="btn issue-btn-danger" disabled={pending} onClick={() => void deleteReservation()}>삭제 확인</button></div>
+        <button type="button" className="btn issue-btn-danger" disabled={pending} onClick={() => void deleteReservation()}>{uncertain ? '배정 삭제 결과 확인' : '삭제 확인'}</button></div>
     </div>}
     {!editor && error && <p className="issue-form-error" role="alert">{error}</p>}
     {listPath && !list && <p role="status" className="time-reservation-empty">시간 배정을 불러오는 중입니다.</p>}

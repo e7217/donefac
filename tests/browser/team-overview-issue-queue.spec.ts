@@ -4,6 +4,8 @@ import type { Issue, Project, SchedulePreview, WorkspaceSnapshot } from '../../s
 
 test.use({ viewport: { width: 360, height: 820 }, timezoneId: 'America/Los_Angeles' });
 
+const reviewNavigation = (panel: Locator) => panel.getByRole('navigation', { name: '업무 검토 순서', exact: true });
+
 async function workspace(request: APIRequestContext): Promise<WorkspaceSnapshot> {
   const response = await request.get('/api/workspace');
   expect(response.ok(), await response.text()).toBeTruthy();
@@ -120,12 +122,27 @@ test('360px 팀 개요에서 업무 지표를 열고 간트의 날짜를 채운 
     await expect.poll(() => hashParameters().get('teamQueueOffset')).toBe('10');
     const queueHash = new URL(page.url()).hash;
 
-    await listItem(unscheduled, repair).getByRole('button', { name: new RegExp(repair.title) }).click();
+    const openRepair = listItem(unscheduled, repair).getByRole('button', { name: new RegExp(repair.title) });
+    await openRepair.click();
     const ticket = page.getByRole('dialog', { name: repair.title, exact: true });
-    await expect(ticket).toBeVisible();
+    const reviewOrder = reviewNavigation(ticket);
+    await expect(reviewOrder.getByRole('status')).toHaveText('3개 중 3번째');
+    await expect(reviewOrder.getByRole('button', { name: '다음 업무', exact: true })).toBeDisabled();
     await expect.poll(() => [hashParameters().get('issue'), hashParameters().get('teamQueueOffset')]).toEqual([repair.id, '10']);
+    await reviewOrder.getByRole('button', { name: '이전 업무', exact: true }).click();
+    const second = page.getByRole('dialog', { name: pending[10].title, exact: true });
+    await expect(reviewNavigation(second).getByRole('status')).toHaveText('3개 중 2번째');
+    await page.goBack();
+    await expect(page).toHaveURL(url => url.hash === queueHash);
+    await expect(openRepair).toBeFocused();
+
+    await page.goForward();
+    await expect(reviewNavigation(second).getByRole('status')).toHaveText('3개 중 2번째');
+    await second.getByRole('button', { name: '다음 업무', exact: true }).click();
+    await expect(reviewOrder.getByRole('status')).toHaveText('3개 중 3번째');
     await ticket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
     await expect(page).toHaveURL(url => url.hash === queueHash);
+    await expect(openRepair).toBeFocused();
     await page.reload();
     await expect(metric(unscheduledTitle)).toHaveAttribute('aria-pressed', 'true');
     await expect(listItem(unscheduled, repair)).toBeVisible();
@@ -168,6 +185,74 @@ test('360px 팀 개요에서 업무 지표를 열고 간트의 날짜를 채운 
     await expect(region('마감 확인')).toBeVisible();
     await expect.poll(() => [hashParameters().get('teamQueue'), hashParameters().get('teamQueueOffset')]).toEqual([null, null]);
   } finally {
+    for (const issue of created) await discardIssue(request, issue);
+  }
+});
+
+test('마감 확인의 현재 페이지에서 프로젝트를 넘겨 검토하고 새로고침 뒤 원래 행으로 돌아온다', async ({ page, request }) => {
+  const { projects: [firstProject, secondProject], users: [member, otherMember] } = await workspace(request);
+  const label = randomUUID().slice(0, 8);
+  const created: Issue[] = [];
+  const loading = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+
+  async function createIssue(title: string, projectId: string, dueDate: string, assigneeId = member.id) {
+    const response = await request.post('/api/issues', { data: { projectId, assigneeId, title: `${label} ${title}`, dueDate } });
+    expect(response.status(), await response.text()).toBe(201);
+    const issue = await response.json() as Issue;
+    created.push(issue);
+    return issue;
+  }
+
+  try {
+    for (let index = 1; index <= 10; index++) await createIssue(`이전 페이지 ${index}`, firstProject.id, '1901-06-01');
+    const opener = await createIssue('두 번째 페이지 시작', secondProject.id, '1901-06-09');
+    const next = await createIssue('다른 프로젝트 검토', firstProject.id, '1901-06-10');
+    await createIssue('다른 팀원 업무', secondProject.id, '1901-06-01', otherMember.id);
+    await page.route(url => url.pathname === '/api/team-overview' && url.searchParams.get('deadlineOffset') === '10', async route => {
+      loading.resolve();
+      await release.promise;
+      await route.continue();
+    });
+
+    const query = new URLSearchParams({ teamMember: member.id, teamDate: '1901-06-10' });
+    await page.goto(`/#/${firstProject.id}/teamoverview?${query}`);
+    const deadlines = page.getByRole('region', { name: '마감 확인', exact: true });
+    const row = (issue: Issue) => deadlines.locator(`[data-issue-review-id="${issue.id}"]`);
+    const staleRow = row(created[0]);
+    await expect(staleRow).toBeEnabled();
+    await deadlines.getByRole('button', { name: '다음', exact: true }).click();
+    await loading.promise;
+    await expect(staleRow).toBeDisabled();
+    release.resolve();
+    await expect(deadlines.getByRole('listitem')).toHaveCount(2);
+    await expect(row(opener)).toBeEnabled();
+    const sourceHash = new URL(page.url()).hash;
+    expect(new URLSearchParams(sourceHash.split('?')[1]).get('teamDeadlineOffset')).toBe('10');
+
+    await row(opener).click();
+    const openerPanel = page.getByRole('dialog', { name: opener.title, exact: true });
+    await expect(reviewNavigation(openerPanel).getByRole('status')).toHaveText('2개 중 1번째');
+    await expect(openerPanel.getByRole('button', { name: '이전 업무', exact: true })).toBeDisabled();
+    await expect(openerPanel.getByRole('button', { name: '다음 업무', exact: true })).toHaveAttribute('title', next.key);
+    await openerPanel.getByRole('button', { name: '다음 업무', exact: true }).click();
+    const nextPanel = page.getByRole('dialog', { name: next.title, exact: true });
+    await expect(reviewNavigation(nextPanel).getByRole('status')).toHaveText('2개 중 2번째');
+    await expect(nextPanel.getByRole('button', { name: '다음 업무', exact: true })).toBeDisabled();
+    await page.reload();
+    await expect(reviewNavigation(nextPanel).getByRole('status')).toHaveText('2개 중 2번째');
+    await expect(page.locator('#team-overview-issue-results')).toHaveAttribute('aria-busy', 'false');
+    await nextPanel.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(page).toHaveURL(url => url.hash === sourceHash);
+    await expect(row(opener)).toBeFocused();
+    await expect(deadlines.getByRole('listitem')).toHaveCount(2);
+
+    await page.getByLabel('프로젝트 필터', { exact: true }).selectOption(secondProject.id);
+    await expect(deadlines.getByRole('listitem')).toHaveCount(1);
+    await expect(row(opener)).toBeEnabled();
+    await expect(page).toHaveURL(url => !url.hash.includes('teamDeadlineOffset'));
+  } finally {
+    release.resolve();
     for (const issue of created) await discardIssue(request, issue);
   }
 });

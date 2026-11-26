@@ -129,7 +129,8 @@
   border: 0;
   cursor: pointer;
 }
-.team-overview-row-button:hover,
+.team-overview-row-button:disabled { cursor: not-allowed; }
+.team-overview-row-button:hover:not(:disabled),
 .team-overview-row-button:focus-visible { background-color: #f2f8f5; }
 .team-overview-row-button:focus-visible { outline: 2px solid #227a65; outline-offset: -2px; }
 .team-overview-row-button > svg { flex: none; color: #62756c; }

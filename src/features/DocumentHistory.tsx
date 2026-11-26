@@ -17,8 +17,10 @@ export interface DocumentHistoryProps {
   error: string;
   current: { title: string; content: RichContent; plainText: string; version: number; dirty: boolean };
   users: User[];
-  onRestore?: (revision: DocRevision) => void | Promise<void>;
+  onReload: () => void;
+  onRestore?: (revision: DocRevision, reviewedVersion: number) => void;
   restoreDisabled: boolean;
+  restoreRecovery?: ReactNode;
   onSaveCopy?: () => void | Promise<void>;
   saving?: boolean;
 }
@@ -26,8 +28,8 @@ const when = (value: string) => new Date(value).toLocaleString('ko-KR', { month:
 const NODE_LABELS: Record<string, string> = { doc: '문서', paragraph: '문단', text: '텍스트 서식', heading: '제목 블록', blockquote: '인용문', callout: '안내 상자', statusBadge: '상태 배지', codeBlock: '코드', bulletList: '글머리 목록', orderedList: '번호 목록', listItem: '목록 항목', taskList: '할 일 목록', taskItem: '할 일', hardBreak: '줄바꿈', horizontalRule: '구분선', image: '이미지', table: '표', tableRow: '표 행', tableCell: '표 셀', tableHeader: '표 머리 셀', issueReference: '업무 참조', issueList: '업무 목록', issueSummary: '업무 현황', documentReference: '문서 참조', documentInclude: '문서 포함', documentRevisionInclude: '문서 버전 포함', documentExcerpt: '발췌 구역', documentExcerptInclude: '문서 발췌 포함', documentToc: '본문 목차', documentLabelList: '라벨별 문서 목록', documentChildList: '하위 문서 목록', documentProperties: '문서 속성', documentPropertyReport: '문서 속성 보고서', documentColumnLayout: '다단 구역', documentColumn: '단', details: '접기 블록', detailsSummary: '접기 제목', detailsContent: '접기 본문' };
 const PAGE_SIZE = 60;
 
-export function DocumentHistory({ revisions, loading, error, current, users, onRestore, restoreDisabled, onSaveCopy, saving = false }: DocumentHistoryProps) {
-  const [previewId, setPreviewId] = useState<string | null>(null);
+export function DocumentHistory({ revisions, loading, error, current, users, onReload, onRestore, restoreDisabled, restoreRecovery, onSaveCopy, saving = false }: DocumentHistoryProps) {
+  const [selection, setSelection] = useState<{ id: string; reviewedVersion: number } | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
   const [beforeId, setBeforeId] = useState('');
   const [afterId, setAfterId] = useState('current');
@@ -36,23 +38,28 @@ export function DocumentHistory({ revisions, loading, error, current, users, onR
     if (a.confluenceSourceVersion != null && b.confluenceSourceVersion == null) return 1;
     return (b.confluenceSourceVersion ?? b.version) - (a.confluenceSourceVersion ?? a.version) || b.createdAt.localeCompare(a.createdAt);
   });
-  const preview = ordered.find(value => value.id === previewId);
+  const preview = ordered.find(value => value.id === selection?.id);
+  const staleReview = selection?.reviewedVersion !== current.version;
   const hasFormattedPreview = preview && (containsDocumentNavigation(preview.content) || hasDocumentFormattedBlocks(preview.content) || contentReferences(preview.content).some(reference => reference.revisionId));
   const currentSource = onRestore ? '현재 편집본' : '현재 저장본';
   const dirtyLabel = current.dirty ? '현재 미저장 초안' : currentSource;
   function openCompare(revision?: DocRevision) { setBeforeId((revision || ordered[1] || ordered[0])?.id || ''); setAfterId('current'); setCompareOpen(true); }
   return <div className="document-history">
     <div className="docs-panel-heading"><h3>문서 변경 이력</h3><button className="btn btn-ghost document-compare-open" disabled={!ordered.length || loading} onClick={() => openCompare()}><GitCompareArrows size={14} />버전 비교</button></div>
+    {restoreRecovery}
     {current.dirty && <div className="docs-history-hint">현재 편집을 저장한 후 이전 버전으로 복구할 수 있어요. 비교에서는 미저장 초안도 확인할 수 있습니다.{onSaveCopy && <button disabled={saving} onClick={() => void onSaveCopy()}>편집을 새 문서로 보관</button>}</div>}
-    {loading && <p className="docs-panel-muted">이력을 불러오는 중…</p>}{error && <p className="docs-panel-error" role="alert">{error}</p>}
-    {preview ? <div className="docs-history-preview">
-      <button className="docs-history-back" onClick={() => setPreviewId(null)}><ArrowLeft size={13} />이력 목록</button><strong>{documentRevisionLabel(preview)}</strong><h4>{preview.title}</h4><time>{when(preview.createdAt)} · {users.find(user => user.id === preview.authorId)?.name || '팀원'}</time>
+    {loading && <p className="docs-panel-muted">이력을 불러오는 중…</p>}
+    {error && <><p className="docs-panel-error" role="alert">{error}</p><button type="button" className="btn btn-ghost" onClick={onReload}>이력 다시 불러오기</button></>}
+    {preview && selection ? <div className="docs-history-preview">
+      <button className="docs-history-back" onClick={() => setSelection(null)}><ArrowLeft size={13} />이력 목록</button><strong>{documentRevisionLabel(preview)}</strong><h4>{preview.title}</h4><time>{when(preview.createdAt)} · {users.find(user => user.id === preview.authorId)?.name || '팀원'}</time>
       {hasFormattedPreview ? <><span className="document-history-preview-label">본문 미리보기</span><ReadonlyDocumentContent key={preview.id} content={preview.content} documentId={preview.documentId} mode="history" showOutline
         pinnedSource={{ documentId: preview.documentId, revisionId: preview.id }} /></> : <>
         <span className="document-history-preview-label">텍스트 미리보기</span><pre>{preview.plainText ? preview.plainText.slice(0, 2000) : '텍스트 미리보기가 없습니다. 버전 비교에서 전체 문서 구조를 확인하세요.'}</pre>{preview.plainText.length > 2000 && <p className="document-history-preview-limit">전체 {preview.plainText.length.toLocaleString('ko-KR')}자 중 2,000자를 표시했습니다. 나머지 내용과 구조는 버전 비교에서 빠짐없이 확인할 수 있습니다.</p>}
       </>}
-      <button className="btn document-history-preview-compare" onClick={() => openCompare(preview)}><GitCompareArrows size={13} />이 버전과 {dirtyLabel} 비교</button>{onRestore && <button className="btn btn-primary" disabled={saving || restoreDisabled} onClick={() => void onRestore(preview)}><RotateCcw size={13} />이 버전으로 복구</button>}
-    </div> : ordered.map(revision => <button className="docs-revision" key={revision.id} onClick={() => setPreviewId(revision.id)}><div className="docs-revision-icon"><History size={15} /></div><div><strong>{documentRevisionLabel(revision)}{revision.confluenceSourceVersion == null && revision.version === current.version && <span>현재</span>}</strong><p>{revision.summary || revision.title}</p><time>{when(revision.createdAt)} · {users.find(user => user.id === revision.authorId)?.name || '팀원'}</time></div><ChevronRight size={13} /></button>)}
+      {onRestore && staleReview && <p className="docs-panel-muted" role="status">현재 저장본이 변경되었습니다. 이력 목록에서 복구할 버전을 다시 확인해 주세요.</p>}
+      <button className="btn document-history-preview-compare" onClick={() => openCompare(preview)}><GitCompareArrows size={13} />이 버전과 {dirtyLabel} 비교</button>
+      {onRestore && <button className="btn btn-primary" disabled={saving || restoreDisabled || staleReview} onClick={() => onRestore(preview, selection.reviewedVersion)}><RotateCcw size={13} />이 버전으로 복구</button>}
+    </div> : ordered.map(revision => <button className="docs-revision" key={revision.id} onClick={() => setSelection({ id: revision.id, reviewedVersion: current.version })}><div className="docs-revision-icon"><History size={15} /></div><div><strong>{documentRevisionLabel(revision)}{revision.confluenceSourceVersion == null && revision.version === current.version && <span>현재</span>}</strong><p>{revision.summary || revision.title}</p><time>{when(revision.createdAt)} · {users.find(user => user.id === revision.authorId)?.name || '팀원'}</time></div><ChevronRight size={13} /></button>)}
     {!loading && !error && !ordered.length && <p className="docs-panel-muted">저장된 이력이 없습니다.</p>}
     {compareOpen && typeof document !== 'undefined' && createPortal(<Comparison revisions={ordered} current={current} currentSource={currentSource} beforeId={beforeId} afterId={afterId} setBeforeId={setBeforeId} setAfterId={setAfterId} onClose={() => setCompareOpen(false)} />, document.body)}
   </div>;

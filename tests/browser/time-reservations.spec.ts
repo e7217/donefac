@@ -170,3 +170,53 @@ test('360px 업무 상세에서 다른 작업자의 수정과 비교하고 사�
     expect(await timeSlots(request, issue)).toEqual([]);
   } finally { await removeIssue(request, issue); }
 });
+
+test('시간 배정 수정과 삭제의 응답을 잃어도 같은 요청을 확인한다', async ({ page, request }) => {
+  const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const [project] = workspace.projects;
+  const [member] = workspace.users;
+  const issue = await createIssue(request, project.id, '시간 배정 결과 확인 합성 업무');
+  try {
+    const first = await addBooking(request, issue, member.id, '04:00', '05:00');
+    const attempts: Record<string, string[]> = { PATCH: [], DELETE: [] };
+    await page.route(`**${path(issue.id, first.id)}*`, async route => {
+      const method = route.request().method();
+      if (!Object.hasOwn(attempts, method)) return route.continue();
+      const fingerprint = method === 'PATCH' ? route.request().postData() : new URL(route.request().url()).search;
+      attempts[method].push(fingerprint ?? '');
+      if (attempts[method].length > 1) return route.continue();
+      expect((await route.fetch()).status()).toBe(200);
+      await route.abort('failed');
+    });
+
+    await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
+    const drawer = page.getByRole('dialog', { name: issue.title, exact: true });
+    await drawer.getByRole('button', { name: '시간 배정', exact: true }).click();
+    const bookings = drawer.getByRole('region', { name: '업무 시간 배정', exact: true });
+    await bookings.getByRole('button', { name: '배정 수정', exact: true }).click();
+    const form = bookings.getByRole('form', { name: '시간 배정 편집' });
+    const end = form.getByLabel('종료 시각', { exact: true });
+    await end.fill(seoul('14:30'));
+    await form.getByRole('button', { name: '배정 저장', exact: true }).click();
+    const confirmSave = form.getByRole('button', { name: '배정 저장 결과 확인', exact: true });
+    await expect(confirmSave).toBeEnabled();
+    await expect(end).toHaveValue(seoul('14:30'));
+    await expect(end).toBeDisabled();
+    await confirmSave.click();
+    await expect(form).toHaveCount(0);
+    await expect(bookings.getByRole('listitem')).toContainText('13:00 ~ 14:30');
+    expect(await timeSlots(request, issue)).toMatchObject([{ version: first.version + 1, endAt: utc('05:30') }]);
+
+    await bookings.getByRole('button', { name: '배정 삭제', exact: true }).click();
+    const deleting = bookings.getByRole('group', { name: '배정 삭제 확인', exact: true });
+    await deleting.getByRole('button', { name: '삭제 확인', exact: true }).click();
+    await deleting.getByRole('button', { name: '배정 삭제 결과 확인', exact: true }).click();
+    await expect(deleting).toHaveCount(0);
+    await expect(bookings.getByRole('listitem')).toHaveCount(0);
+    for (const sent of Object.values(attempts)) {
+      expect(sent).toEqual([sent[0], sent[0]]);
+      expect(sent[0]).toContain('requestId');
+    }
+    expect(await timeSlots(request, issue)).toEqual([]);
+  } finally { await removeIssue(request, issue); }
+});

@@ -125,6 +125,10 @@ type DocumentLinkTarget = {
 };
 type DocumentSave = { actorId: string; documentId: string; observed?: ObservedDocument };
 type DocumentSaveAttempt = { actorId: string; requestId: string; expectedRestoreGeneration: string; collaborative: boolean; draft: Draft };
+type DocumentRestoreAttempt = {
+  actorId: string; documentId: string; requestId: string; expectedRestoreGeneration: string;
+  expectedVersion: number; revisionId: string;
+};
 type ClipboardImageScope = { editor: Editor; documentId: string; actorId: string; liveEpoch: string | null };
 type SideTab = 'comments' | 'history' | 'links' | 'attachments' | 'source';
 type MigratedIssueLinkState = { href: string; status: 'pending' | 'missing' | 'failed'; expectsComment: boolean };
@@ -164,6 +168,7 @@ function orderedTreePages(pages: DocPage[], orders: readonly DocumentSiblingOrde
 const commentFilterFor = (comment: Comment): CommentFilter => comment.documentSource ? comment.resolution?.state ?? 'open' : 'all';
 const cacheKey = (actorId: string, id: string) => `teamspace:document-draft:${actorId}:${id}`;
 const saveCacheKey = (actorId: string, id: string) => `teamspace:document-save:${JSON.stringify([actorId, id])}`;
+const restoreCacheKey = (actorId: string, id: string) => `teamspace:document-restore:${JSON.stringify([actorId, id])}`;
 const editCopyCacheKey = (actorId: string, id: string) => `teamspace:document-edit-copy:${JSON.stringify([actorId, id])}`;
 const commentCacheKey = (actorId: string, id: string) => `teamspace:document-comment-draft:${actorId}:${id}`;
 const commentAttemptKey = (actorId: string, id: string) => `teamspace:document-comment-attempt:${JSON.stringify([actorId, id])}`;
@@ -195,6 +200,15 @@ function readSaveAttempt(actorId: string, id: string, generation?: string): Docu
         typeof attempt.requestId === 'string' && typeof attempt.collaborative === 'boolean' && attempt.draft?.id === id &&
         attempt.draft.dirty && attempt.draft.content?.type === 'doc' && Number.isSafeInteger(attempt.draft.expectedVersion)) return attempt;
   } catch { /* The cached request may be unavailable or malformed. */ }
+  return null;
+}
+
+function readRestoreAttempt(actorId: string, id: string, generation?: string): DocumentRestoreAttempt | null {
+  try {
+    const attempt = JSON.parse(sessionStorage.getItem(restoreCacheKey(actorId, id)) ?? 'null') as DocumentRestoreAttempt | null;
+    if (generation && attempt?.actorId === actorId && attempt.documentId === id && attempt.expectedRestoreGeneration === generation &&
+        Number.isSafeInteger(attempt.expectedVersion) && typeof attempt.requestId === 'string' && typeof attempt.revisionId === 'string') return attempt;
+  } catch { /* A malformed cached request must not prevent opening the document. */ }
   return null;
 }
 
@@ -280,6 +294,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   activeGeneration.current = data.restoreGeneration;
   const [saving, setSaving] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [restoreAttempt, setRestoreAttempt] = useState<DocumentRestoreAttempt | null>(null);
   const savingRef = useRef(false);
   const [showLatest, setShowLatest] = useState(false);
   const [conflict, setConflictState] = useState<DocumentConflict>(null);
@@ -375,9 +390,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [commentsRefreshing, setCommentsRefreshing] = useState(false);
   const [commentError, setCommentError] = useState('');
   const loadCommentList = useRef<((mode: CommentLoadMode) => void) | null>(null);
-  const [revisions, setRevisions] = useState<DocRevision[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState('');
+  const [historyResult, setHistoryResult] = useState<{ key: string; revisions: DocRevision[]; error: string } | null>(null);
+  const [historyReload, setHistoryReload] = useState(0);
   const [newOpen, setNewOpen] = useState(false);
   const [newParent, setNewParent] = useState('');
   const [newProject, setNewProject] = useState(projectId === 'all' ? '' : projectId);
@@ -502,7 +516,6 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [liveEditor, setLiveEditor] = useState<Editor | null>(null);
   const [liveState, setLiveState] = useState<CollaborationView | null>(null);
   const liveStateRef = useRef<CollaborationView | null>(null);
-  const [liveReload, setLiveReload] = useState(0);
   const [archivedLiveRecovery, setArchivedLiveRecovery] = useState(false);
   const archivedLiveRecoveryRef = useRef(false);
 
@@ -575,6 +588,26 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const manualSession = activeSession?.enabled === false;
   const liveMode = Boolean(activeSession && (activeSession.enabled || archivedLiveRecovery) && !manualRecovery);
   const confirmingSave = saveRecovery?.actorId === actorId && saveRecovery.draft.id === draft?.id;
+  const confirmingRestore = restoreAttempt?.actorId === actorId && restoreAttempt.documentId === selectedPageId &&
+    restoreAttempt.expectedRestoreGeneration === data.restoreGeneration ? restoreAttempt : null;
+  useEffect(() => {
+    setRestoreAttempt(selectedPageId ? readRestoreAttempt(actorId, selectedPageId, data.restoreGeneration) : null);
+  }, [actorId, selectedPageId, data.restoreGeneration]);
+  function rememberRestoreAttempt(attempt: DocumentRestoreAttempt, pending: boolean) {
+    if (actorRef.current === attempt.actorId && activeActorRef.current === attempt.actorId &&
+        activeGeneration.current === attempt.expectedRestoreGeneration && draftRef.current?.id === attempt.documentId) {
+      setRestoreAttempt(pending ? attempt : null);
+    }
+    try {
+      const key = restoreCacheKey(attempt.actorId, attempt.documentId);
+      if (pending) sessionStorage.setItem(key, JSON.stringify(attempt));
+      else sessionStorage.removeItem(key);
+    } catch { setStorageProblem(true); }
+  }
+  const restoreRecovery = confirmingRestore && !reading && !saving && <div className="docs-notice" role="status">
+    문서 버전 복구 응답을 확인하지 못했습니다.
+    <button type="button" className="btn btn-ghost" onClick={() => void sendRevisionRestore(confirmingRestore)}>버전 복구 결과 다시 확인</button>
+  </div>;
   const liveDocument = liveState?.document;
   const remoteDocument = liveMode ? liveDocument : activeSession?.document;
   const latestPage = selectedPage && remoteDocument?.id === selectedPage.id && remoteDocument.version > selectedPage.version ? remoteDocument : selectedPage;
@@ -769,7 +802,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       clipboardImageScope.current = null;
       window.removeEventListener('offline', invalidate);
     };
-  }, [actorId, editor, selectedPageId, clipboardWritable, clipboardLiveEpoch, liveReload]);
+  }, [actorId, editor, selectedPageId, clipboardWritable, clipboardLiveEpoch]);
   const referenceDialog = !bodyReadOnly && referenceSelection?.editor === editor && referenceSelection.documentId === draft?.id ? referenceSelection : null;
   const issueBlockDialog = !bodyReadOnly && issueBlockSelection?.editor === editor && issueBlockSelection.documentId === draft?.id ? issueBlockSelection : null;
   const jiraCode = bodyReadOnly ? undefined : selectedCodeBlock(editor)?.node.textContent;
@@ -871,7 +904,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     return () => { active = false; clearInterval(timer); };
   }, [selectedPageId, actorId, editorSessionNeeded, observeDocument]);
 
-  useEffect(() => { manualEditor?.setEditable(manualSession && !manualRecovery && !archivedLiveRecovery, false); }, [manualEditor, manualSession, manualRecovery, archivedLiveRecovery]);
+  useEffect(() => { manualEditor?.setEditable(manualSession && !manualRecovery && !archivedLiveRecovery && !restoring, false); }, [manualEditor, manualSession, manualRecovery, archivedLiveRecovery, restoring]);
   useEffect(() => { if (activeSession?.enabled && draft?.bodyDirty) { manualRecoveryRef.current = true; setManualRecovery(true); } }, [activeSession?.enabled, draft?.id, draft?.bodyDirty]);
 
   useEffect(() => {
@@ -1299,16 +1332,22 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     newOpen, templateManager, sidebarOpen, sideTab, issueBlockSelection]);
 
   const historyVersion = reading ? latestPage?.version : draft?.expectedVersion;
+  const historyDocumentId = documentId === selectedPageId ? documentId : undefined;
+  const historyScope = JSON.stringify([actorId, historyDocumentId, data.restoreGeneration]);
+  const historyKey = JSON.stringify([historyScope, historyVersion, historyReload]);
+  const currentHistory = historyResult?.key === historyKey ? historyResult : null;
   useEffect(() => {
-    if (!documentId || sideTab !== 'history' || publicationOpen) return;
-    let active = true;
-    setHistoryLoading(true); setHistoryError('');
-    api<DocRevision[]>(`/documents/${documentId}/revisions`)
-      .then(result => { if (active) setRevisions(result); })
-      .catch(error => { if (active) setHistoryError(error instanceof Error ? error.message : '이력을 불러오지 못했습니다.'); })
-      .finally(() => { if (active) setHistoryLoading(false); });
-    return () => { active = false; };
-  }, [documentId, historyVersion, sideTab, publicationOpen]);
+    if (!historyDocumentId || sideTab !== 'history' || publicationOpen) return;
+    const controller = new AbortController();
+    api<DocRevision[]>(`/documents/${encodeURIComponent(historyDocumentId)}/revisions`, { cache: 'no-store', signal: controller.signal })
+      .then(revisions => {
+        if (!controller.signal.aborted) setHistoryResult({ key: historyKey, revisions, error: '' });
+      })
+      .catch(error => {
+        if (!controller.signal.aborted) setHistoryResult({ key: historyKey, revisions: [], error: error instanceof ApiError ? error.message : '이력을 불러오지 못했습니다.' });
+      });
+    return () => controller.abort();
+  }, [historyDocumentId, historyKey, sideTab, publicationOpen]);
 
   function selectDocument(id: string, showReading = reading) {
     if (id === selectedDocumentId) return true;
@@ -1607,32 +1646,69 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     }
   }
 
-  async function restoreRevision(revision: DocRevision) {
+  function restoreRevision(revision: DocRevision, reviewedVersion: number) {
     const captured = draftRef.current;
-    if (!captured || savingRef.current) return;
-    const capturedActor = actorRef.current;
+    const generation = data.restoreGeneration;
+    if (!captured || captured.id !== selectedDocumentId || revision.documentId !== captured.id || !generation ||
+        savingRef.current || confirmingRestore || confirmingSave || actorRef.current !== activeActorRef.current ||
+        activeGeneration.current !== generation) return;
+    if (captured.expectedVersion !== reviewedVersion || (latestPage && latestPage.version > reviewedVersion)) {
+      notify('현재 저장본이 변경되었습니다. 이력 목록에서 복구할 버전을 다시 확인해 주세요.', 'error');
+      return;
+    }
     if (listDrafts.current.size) { notify('문서 목록 설정을 적용하거나 취소한 후 복구해주세요.', 'error'); return; }
     if (captured.dirty) { notify('현재 편집을 먼저 저장하거나 새 문서로 보관해주세요.', 'error'); return; }
     if (liveStateRef.current?.pending || (sessionRef.current?.enabled && liveStateRef.current?.phase !== 'connected')) { notify('공동 편집을 서버에 동기화한 후 복구해주세요.', 'error'); return; }
     if (!window.confirm(`${documentRevisionLabel(revision)}의 내용으로 복구할까요? 현재 내용은 이력에 남습니다.`)) return;
+    void sendRevisionRestore({ actorId: actorRef.current, documentId: captured.id, requestId: newRequestId(),
+      expectedRestoreGeneration: generation, expectedVersion: reviewedVersion, revisionId: revision.id });
+  }
+
+  async function sendRevisionRestore(attempt: DocumentRestoreAttempt) {
+    const { actorId: owner, documentId: id, ...input } = attempt;
+    const checkingOutcome = confirmingRestore?.requestId === attempt.requestId;
+    const sameContext = () => draftRef.current?.id === id && actorRef.current === owner &&
+      activeActorRef.current === owner && activeGeneration.current === input.expectedRestoreGeneration;
+    if (savingRef.current || !sameContext()) return;
+    if (listDrafts.current.size || liveStateRef.current?.pending) {
+      notify('문서 목록 설정과 공동 편집의 저장을 마친 뒤 복구 결과를 확인해 주세요.', 'error');
+      return;
+    }
+    const collaborative = sessionRef.current?.enabled === true;
     clipboardImageGeneration.current++;
     savingRef.current = true; setSaving(true); setRestoring(true);
-    // Toggling editability is UI state, not a content edit. Tiptap otherwise
-    // emits onUpdate and would mark the newly restored revision dirty again.
+    rememberRestoreAttempt(attempt, true);
     editor?.setEditable(false, false);
     try {
-      const result = await post<DocPage>(`/documents/${captured.id}/restore`, { revisionId: revision.id, expectedVersion: captured.expectedVersion });
-      if (draftRef.current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor) {
-        const next = draftFromPage(result); draftRef.current = next; setDraft(next); rememberDraft(next, capturedActor);
-        if (sessionRef.current?.enabled) setLiveReload(value => value + 1);
-        else loadManualBody(manualEditor, next.content);
-        setReferenceSelection(null); setIssueBlockSelection(null); setConflict(null);
+      const restored = await api<DocPage>(`/documents/${encodeURIComponent(id)}/restore`, {
+        method: 'POST', headers: { 'X-Actor-Id': owner }, body: JSON.stringify(input), signal: AbortSignal.timeout(12_000),
+      });
+      if (restored?.id !== id || restored.version !== input.expectedVersion + 1 || restored.content?.type !== 'doc') {
+        throw new Error('문서 버전 복구 응답을 확인하지 못했습니다.');
       }
-      await refresh(); notify('이전 내용을 새 버전으로 복구했습니다.', 'success');
+      rememberRestoreAttempt(attempt, false);
+      if (sameContext()) {
+        if (!collaborative) {
+          const before = draftRef.current;
+          reconcileDraft({ document: restored, live: false });
+          if (before && draftRef.current?.expectedVersion === restored.version && !draftRef.current.bodyDirty &&
+              before.expectedVersion < restored.version && sameBody(before.content, restored.content)) loadManualBody(manualEditor, restored.content);
+        }
+        setReferenceSelection(null); setIssueBlockSelection(null);
+      }
+      try {
+        await refresh();
+        if (sameContext()) notify(checkingOutcome ? `버전 ${restored.version}에 복구한 결과를 확인했습니다.` : '이전 내용을 새 버전으로 복구했습니다.', 'success');
+      } catch {
+        if (sameContext()) notify('문서 버전을 복구했습니다. 문서 목록을 다시 열어 최신 내용을 확인해 주세요.', 'error');
+      }
     } catch (error) {
-      if (error instanceof ApiError && error.status === 409) { if (actorRef.current === capturedActor && activeActorRef.current === capturedActor && draftRef.current?.id === captured.id) setConflict('generic'); await refresh().catch(() => {}); }
-      notify(error instanceof Error ? error.message : '복구하지 못했습니다.', 'error');
-    } finally { savingRef.current = false; setSaving(false); setRestoring(false); editor?.setEditable(true, false); }
+      if (isDefiniteTemplateFailure(error)) {
+        rememberRestoreAttempt(attempt, false);
+        if (sameContext()) notify(error.message, 'error');
+        if (error.status === 409) await refresh().catch(() => {});
+      }
+    } finally { savingRef.current = false; setSaving(false); setRestoring(false); }
   }
 
   async function saveCopy() {
@@ -1784,8 +1860,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (!current || current.dirty || liveStateRef.current?.pending || liveStateRef.current?.phase !== 'connected' || savingRef.current) return;
     savingRef.current = true; setSaving(true);
     try {
-      const revision = await post<DocRevision>(`/documents/${current.id}/checkpoint`, { summary: '공동 편집 버전 기록' });
-      setRevisions(previous => [revision, ...previous.filter(item => item.id !== revision.id)]); setSideTab('history'); setSidebarOpen(true);
+      await post<DocRevision>(`/documents/${current.id}/checkpoint`, { summary: '공동 편집 버전 기록' });
+      setHistoryReload(value => value + 1); setSideTab('history'); setSidebarOpen(true);
       notify('서버에 저장된 본문을 버전으로 기록했습니다.', 'success');
     } catch (cause) { notify(cause instanceof Error ? cause.message : '버전을 기록하지 못했습니다.', 'error'); }
     finally { savingRef.current = false; setSaving(false); }
@@ -2530,6 +2606,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
           {!reading && <>
           {confirmingSave && !saving && <div className="docs-notice" role="status">문서 저장 응답을 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.</div>}
+          {(!sidebarOpen || sideTab !== 'history') && restoreRecovery}
           {recoveringEditCopy && !saving && <div className="docs-notice" role="status">
             {recoveringEditCopy.documentId ? '편집 사본을 저장했습니다. 문서 목록을 다시 불러와 주세요.' : '편집 사본의 저장 응답을 확인하지 못했습니다.'}
             <button type="button" className="btn btn-ghost" onClick={() => void saveCopy()}>
@@ -2717,7 +2794,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 if (href && openInlineDocumentLink(href)) {
                   event.preventDefault();
                 }
-              }}>{liveMode && activeSession ? <CollaborativeEditor key={`${draft.id}:${actorId}:${liveReload}`} session={activeSession} actorId={actorId} labels={draft.labels} onEditor={receiveLiveEditor} onContent={receiveLiveContent} onDocument={receiveLiveDocument} onState={receiveLiveState} onSessionDisabled={receiveDisabledSession} onOpenCopy={openRecoveryCopy} notify={notify} /> : <EditorContent editor={manualEditor} />}
+              }}>{liveMode && activeSession ? <CollaborativeEditor key={`${draft.id}:${actorId}`} session={activeSession} actorId={actorId} labels={draft.labels} locked={restoring} onEditor={receiveLiveEditor} onContent={receiveLiveContent} onDocument={receiveLiveDocument} onState={receiveLiveState} onSessionDisabled={receiveDisabledSession} onOpenCopy={openRecoveryCopy} notify={notify} /> : <EditorContent editor={manualEditor} />}
                 {editor && !bodyReadOnly && !archivedLiveRecovery && !publicationOpen && !checklistReselecting && !issueDrawerOpen && draft.id === selectedPageId &&
                   <DocumentPageSuggestions key={documentScope} editor={editor} wrap={editorWrap} documentId={draft.id} documents={data.documents} projects={data.projects} />}
                 {!checklistReselecting && !bodyReadOnly && matchingSlashCommands.length > 0 && <div className="docs-slash-menu docs-popover" role="group" aria-label="블록 추가" style={{ top: slashTop }}>
@@ -2890,9 +2967,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               reloadKey={clipboardAttachment?.documentId === draft.id ? clipboardAttachment.versionId : undefined}
               onInsertFileLink={reading || bodyReadOnly || archivedLiveRecovery ? undefined : insertAttachmentLink}
               onInsertImage={reading || bodyReadOnly ? undefined : url => { editor?.chain().focus().setImage({ src: url, alt: '첨부 이미지' }).run(); notify(liveMode ? '이미지를 삽입했습니다. 서버 동기화 상태를 확인해주세요.' : '이미지를 삽입했습니다. 문서를 저장하면 반영됩니다.', 'success'); }} /></>}
-            {sideTab === 'history' && <DocumentHistory key={draft.id} revisions={revisions} loading={historyLoading} error={historyError}
+            {sideTab === 'history' && <DocumentHistory key={historyScope} revisions={currentHistory?.revisions ?? []} loading={!currentHistory} error={currentHistory?.error ?? ''}
+              onReload={() => setHistoryReload(value => value + 1)} restoreRecovery={restoreRecovery}
               current={readingPage ? { ...readingPage, dirty: false } : { title: draft.title, content: draft.content, plainText: draft.plainText, version: draft.expectedVersion, dirty: draft.dirty }}
-              users={data.users} onRestore={reading ? undefined : restoreRevision} restoreDisabled={saving || draft.dirty || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))}
+              users={data.users} onRestore={reading ? undefined : restoreRevision}
+              restoreDisabled={saving || draft.dirty || confirmingSave || Boolean(confirmingRestore) || !data.restoreGeneration || !activeSession || manualRecovery || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))}
               onSaveCopy={reading || confirmingSave || recoveringEditCopy ? undefined : saveCopy} saving={saving} />}
           </div>
         </aside>}

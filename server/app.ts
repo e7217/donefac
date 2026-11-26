@@ -2681,7 +2681,7 @@ export function createApp(options: {
     get('documents',req.params.id);
     const revisions=store.all<DocRevision>('revisions').filter(revision=>revision.documentId===req.params.id);
     revisions.sort((a,b)=>Number(a.confluenceSourceVersion!==undefined)-Number(b.confluenceSourceVersion!==undefined)||b.version-a.version);
-    res.json(revisions);
+    res.set('Cache-Control','no-store').json(revisions);
   });
   app.get('/api/document-publications/count',(req,res)=>{
     if(Object.keys(req.query).length)return fail('검토 수에 조회 조건을 지정할 수 없습니다.');
@@ -2714,7 +2714,12 @@ export function createApp(options: {
     res.json(documentPublication.transition(req.params.id,actor(req),req.body,content=>apiKeys.authorizeDocumentBody(req,content)));
   });
   app.post('/api/documents/:id/restore',(req,res)=>{
+    const actorId = actor(req);
+    const restoreRequest = Object.hasOwn(req.body, 'requestId') || Object.hasOwn(req.body, 'expectedRestoreGeneration')
+      ? documentSave.parse(req.params.id, req.body, actorId, 'restore') : null;
     const updated=store.transaction(()=>{
+      const previous = restoreRequest ? documentSave.replay(restoreRequest) : undefined;
+      if (previous) return { document: previous, replayed: true };
       const old=get<DocPage>('documents',req.params.id);
       checkVersion(old,req.body.expectedVersion);
       const saved=get<DocRevision>('revisions',req.body.revisionId);
@@ -2723,13 +2728,14 @@ export function createApp(options: {
       let document=validateDocument({...old,title:saved.title,content:saved.content,plainText:saved.plainText,version:old.version+1,updatedAt:now()},old,{allowMissing:true});
       store.put('documents',document);
       document=collaboration.replaceBody(document,{allowMissing:true});
-      const actorId=actor(req);
-      revision(document,actorId,`${sourceVersion}에서 복구`);
+      const revisionId = revision(document,actorId,`${sourceVersion}에서 복구`);
       activity(req,'document',document.id,'문서 복구',`${sourceVersion} → ${document.version}`);
       if(document.title!==old.title||JSON.stringify(document.content)!==JSON.stringify(old.content))notifyDocumentUpdate(document,actorId,document.updatedAt);
-      return document;
+      if (restoreRequest) documentSave.record(restoreRequest, document, revisionId);
+      return { document, replayed: false };
     });
-    collaboration.reset(updated.id,'문서 이력에서 복구되었습니다.');res.json(updated);
+    if (!updated.replayed) collaboration.reset(updated.document.id,'문서 이력에서 복구되었습니다.');
+    res.set('Cache-Control','no-store').json(updated.document);
   });
   app.get('/api/documents/:id/collaboration',(req,res)=>res.json(collaboration.session(String(req.params.id))));
   app.post('/api/documents/:id/collaboration/enable',(req,res)=>res.json(collaboration.enable(String(req.params.id),req.body.expectedVersion,actor(req))));

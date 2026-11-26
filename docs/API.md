@@ -477,6 +477,8 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 `PATCH /api/documents/:id`에서 저장 응답을 다시 확인하려면 `requestId`에 UUID v4를 지정하고 `expectedRestoreGeneration`에 저장 시작 시 워크스페이스 세대를 보낸다. 같은 작업자가 같은 문서에 동일한 요청 본문을 다시 보내면 저장한 버전의 문서를 반환한다. 요청 ID를 다른 저장에 사용하거나 자체 JSON 백업을 가져오기 전 세대의 요청이 들어오면 `409`를 반환한다. 원래 저장본을 확인할 수 없는 경우에도 `409`를 반환한다. 영수증은 물리 백업에서 복원한다.
 
+브라우저의 `POST /api/documents/:id/restore`는 이력에 있는 `revisionId`와 검토 당시 현재 버전 `expectedVersion`으로 새 버전을 만든다. `requestId`와 `expectedRestoreGeneration`을 함께 보내면 첫 요청의 복구 버전을 다시 확인할 수 있다. 나중에 발생한 편집은 현재 문서에 유지하며, 결과를 다시 요청했을 때 공동 편집 세대를 다시 바꾸지 않는다.
+
 ## 공동 편집 블록 순서
 
 공동 편집 프로토콜 18은 블록의 Yjs 본문 식별자를 유지하며 순서 기록을 같은 업데이트로 보관한다. `DocPage.content`와 검색용 본문은 적용한 순서대로 저장한다. 이력과 Teamspace 백업의 협업 상태를 복원할 때 같은 순서를 검사한다. 저장된 형식 17의 본문과 편집 세대는 그대로 이어서 사용한다.
@@ -1781,6 +1783,8 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 | `POST /api/issues/:issueId/time-reservations` | `userId`, `startAt`, `endAt`, UUID `requestId`를 보낸다. 첫 저장은 `201`, 같은 내용으로 재시도하면 `200`과 기존 배정을 반환한다. |
 | `PATCH /api/issues/:issueId/time-reservations/:id` | `userId`, `startAt`, `endAt`, `expectedVersion`을 보낸다. 시간을 확보하면 배정을 확정한다. |
 | `DELETE /api/issues/:issueId/time-reservations/:id` | 쿼리 `expectedVersion`으로 배정을 취소한다. |
+
+수정 본문과 삭제 쿼리에 UUID `requestId`와 `/api/workspace`의 `restoreGeneration`을 `expectedRestoreGeneration`으로 함께 넣을 수 있다. 서버는 작업자·업무·배정·입력을 확인하고 적용 결과를 같은 트랜잭션에 기록한다. 같은 요청을 다시 보내면 수정은 현재 활성 배정, 삭제는 `{ "ok": true }`를 반환한다. 수정을 적용한 뒤 다른 작업자가 배정을 고친 경우에는 최신 값이 반환된다. 다른 작업자나 입력으로 요청 ID를 재사용하거나 워크스페이스가 복원됐으면 `409`로 응답한다.
 
 배정 상태는 `reserved` 또는 `needs-review`다. 휴지통 복원 중 이미 다른 업무에 예약된 시간은 `needs-review`로 보존한다. 편집 버전이 오래되면 `409`로 응답한다. 자체 백업 형식 30부터 `timeReservations`가 포함된다.
 

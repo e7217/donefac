@@ -22,6 +22,7 @@ export interface CollaborativeEditorProps {
   session: CollaborationSession;
   actorId: string;
   labels: string[];
+  locked?: boolean;
   onEditor: (editor: Editor | null) => void;
   onContent: (content: RichContent, plainText: string) => void;
   onDocument: (document: DocPage) => void;
@@ -134,7 +135,7 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
         <button onClick={discardRecovery} disabled={busy}><RotateCcw size={12} />{otherRecoveries > 0 ? '이 편집 버리기' : '최신 문서 열기'}</button>
       </div>
     </div>}
-    {client && view?.ready ? <LiveBinding key={view.epoch} {...props} client={client} connected={view.phase === 'connected'} readOnly={Boolean(recovery)} onEditor={receiveEditor} /> : <div className="docs-collaboration-loading">{error ? <><p>{error}</p><button className="btn" onClick={restartSession}>다시 연결</button></> : recovery ? <p>보관한 데이터 형식을 확인해야 합니다. 복구 데이터를 내려받아 보존해주세요.</p> : <><Loader2 size={20} className="docs-spin" /><p>서버의 문서를 불러오고 있어요.</p></>}</div>}
+    {client && view?.ready ? <LiveBinding key={view.epoch} {...props} client={client} connected={view.phase === 'connected'} readOnly={Boolean(recovery || props.locked)} onEditor={receiveEditor} /> : <div className="docs-collaboration-loading">{error ? <><p>{error}</p><button className="btn" onClick={restartSession}>다시 연결</button></> : recovery ? <p>보관한 데이터 형식을 확인해야 합니다. 복구 데이터를 내려받아 보존해주세요.</p> : <><Loader2 size={20} className="docs-spin" /><p>서버의 문서를 불러오고 있어요.</p></>}</div>}
   </div>;
 }
 
