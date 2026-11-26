@@ -2372,6 +2372,7 @@ export function createApp(options: {
     const usesTemplate=Object.hasOwn(input,'templateId')||Object.hasOwn(input,'expectedTemplateVersion');
     const templateFields = ['requestId','templateId','expectedTemplateVersion','projectId','parentId','title','actorId'];
     if (issueId !== undefined) templateFields.push('expectedIssueProjectId');
+    else templateFields.push('expectedRestoreGeneration');
     const invalidLocation = (input.projectId!=null&&(typeof input.projectId!=='string'||!input.projectId))||
       (input.parentId!=null&&(typeof input.parentId!=='string'||!input.parentId));
     if (issueId !== undefined) {

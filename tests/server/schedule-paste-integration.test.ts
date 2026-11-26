@@ -233,6 +233,54 @@ test('bulk calendar dates review set, clear and keep separately, bind proposal k
   } finally { await f.close(); }
 });
 
+test('bulk workday duration holds explicit per-row dates and rejects missing anchors and calendar changes', async () => {
+  const f = await fixture();
+  try {
+    const first = await issue(f, '종료일 기준 업무', null, '2026-11-23');
+    const explicit = await issue(f, '직접 입력을 유지할 업무', '2026-11-16', '2026-11-23');
+    const missing = await issue(f, '종료일이 없는 업무', null, null);
+    const calendarPath = `/projects/${f.project.id}/calendar`;
+    const calendar = (await f.call<WorkCalendar>(calendarPath)).data;
+    const closed = await f.call<WorkCalendar>(calendarPath, 'PATCH', {
+      ...calendar, expectedVersion: calendar.version,
+      exceptions: [{ date: '2026-11-23', isWorking: false, label: '합성 휴무일' }],
+    });
+    assert.equal(closed.status, 200, JSON.stringify(closed.data));
+    const input: ScheduleBulkDateInput = { ...bulkDateInput(f, [first, explicit], {}),
+      workdayDuration: { endpoint: 'startDate', workingDays: 2 },
+      dates: [{ issue: { id: explicit.id, expectedVersion: explicit.version }, changes: { startDate: '2026-11-18' } }],
+    };
+    for (const workdayDuration of [{ endpoint: 'dueDate', workingDays: 2 }, ...[0, 1.5, 3651, '2'].map(workingDays => ({ endpoint: 'startDate', workingDays }))]) {
+      assert.equal((await f.call(`${bulkDatePath}/preview`, 'POST', { ...input, workdayDuration })).status, 400);
+    }
+    assert.equal((await f.call(`${bulkDatePath}/preview`, 'POST', { ...input, changes: { startDate: null } })).status, 400);
+
+    const blocked = await reviewBulkDates(f, { ...input, issues: [...input.issues, { id: missing.id, expectedVersion: missing.version }] });
+    assert.equal(blocked.previewId, null);
+    assert.equal(blocked.errors.length, 1);
+    assert.equal(blocked.errors[0].issueId, missing.id);
+    assert.match(blocked.errors[0].message, /기준 종료일/u);
+
+    const review = await reviewBulkDates(f, input);
+    assert.ok(review.previewId);
+    assert.deepEqual(review.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd]), [
+      [first.id, '2026-11-19', first.endDate], [explicit.id, '2026-11-18', explicit.endDate],
+    ]);
+    const changed = await f.call<WorkCalendar>(calendarPath, 'PATCH', {
+      ...closed.data, expectedVersion: closed.data.version,
+      exceptions: [...closed.data.exceptions, { date: '2026-11-21', isWorking: true, label: '합성 추가 근무일' }],
+    });
+    assert.equal(changed.status, 200, JSON.stringify(changed.data));
+    const beforeApply = await workspace(f);
+    assert.equal((await applyBulkDates(f, review)).status, 409);
+    assert.deepEqual(await workspace(f), beforeApply);
+    const fresh = await reviewBulkDates(f, input);
+    const applied = await applyBulkDates(f, fresh);
+    assert.equal(applied.status, 200, JSON.stringify(applied.data));
+    assert.deepEqual(dates(applied.data.updated), { [first.id]: ['2026-11-20', first.endDate], [explicit.id]: ['2026-11-18', explicit.endDate] });
+  } finally { await f.close(); }
+});
+
 test('bulk calendar dates reject stale, absent, malformed or blocked selections while showing valid rows', async () => {
   const f = await fixture();
   try {

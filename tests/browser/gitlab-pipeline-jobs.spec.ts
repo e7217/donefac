@@ -140,6 +140,22 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
     await expect(unsafeTrigger).toContainText('#941');
     await expect(unsafeTrigger.getByText('대기 중', { exact: true })).toBeVisible();
     await expect(unsafeTrigger.getByRole('link')).toHaveCount(0);
+    const addFailed = jobs.getByRole('button', { name: '실패한 통합 검사 댓글 초안에 추가', exact: true });
+    const addManual = jobs.getByRole('button', { name: '수동 검토 작업 댓글 초안에 추가', exact: true });
+    const readsBeforeComment = requests.length;
+    await expect(unsafeTrigger.getByRole('button', { name: /댓글 초안에 추가/u })).toHaveCount(0);
+    await addFailed.click();
+    const failedDraft = `보내지 않은 댓글 본문\n\nGitLab CI 작업 #815 · 확인 상태 실패 · 단계 integration-test · 실패한 통합 검사\n<${jobUrl(815)}>`;
+    await expect(comment).toHaveValue(failedDraft);
+    await expect(comment).toBeFocused();
+    await comment.fill(failedDraft.replace(jobUrl(815), `${jobUrl(815)}?view=full#trace`));
+    await addFailed.click();
+    await expect(comment).toHaveValue(failedDraft.replace(jobUrl(815), `${jobUrl(815)}?view=full#trace`));
+    await comment.fill(failedDraft);
+    await addManual.click();
+    const draft = `${failedDraft}\n\nGitLab CI 작업 #814 · 확인 상태 수동 실행 · 단계 deployment · 수동 검토 작업\n<${jobUrl(814)}>`;
+    await expect(comment).toHaveValue(draft);
+    expect(requests).toHaveLength(readsBeforeComment);
     await expect(pipelineRow).toHaveAttribute('data-gitlab-state', 'running');
     await expect(jobs).not.toContainText(upstreamError);
     await expect(jobs).not.toContainText(token);
@@ -154,6 +170,7 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
     await expect(pipelineRow).toHaveAttribute('data-gitlab-state', 'failed');
     await expect(invalidated).toBeVisible();
     await expect(job).toHaveCount(0);
+    await expect(addFailed).toHaveCount(0);
     await expect(triggers).toHaveCount(0);
     expect(requests).toHaveLength(beforeUpdate);
 
@@ -213,7 +230,7 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
     await expect(jobs.getByRole('alert')).toHaveCount(0);
     await expect(job).toHaveCount(0);
     await expect(title).toHaveValue('저장하지 않은 티켓 제목');
-    await expect(comment).toHaveValue('보내지 않은 댓글 본문');
+    await expect(comment).toHaveValue(draft);
     await pipelineRow.getByRole('button', { name: 'CI 작업 닫기', exact: true }).press('Enter');
     await expect(jobs).toHaveCount(0);
     await expect(open).toBeFocused();
@@ -231,6 +248,8 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
       await developmentOpen.click();
       await expect(development.getByRole('region', { name: 'GitLab CI 작업', exact: true })
         .getByRole('link', { name: '수동 검토 작업', exact: true })).toBeVisible();
+      await expect(development.getByRole('region', { name: 'GitLab CI 작업', exact: true })
+        .getByRole('button', { name: /댓글 초안에 추가/u })).toHaveCount(0);
       await expect(development.getByRole('region', { name: 'GitLab 트리거 작업', exact: true })
         .getByRole('link', { name: '다운스트림 파이프라인 #940 열기', exact: true })).toHaveAttribute('href', downstreamUrl());
     } finally { await development.close(); }

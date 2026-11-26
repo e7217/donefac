@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
-import type { Dependency, Issue, ScheduleBulkDateInput, SchedulePasteApplyResult, SchedulePastePreview, WorkspaceSnapshot } from '../../shared/types';
+import type { Dependency, Issue, ScheduleBulkDateInput, SchedulePasteApplyResult, SchedulePastePreview, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
 
 const previewRoute = '/api/schedule/bulk-dates/preview';
 const applyRoute = '/api/schedule/bulk-dates/apply';
@@ -82,6 +82,63 @@ function nextPost(page: Page, path: string) {
 function selection(issues: Issue[]) {
   return issues.map(({ id, version }) => ({ id, expectedVersion: version })).sort((a, b) => a.id.localeCompare(b.id));
 }
+
+test('선택 업무의 종료일을 각 프로젝트의 근무일과 행 초안으로 한꺼번에 계산한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const fixture = await makeFixture(request);
+  const calendarPath = (projectId: string) => `/api/projects/${projectId}/calendar`;
+  const calendars: { path: string; previous: WorkCalendar; version: number }[] = [];
+  try {
+    for (const project of [fixture.firstProject, fixture.secondProject]) {
+      const path = calendarPath(project.id);
+      const previous = await readJson<WorkCalendar>(await request.get(path), 200);
+      const exceptions = project.id === fixture.firstProject.id ? [{ date: '2026-11-23', isWorking: false, label: '합성 휴무' }] : [];
+      const saved = await readJson<WorkCalendar>(await request.patch(path, {
+        data: { ...previous, expectedVersion: previous.version, workingWeekdays: [1, 2, 3, 4, 5], exceptions },
+      }), 200);
+      calendars.push({ path, previous, version: saved.version });
+    }
+    const first = await fixture.create(`${fixture.prefix} 시작일 초안`, { startDate: '2026-11-19', endDate: null, dueDate: null });
+    const second = await fixture.create(`${fixture.prefix} 저장된 시작일`, { startDate: '2026-11-20', endDate: null, dueDate: null }, fixture.secondProject.id);
+    const { chart, selected, open, dialog } = await openChart(page, fixture.projectId, fixture.prefix, true);
+    await chart.getByLabel(`${first.key} 시작일`, { exact: true }).fill('2026-11-20');
+    await selected(first).check();
+    await selected(second).check();
+    await open.click();
+    await dialog.getByLabel('종료일 변경', { exact: true }).selectOption('workdays');
+    await dialog.getByLabel('종료일 근무일 수', { exact: true }).fill('3');
+
+    const reviewing = nextPost(page, previewRoute);
+    await dialog.getByRole('button', { name: previewName, exact: true }).click();
+    const response = await reviewing;
+    expect(response.request().postDataJSON()).toMatchObject({ projectId: null, changes: {},
+      workdayDuration: { endpoint: 'endDate', workingDays: 3 },
+      dates: [{ issue: { id: first.id, expectedVersion: first.version }, changes: { startDate: '2026-11-20' } }],
+    });
+    const preview = await readJson<SchedulePastePreview>(response, 200);
+    expect(preview.errors).toEqual([]);
+    expect(preview.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first.id, toStart: '2026-11-20', toEnd: '2026-11-25' }),
+      expect.objectContaining({ id: second.id, toStart: '2026-11-20', toEnd: '2026-11-24' }),
+    ]));
+    expect(await fixture.stored()).toEqual([values(first), values(second)]);
+    const applying = nextPost(page, applyRoute);
+    await dialog.getByRole('button', { name: applyName, exact: true }).click();
+    await readJson<SchedulePasteApplyResult>(await applying, 200);
+    await expect(dialog).toHaveCount(0);
+    expect(await fixture.stored()).toEqual([
+      { ...values(first), version: first.version + 1, startDate: '2026-11-20', endDate: '2026-11-25' },
+      { ...values(second), version: second.version + 1, endDate: '2026-11-24' },
+    ]);
+    const undoing = nextPost(page, undoRoute);
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    await readJson(await undoing, 200);
+    expect(await fixture.stored()).toEqual([first, second].map(issue => ({ ...values(issue), version: issue.version + 2 })));
+  } finally {
+    await fixture.close();
+    for (const { path, previous, version } of calendars) await request.patch(path, { data: { ...previous, expectedVersion: version } });
+  }
+});
 
 test('간트에서 연속 선택한 화면 행만 일괄 편집하고 검색 밖 선택은 유지한다', async ({ page, request }) => {
   const fixture = await makeFixture(request);

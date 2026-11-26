@@ -11,7 +11,6 @@ import { issueTypeMeta, requiredFieldLabels } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { findIssueDocumentReferences } from '../../shared/document-references';
 import { commentWebLinkRanges } from '../../shared/comment-web-links';
-import { normalizeGitlabSearchInput } from '../../shared/gitlab-search';
 import { issueSearchAliasLabel, issueSearchAliases } from '../../shared/workspace-search';
 import type { IssueRelationScheduleMode } from '../../shared/issue-relations';
 import { CustomFields, IssueTypeSelect } from './CustomFields';
@@ -28,6 +27,7 @@ import { CommentEditBody, CommentEditButton, CommentEditedMark, useCommentEditin
 import { IssueWorklogs } from './IssueWorklogs';
 import { TimeReservations } from './TimeReservations';
 import { IssueGitlabActivity } from './IssueGitlabActivity';
+import { gitlabCommentReferenceKey } from './GitlabActivity';
 import { IssueDescriptionEditor } from './IssueDescriptionEditor';
 import { IssueSaveRecovery, IssueScheduleSaveReview } from './IssueScheduleSaveReview';
 import { IssueAutomationHistory } from './IssueAutomationHistory';
@@ -1021,9 +1021,9 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
   function appendGitlabActivityToComment(reference: { href: string; body: string }) {
     if (commentingRef.current || commentRequestId) return;
-    const canonical = normalizeGitlabSearchInput(reference.href);
+    const canonical = gitlabCommentReferenceKey(reference.href);
     if (!canonical) return;
-    if (commentWebLinkRanges(commentDraft.body).some(link => normalizeGitlabSearchInput(link.href) === canonical)) {
+    if (commentWebLinkRanges(commentDraft.body).some(link => gitlabCommentReferenceKey(link.href) === canonical)) {
       notify('이 GitLab 활동 링크가 댓글 초안에 이미 있습니다.');
       commentField.current?.focus();
       return;

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
-import { CalendarError, MAX_WORKING_DURATION_DAYS, calendarDate, calendarDay, createCalendarMath, isCalendarDate } from '../shared/calendar.js';
+import { CalendarError, MAX_WORKING_DURATION_DAYS, calculateWorkingDateRange, calendarDate, calendarDay, createCalendarMath, isCalendarDate } from '../shared/calendar.js';
 import { traceGanttHierarchy } from '../shared/gantt-hierarchy-focus.js';
 import { isRelationId } from '../shared/issue-relations.js';
 import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, SCHEDULE_BLOCKER_LINK_PAGE_SIZE, type Dependency, type Issue, type ScheduleBlockerLinkCandidate, type ScheduleBlockerLinkPage, type ScheduleBulkChainInput, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkAction, type ScheduleBulkLinkDateEdit, type ScheduleBulkLinkInput,
@@ -164,7 +164,7 @@ function parseTeamBlockerInput(raw: unknown): ScheduleTeamBlockerInput {
 
 function parseBulkDateInput(raw: unknown): ScheduleBulkDateInput {
   if (!isRecord(raw) || (raw.projectId !== null && !isId(raw.projectId)) ||
-      Object.keys(raw).some(key => !['projectId', 'issues', 'changes', 'dates', 'rescheduleSuccessors', 'includeTeamBlockers'].includes(key))) {
+      Object.keys(raw).some(key => !['projectId', 'issues', 'changes', 'dates', 'workdayDuration', 'rescheduleSuccessors', 'includeTeamBlockers'].includes(key))) {
     throw new SchedulePasteError(400, '프로젝트와 일정 일괄 변경 항목을 확인해 주세요.');
   }
   const followUp = parsePasteFollowUpOptions(raw);
@@ -181,8 +181,21 @@ function parseBulkDateInput(raw: unknown): ScheduleBulkDateInput {
   });
   const dates = Object.hasOwn(raw, 'dates') ? parseSelectedDateEdits(raw.dates, issues,
     '일괄 편집에 선택한 업무의 날짜와 같은 업무 버전을 지정해 주세요.') : [];
-  return { projectId: raw.projectId, issues, changes: parseDateChanges(raw.changes, dates.length > 0),
-    dates, ...followUp };
+  let workdayDuration: ScheduleBulkDateInput['workdayDuration'];
+  if (Object.hasOwn(raw, 'workdayDuration')) {
+    const input = raw.workdayDuration;
+    if (!isRecord(input) || Object.keys(input).some(key => key !== 'endpoint' && key !== 'workingDays') ||
+        (input.endpoint !== 'startDate' && input.endpoint !== 'endDate') || typeof input.workingDays !== 'number' ||
+        !Number.isSafeInteger(input.workingDays) || input.workingDays < 1 || input.workingDays > MAX_WORKING_DURATION_DAYS) {
+      throw new SchedulePasteError(400, '계산할 시작일 또는 종료일과 1~3,650 사이의 근무일 수를 지정해 주세요.');
+    }
+    workdayDuration = { endpoint: input.endpoint, workingDays: input.workingDays };
+  }
+  const changes = parseDateChanges(raw.changes, dates.length > 0 || Boolean(workdayDuration));
+  if (workdayDuration && Object.hasOwn(changes, workdayDuration.endpoint)) {
+    throw new SchedulePasteError(400, '근무일로 계산할 날짜의 공통 값을 지정하거나 삭제할 수 없습니다.');
+  }
+  return { projectId: raw.projectId, issues, changes, dates, ...(workdayDuration ? { workdayDuration } : {}), ...followUp };
 }
 
 function parsePasteFollowUpOptions(raw: Record<string, unknown>) {
@@ -1369,7 +1382,7 @@ export class SchedulePasteService {
   }
 
   private previewBulkDates(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePastePreview {
-    const { projectId, issues: selected, changes: sharedDates, dates = [], rescheduleSuccessors, includeTeamBlockers } = parseBulkDateInput(raw);
+    const { projectId, issues: selected, changes: sharedDates, dates = [], workdayDuration, rescheduleSuccessors, includeTeamBlockers } = parseBulkDateInput(raw);
     return this.store.transaction(() => {
       if (projectId !== null && !this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
       this.prune();
@@ -1383,6 +1396,7 @@ export class SchedulePasteService {
       };
       const changes = new Map<string, ScheduleDateMutation>();
       const unchanged = new Set<string>();
+      const calendars = new Map<string, ReturnType<typeof createCalendarMath>>();
       for (const { id, expectedVersion } of selected) {
         const issue = byId.get(id);
         if (!issue) {
@@ -1395,7 +1409,26 @@ export class SchedulePasteService {
           preview.errors.push({ line: null, issueId: id, key: issue.key, message: '업무가 변경되었습니다. 최신 업무를 불러온 뒤 다시 미리 확인해 주세요.' });
           continue;
         }
-        const edit = proposeDateEdit(issue, { ...sharedDates, ...rowDates.get(id) });
+        const requested = { ...sharedDates, ...rowDates.get(id) };
+        if (workdayDuration && !Object.hasOwn(requested, workdayDuration.endpoint)) {
+          const { endpoint, workingDays } = workdayDuration;
+          const anchor = endpoint === 'endDate' ? 'startDate' : 'endDate';
+          const date = requested[anchor] === undefined ? issue[anchor] : requested[anchor];
+          if (!date) {
+            preview.errors.push({ line: null, issueId: id, key: issue.key, message: `근무일로 계산하려면 기준 ${dateFields[anchor]}을 입력해 주세요.` });
+            continue;
+          }
+          try {
+            let math = calendars.get(issue.projectId);
+            if (!math) calendars.set(issue.projectId, math = createCalendarMath(hooks.calendar(issue.projectId)));
+            requested[endpoint] = calculateWorkingDateRange(math, anchor, date, workingDays)[endpoint];
+          } catch (cause) {
+            if (!(cause instanceof CalendarError)) throw cause;
+            preview.errors.push({ line: null, issueId: id, key: issue.key, message: cause.message });
+            continue;
+          }
+        }
+        const edit = proposeDateEdit(issue, requested);
         if (!edit) {
           unchanged.add(id);
           continue;

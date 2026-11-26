@@ -41,6 +41,7 @@ import { DocumentLabels } from './DocumentLabels';
 import { DocumentMetadataReview } from './DocumentMetadataReview';
 import { documentMetadata, documentTitleForSave, reconcileDocumentMetadata, reapplyDocumentMetadataEdits, sameLabels, sameMetadata, type DocumentMetadata, type DocumentMetadataChoices, type DocumentMetadataField } from './document-metadata-draft';
 import { DocumentMarkdownImport, type MarkdownImportPreview } from './DocumentMarkdownImport';
+import { readDocumentCreationAttempt, writeDocumentCreationAttempt, type DocumentCreationAttempt } from './document-creation-attempt';
 import { confirmMarkdownArchiveClose, DocumentMarkdownArchiveImport, type ArchiveImportNavigation } from './DocumentMarkdownArchiveImport';
 import { DocumentOfflineExport, type DocumentOfflineExportScope } from './DocumentOfflineExport';
 import { DocumentTemplatePicker, DocumentTemplatesManager, isDefiniteTemplateFailure, templateErrorReason, useDocumentTemplates } from './DocumentTemplates';
@@ -93,7 +94,7 @@ import './document-comment-review.css';
 
 type Props = FeatureProps & {
   selectedDocumentId: string | null;
-  onSelectDocument: (id: string, recovery?: { documentId: string; expectedRestoreGeneration?: string; beforeOpen: () => void }, reading?: boolean) => boolean;
+  onSelectDocument: (id: string, recovery?: { documentId: string | null; expectedRestoreGeneration?: string; beforeOpen: () => void }, reading?: boolean) => boolean;
   openDocument: (id: string, sectionId?: string) => void;
   reading: boolean;
   onChangeReading: (reading: boolean) => void;
@@ -186,7 +187,6 @@ const commentAttemptKey = (actorId: string, id: string) => `teamspace:document-c
 const selectionCommentCacheKey = (actorId: string, id: string) => `teamspace:document-selection-comment-draft:${actorId}:${id}`;
 type CommentContext = { actorId: string; documentId: string };
 type CommentAttempt = CommentContext & { requestId: string; generation: string; content: ReturnType<typeof commentDraftPayload> };
-type DocumentCreationAttempt = { actorId: string; projectId: string | null; body: string; documentId?: string };
 type DocumentEditCopyAttempt = {
   actorId: string; sourceId: string; editSequence: number; sourceMetadata: DocumentMetadata; documentId?: string;
   input: Pick<DocPage, 'title' | 'projectId' | 'parentId' | 'content' | 'status' | 'labels'> & {
@@ -414,7 +414,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const creatingRequest = useRef(false);
   const newTitleCustomized = useRef(false);
   const [markdownPreview, setMarkdownPreview] = useState<MarkdownImportPreview | null>(null);
-  const [createAttempt, setCreateAttempt] = useState<DocumentCreationAttempt | null>(null);
+  const [storedCreateAttempt, setCreateAttempt] = useState<DocumentCreationAttempt | null>(null);
+  const createAttempt = storedCreateAttempt?.actorId === actorId &&
+    storedCreateAttempt.input.expectedRestoreGeneration === data.restoreGeneration ? storedCreateAttempt : null;
+  const [createStorageProblem, setCreateStorageProblem] = useState(false);
   const [createError, setCreateError] = useState('');
   const importingMarkdown = newTemplate === 'markdown';
   const [teamTemplate, setTeamTemplate] = useState<DocumentTemplateSummary | null>(null);
@@ -425,6 +428,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const templateFormOpen = useRef(false);
   const templateDraftDirty = useRef(false);
   const creationAttemptRef = useRef<DocumentCreationAttempt | null>(null);
+  const createAttemptPersisted = useRef(false);
   const createOpener = useRef<HTMLElement>(null);
   const createSubmit = useRef<HTMLButtonElement>(null);
   const createTitle = useRef<HTMLInputElement>(null);
@@ -434,24 +438,39 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     teamCatalog?.state === 'ready' && currentTeamTemplate?.version !== teamTemplate.version));
   const createLocked = creating || Boolean(createAttempt) || creationRejected;
   templateFormOpen.current = newOpen && Boolean(teamTemplate);
-  templateDraftDirty.current = templateFormOpen.current && (newTitleCustomized.current || teamTemplateChanged);
+  templateDraftDirty.current = templateFormOpen.current && !createAttempt && (newTitleCustomized.current || teamTemplateChanged);
   const recordCreateAttempt = useCallback((value: DocumentCreationAttempt | null) => {
+    const attempt = value ?? creationAttemptRef.current;
+    const saved = attempt ? writeDocumentCreationAttempt(attempt, Boolean(value)) : false;
     creationAttemptRef.current = value;
+    createAttemptPersisted.current = Boolean(value) && saved;
     setCreateAttempt(value);
+    setCreateStorageProblem(Boolean(value) && !saved);
   }, []);
   const closeCreateDocument = useCallback(() => {
     templateFormOpen.current = false;
     templateDraftDirty.current = false;
     setNewOpen(false);
     setMarkdownPreview(null);
-    recordCreateAttempt(null);
     setCreateError('');
     setTeamTemplate(null);
     setTeamTemplateConflict(false);
     setCreationRejected(false);
-  }, [recordCreateAttempt]);
-  const confirmCreateDocumentExit = useCallback(() => {
-    if (creationAttemptRef.current) return window.confirm('문서가 저장됐을 수 있습니다. 목록에서 확인할 수 있습니다. 계속할까요?');
+  }, []);
+  useEffect(() => {
+    const previous = creationAttemptRef.current;
+    if (previous?.actorId === actorId && previous.input.expectedRestoreGeneration === data.restoreGeneration) return;
+    if (previous) closeCreateDocument();
+    const attempt = readDocumentCreationAttempt(actorId, data.restoreGeneration);
+    creationAttemptRef.current = attempt;
+    createAttemptPersisted.current = Boolean(attempt);
+    setCreateAttempt(attempt);
+    setCreateStorageProblem(false);
+  }, [actorId, data.restoreGeneration, closeCreateDocument]);
+  const confirmCreateDocumentExit = useCallback((discard = false) => {
+    if (creationAttemptRef.current) return !discard && createAttemptPersisted.current ||
+      window.confirm(discard ? '문서가 저장됐을 수 있습니다. 이 탭에 보관한 결과 확인을 지울까요?' :
+        '문서가 저장됐을 수 있습니다. 목록에서 확인할 수 있습니다. 계속할까요?');
     return !templateDraftDirty.current || window.confirm('팀 템플릿으로 작성 중인 새 문서의 입력을 버릴까요?');
   }, []);
   const closeTemplateManager = useCallback(() => {
@@ -1008,7 +1027,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
-      if (archiveImportNavigation.current !== 'ready' || creatingRequest.current || creationAttemptRef.current || templateDraftDirty.current || draftRef.current?.dirty
+      if (archiveImportNavigation.current !== 'ready' || creatingRequest.current || (creationAttemptRef.current && !createAttemptPersisted.current)
+        || templateDraftDirty.current || draftRef.current?.dirty
         || listDrafts.current.size || commentDraftRef.current.body.trim() || liveStateRef.current?.pending
         || isReplySending() || hasReplyDraft(actorRef.current, draftRef.current?.id) || isCommentEditPending() || hasCommentEditDraft()) {
         rememberDraft(draftRef.current); rememberComment(); event.preventDefault(); event.returnValue = '';
@@ -1051,7 +1071,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         notify('저장이 끝난 후 이동해주세요.', 'error');
         return;
       }
-      const closeCreateForm = Boolean(templateFormOpen.current || creationAttemptRef.current);
+      const closeCreateForm = newOpen && Boolean(templateFormOpen.current || creationAttemptRef.current);
       if (closeCreateForm && !confirmCreateDocumentExit()) {
         event.preventDefault();
         return;
@@ -1071,12 +1091,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     };
     window.addEventListener('teamspace:navigate', guard);
     return () => window.removeEventListener('teamspace:navigate', guard);
-  }, [annotationDialog, archiveImport, closeCreateDocument, confirmCreateDocumentExit, notify, rememberDraft, rememberComment, selectedDocumentId, isReplySending, hasReplyDraft, offlineExport,
+  }, [annotationDialog, archiveImport, closeCreateDocument, confirmCreateDocumentExit, newOpen, notify, rememberDraft, rememberComment, selectedDocumentId, isReplySending, hasReplyDraft, offlineExport,
     discardCommentEdit, hasCommentEditDraft, isCommentEditPending]);
 
   useEffect(() => {
-    if (createAttempt && !creating && !creationRejected) createSubmit.current?.focus({ preventScroll: true });
-  }, [creating, createAttempt, creationRejected]);
+    if (newOpen && createAttempt && !creating && !creationRejected) createSubmit.current?.focus({ preventScroll: true });
+  }, [newOpen, creating, createAttempt, creationRejected]);
 
   const saveDraft = useCallback(async () => {
     const editable = draftRef.current;
@@ -1431,6 +1451,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }
 
   function openNew(parentId = '', template = 'blank') {
+    if (createAttempt) {
+      reopenCreateDocument(createAttempt);
+      return;
+    }
     const parent = data.documents.find(page => page.id === parentId);
     createOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setNewParent(parentId);
@@ -1439,7 +1463,6 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     setNewTitle(template === 'blank' ? '' : DOCUMENT_TEMPLATES.find(item => item.id === template)?.name || '');
     newTitleCustomized.current = false;
     setMarkdownPreview(null);
-    recordCreateAttempt(null);
     setCreateError('');
     setTeamTemplate(null);
     setTeamTemplateConflict(false);
@@ -1448,8 +1471,26 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     setNewOpen(true);
   }
 
+  function reopenCreateDocument(attempt: DocumentCreationAttempt) {
+    const { input } = attempt;
+    createOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    newTitleCustomized.current = true;
+    setNewParent(input.parentId ?? '');
+    setNewProject(input.projectId ?? '');
+    setNewTitle(input.title);
+    setNewTemplate(attempt.template);
+    setTeamTemplate(attempt.teamTemplate ?? null);
+    setTeamTemplateConflict(false);
+    setMarkdownPreview(attempt.markdown && input.content ? { ...attempt.markdown, content: input.content } : null);
+    setCreationRejected(false);
+    setCreateError(attempt.documentId ? '문서를 저장했습니다. 목록을 다시 불러와 저장한 문서를 열어 주세요.' :
+      '저장 결과를 확인할 수 없습니다. 같은 요청으로 다시 확인해 주세요.');
+    setNewOpen(true);
+  }
+
   function discardCreateDocument() {
-    if (creatingRequest.current || !confirmCreateDocumentExit()) return;
+    if (creatingRequest.current || !confirmCreateDocumentExit(true)) return;
+    if (createAttempt) recordCreateAttempt(null);
     closeCreateDocument();
     requestAnimationFrame(() => createOpener.current?.focus({ preventScroll: true }));
   }
@@ -1494,10 +1535,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   async function createDocument(event: React.FormEvent) {
     event.preventDefault();
-    if (creatingRequest.current || !newTitle.trim() || importingMarkdown && !markdownPreview || teamTemplateChanged || creationRejected) return;
+    if (creatingRequest.current || !newTitle.trim() || !createAttempt && importingMarkdown && !markdownPreview || teamTemplateChanged || creationRejected) return;
     if (!createAttempt && listDrafts.current.size && !window.confirm(LIST_DRAFT_DISCARD_MESSAGE)) return;
-    if (createAttempt && createAttempt.actorId !== activeActorRef.current) {
-      setCreateError('저장을 시작한 작업자로 전환한 뒤 다시 확인해 주세요.');
+    const generation = data.restoreGeneration;
+    if (!generation || activeGeneration.current !== generation) {
+      setCreateError('작업 공간이 변경되었습니다. 문서 목록을 다시 확인해 주세요.');
       return;
     }
     if (!confirmCommentEditExit()) return;
@@ -1507,11 +1549,17 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       const destination = parent ? parent.projectId : newProject || null;
       const source = teamTemplate ? { templateId: teamTemplate.id, expectedTemplateVersion: teamTemplate.version } : {
         content: importingMarkdown && markdownPreview ? markdownPreview.content : templateContent(newTemplate),
-        status: 'draft', icon: DOCUMENT_TEMPLATES.find(item => item.id === newTemplate)?.icon || '📄',
+        status: 'draft' as const, icon: DOCUMENT_TEMPLATES.find(item => item.id === newTemplate)?.icon || '📄',
       };
-      request = { actorId, projectId: destination, body: JSON.stringify({ ...source, requestId: newRequestId(),
-        title: newTitle.trim(), projectId: destination, parentId: newParent || null }) };
+      request = { actorId, template: newTemplate,
+        input: { ...source, requestId: newRequestId(), expectedRestoreGeneration: generation,
+          title: newTitle.trim(), projectId: destination, parentId: newParent || null },
+        ...(teamTemplate && { teamTemplate }), ...(markdownPreview && importingMarkdown && { markdown: {
+          suggestedTitle: markdownPreview.suggestedTitle, warnings: markdownPreview.warnings,
+        } }),
+      };
     }
+    const sameContext = () => request.actorId === activeActorRef.current && request.input.expectedRestoreGeneration === activeGeneration.current;
     creatingRequest.current = true;
     setCreating(true);
     setCreateError('');
@@ -1519,21 +1567,28 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     let documentId = request.documentId;
     try {
       if (!documentId) {
-        const result = await api<DocPage>('/documents', { method: 'POST', headers: { 'X-Actor-Id': request.actorId }, body: request.body });
-        if (typeof result?.id !== 'string' || !result.id || result.projectId !== request.projectId || result.authorId !== request.actorId) {
+        const result = await api<DocPage>('/documents', { method: 'POST', headers: { 'X-Actor-Id': request.actorId },
+          body: JSON.stringify(request.input), signal: AbortSignal.timeout(12_000) });
+        if (typeof result?.id !== 'string' || !result.id || result.projectId !== request.input.projectId || result.authorId !== request.actorId) {
           throw new Error('문서 저장 결과를 확인할 수 없습니다.');
         }
         documentId = result.id;
+        if (!sameContext()) { writeDocumentCreationAttempt({ ...request, documentId }, true); return; }
         recordCreateAttempt({ ...request, documentId });
       }
       rememberDraft(draftRef.current);
       rememberComment();
       await refresh();
+      if (!sameContext()) return;
+      if (!onSelectDocument(documentId, { documentId: selectedDocumentId, expectedRestoreGeneration: generation, beforeOpen: discardCommentEdit })) {
+        setCreateError('문서를 저장했습니다. 목록을 다시 불러와 저장한 문서를 열어 주세요.');
+        return;
+      }
+      recordCreateAttempt(null);
       closeCreateDocument();
-      discardCommentEdit();
-      onSelectDocument(documentId);
       notify('새 문서를 만들었습니다.', 'success');
     } catch (cause) {
+      if (!sameContext()) return;
       if (documentId) setCreateError('문서를 저장했습니다. 목록을 다시 불러와 저장한 문서를 열어 주세요.');
       else if (!isDefiniteTemplateFailure(cause)) setCreateError('저장 결과를 확인할 수 없습니다. 같은 요청으로 다시 확인해 주세요.');
       else {
@@ -1543,7 +1598,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         if (teamTemplate && (reason === 'template_version_conflict' || reason === 'template_archived' || reason === 'template_not_found')) {
           setTeamTemplateConflict(true);
           reloadTeamTemplates();
-        } else if (reason === 'result_unavailable' || reason === 'request_conflict') {
+        } else if (reason === 'result_unavailable' || reason === 'request_conflict' || reason === 'workspace_changed') {
           setCreationRejected(true);
         }
       }
@@ -2557,6 +2612,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         <button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 새 문서</button>
       </div>
     </div>
+    {!newOpen && createAttempt && <section className="docs-notice" aria-label="새 문서 생성 결과">
+      <p><strong>{createAttempt.input.title}</strong> · {createAttempt.documentId ? '저장 확인됨 · 문서 열기 필요' : '저장 결과 확인 필요'}</p>
+      <button className="btn" type="button" onClick={() => reopenCreateDocument(createAttempt)}>생성 결과 열기</button>
+    </section>}
     <div className={`docs-layout ${sidebarOpen && !checklistReselecting ? 'has-panel' : ''}`}
       inert={publicationOpen || newOpen || archiveImport || Boolean(issueBlockDialog || templateManager || offlineExport || (documentAction && !checklistReselecting))}
       onKeyDownCapture={event => {
@@ -3145,6 +3204,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           </select></label>
         </div>
         {createError && <p className="document-template-error" role="alert">{createError}</p>}
+        {createStorageProblem && <p className="document-template-error" role="status">이 탭을 새로고침하기 전에 문서 저장 결과를 확인해 주세요.</p>}
         {teamTemplateChanged && <div className="document-template-picker-status document-template-review">
           <span>{currentTeamTemplate ? `현재 템플릿 버전 ${currentTeamTemplate.version}을 확인해 주세요.` : teamCatalog?.state === 'ready'
             ? '현재 공간에서 이 템플릿을 사용할 수 없습니다. 다른 템플릿을 선택해 주세요.' : '팀 템플릿 목록을 확인하고 있습니다.'}</span>
@@ -3157,7 +3217,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         </div>}
         <div className="docs-modal-footer">
           <button className="btn btn-ghost" type="button" disabled={creating} onClick={discardCreateDocument}>취소</button>
-          <button ref={createSubmit} className="btn btn-primary" type="submit" disabled={!newTitle.trim() || creating || importingMarkdown && !markdownPreview || teamTemplateChanged || creationRejected}>
+          <button ref={createSubmit} className="btn btn-primary" type="submit" disabled={!newTitle.trim() || creating || !createAttempt && importingMarkdown && !markdownPreview || teamTemplateChanged || creationRejected}>
             {creating ? <Loader2 size={14} className="docs-spin" /> : <Plus size={14} />}
             {creating ? '저장 중…' : createAttempt?.documentId ? '저장한 문서 열기'
               : createAttempt ? '저장 다시 확인' : importingMarkdown ? 'Markdown 문서 만들기' : '문서 만들기'}

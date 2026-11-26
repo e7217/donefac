@@ -24,8 +24,9 @@ type Props = {
   views: SavedView[];
   selectedId: string | null;
   current: SavedViewState;
+  latestConditionsPending: boolean;
   onSelect?: (id: string | null) => boolean;
-  onApply: (view: SavedViewState) => void;
+  onApply: (view: SavedView) => void;
   onOpenGantt?: (viewId: string) => void;
   onOpenFieldBreakdown?: (viewId: string) => void;
   onViewsLoaded: (views: SavedView[]) => void;
@@ -41,11 +42,19 @@ function viewState({ layout, boardGrouping, filters, sort }: SavedViewState): Sa
     ...(sort?.length ? { sort } : {}), filters: { ...otherFilters, ...statusCriteria } };
 }
 
+export function savedViewDefinitionKey(value: SavedViewState) {
+  return JSON.stringify(viewState(value), (_name, part: unknown) => {
+    if (!part || typeof part !== 'object' || Array.isArray(part)) return part;
+    const object = part as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(object).sort().map(key => [key, object[key]]));
+  });
+}
+
 export function SavedViews(props: Props) {
   return <ProjectSavedViews key={props.projectId} {...props}/>;
 }
 
-function ProjectSavedViews({projectId, project, actorId, planningItems, statuses, users, views, selectedId, current, onSelect, onApply, onOpenGantt, onOpenFieldBreakdown, onViewsLoaded, onViewsChanged, notify}: Props) {
+function ProjectSavedViews({projectId, project, actorId, planningItems, statuses, users, views, selectedId, current, latestConditionsPending, onSelect, onApply, onOpenGantt, onOpenFieldBreakdown, onViewsLoaded, onViewsChanged, notify}: Props) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -133,7 +142,7 @@ function ProjectSavedViews({projectId, project, actorId, planningItems, statuses
   }, [copyFallback, selectedId]);
 
   const openEditor = (mode: 'create' | 'update') => {
-    if (mode === 'update' && !selected) return;
+    if (mode === 'update' && (!selected || latestConditionsPending)) return;
     const editor: ViewEditor = mode === 'update' && selected ? { mode, state: current, target: selected } : { mode: 'create', state: current };
     setName(editor.mode === 'update' ? editor.target.name : '');
     setDialogError('');setConflicted(false);setEditing(editor);
@@ -285,7 +294,7 @@ function ProjectSavedViews({projectId, project, actorId, planningItems, statuses
       if (mounted.current) setBusy(false);
     }
   };
-  const changed = selected && JSON.stringify(viewState(selected)) !== JSON.stringify(viewState(current));
+  const changed = selected && savedViewDefinitionKey(selected) !== savedViewDefinitionKey(current);
   const editorState = editing?.state;
   if (!projectId || projectId === 'all') return null;
   return <div className="saved-views">
@@ -299,15 +308,18 @@ function ProjectSavedViews({projectId, project, actorId, planningItems, statuses
       <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => onSelect?.(null)}>공유 보기 해제</button>
     </div>}
     {selected && <>
-      <span className="saved-view-indicator">{changed ? '조건이 변경됨' : <><Check size={12}/> 저장된 조건</>}</span>
-      {changed && <button className="btn btn-ghost" type="button" disabled={busy} onClick={reapplySelected}>저장된 조건 다시 적용</button>}
+      <span className="saved-view-indicator" aria-live="polite">{latestConditionsPending ? '공유 보기 갱신됨 · 현재 조건 유지' : changed ? '조건이 변경됨' : <><Check size={12}/> 저장된 조건</>}</span>
+      {(changed || latestConditionsPending) && <button className="btn btn-ghost" type="button" disabled={busy} onClick={reapplySelected}>
+        {latestConditionsPending ? '최신 보기 조건 적용' : '저장된 조건 다시 적용'}
+      </button>}
       {onOpenGantt && <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => void openSavedView(onOpenGantt)}
         title="선택한 보기의 저장된 조건과 정렬을 적용합니다."><SquareChartGantt size={14} aria-hidden="true" /> 간트에서 열기</button>}
       {onOpenFieldBreakdown && <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => void openSavedView(onOpenFieldBreakdown)}
         title="선택한 보기의 저장된 조건으로 집계 범위를 지정합니다."><BarChart3 size={14} aria-hidden="true" /> 필드 집계에서 열기</button>}
       <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => void copyViewLink(selected)}
         title="저장된 조건을 여는 주소를 복사합니다."><Link2 size={14} aria-hidden="true" />보기 링크 복사</button>
-      <button className="btn btn-ghost" disabled={busy} onClick={() => openEditor('update')} title="현재 조건으로 보기 수정"><Pencil size={13}/> 보기 수정</button>
+      <button className="btn btn-ghost" disabled={busy || latestConditionsPending} onClick={() => openEditor('update')}
+        title={latestConditionsPending ? '최신 조건을 적용하거나 현재 조건을 새 보기로 저장하세요.' : '현재 조건으로 보기 수정'}><Pencil size={13}/> 보기 수정</button>
       <button className="icon-btn" disabled={busy} onClick={deleteView} aria-label="선택한 보기 삭제"><Trash2 size={14}/></button>
     </>}
     {copyFallback && copyFallback.id === selected?.id && <label className="saved-view-copy-fallback">

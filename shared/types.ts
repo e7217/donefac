@@ -2536,6 +2536,7 @@ export interface ScheduleBulkDateInput {
   issues: { id: string; expectedVersion: number }[];
   changes: ScheduleBulkDateChanges;
   dates?: ScheduleBulkLinkDateEdit[];
+  workdayDuration?: { endpoint: 'startDate' | 'endDate'; workingDays: number };
   rescheduleSuccessors?: boolean;
   includeTeamBlockers?: boolean;
 }

@@ -14,7 +14,7 @@ import { issueTypeMeta, projectIssueSchema, projectIssueTypes } from '../../shar
 import { CustomFieldSummary, IssueTypeName } from './CustomFields';
 import { IssuePasteDialog } from './IssuePasteDialog';
 import { NewIssueModal } from './NewIssueModal';
-import { SavedViews } from './SavedViews';
+import { SavedViews, savedViewDefinitionKey } from './SavedViews';
 import { IssueFieldFilters } from './IssueFieldFilters';
 import { IssueStatusDialog, type IssueStatusEdit } from './IssueStatusDialog';
 import { IssueStatusFilter } from './IssueStatusFilter';
@@ -163,7 +163,7 @@ export function Issues(props: FeatureProps & {
   const selectedView = savedViewId ? projectViews.find(value => value.id === savedViewId) : undefined;
   const unavailableView = Boolean(savedViewId && !selectedView);
   const layoutKey = !actorId || isAll(projectId) ? null : `teamspace:project-issue-layout:${JSON.stringify([actorId, projectId, data.restoreGeneration ?? null])}`;
-  const [appliedRouteView, setAppliedRouteView] = useState<{ projectId: string; layoutKey: string | null; id: string | null; applied: boolean }>();
+  const [appliedRouteView, setAppliedRouteView] = useState<{ projectId: string; layoutKey: string | null; id: string | null; definition?: string }>();
   const [issueLayout, setIssueLayout] = useState(defaultLayout);
   const { layout: view, boardGrouping, showEmptyAssignees } = issueLayout;
   const [sort, setSort] = useState<SavedViewState['sort']>();
@@ -330,12 +330,27 @@ export function Issues(props: FeatureProps & {
     setFilterEditorEpoch(epoch => epoch + 1);
   }
   const layoutScopeChanged = appliedRouteView?.projectId !== projectId || appliedRouteView.layoutKey !== layoutKey;
-  if (layoutScopeChanged || appliedRouteView.id !== savedViewId || (!appliedRouteView.applied && selectedView)) {
-    setAppliedRouteView({ projectId, layoutKey, id: savedViewId, applied: Boolean(selectedView) });
+  const currentView: SavedViewState = { layout: view, boardGrouping: groupedBoard ? 'assignee' : undefined, sort, filters };
+  const selectedDefinition = selectedView && savedViewDefinitionKey(selectedView);
+  const latestConditionsPending = Boolean(appliedRouteView?.definition && selectedDefinition && appliedRouteView.definition !== selectedDefinition);
+  if (layoutScopeChanged || appliedRouteView.id !== savedViewId || (!appliedRouteView.definition && selectedView)) {
+    setAppliedRouteView({ projectId, layoutKey, id: savedViewId, definition: selectedDefinition });
     if (layoutScopeChanged) setSort(undefined);
     if (savedViewId) applySavedView(selectedView ?? defaultView);
     else if (appliedRouteView?.id) applySavedView(defaultView, readProjectIssueLayout(layoutKey));
     else setIssueLayout(readProjectIssueLayout(layoutKey));
+  } else if (selectedView && latestConditionsPending && !refreshPaused) {
+    const currentDefinition = savedViewDefinitionKey(currentView);
+    if (currentDefinition === selectedDefinition || currentDefinition === appliedRouteView.definition) {
+      setAppliedRouteView({ ...appliedRouteView, definition: selectedDefinition });
+      if (currentDefinition !== selectedDefinition) {
+        applySavedView(selectedView, { layout: selectedView.layout, boardGrouping: selectedView.boardGrouping, showEmptyAssignees });
+      }
+    }
+  }
+  function applySharedView(value: SavedView) {
+    if (value.id === savedViewId) setAppliedRouteView({ projectId, layoutKey, id: value.id, definition: savedViewDefinitionKey(value) });
+    applySavedView(value);
   }
   function changeIssueLayout(change: Partial<ProjectIssueLayout>) {
     const next = { ...issueLayout, ...change };
@@ -717,7 +732,7 @@ export function Issues(props: FeatureProps & {
         value={planning} onApply={value => updateProjectFilters({ planning: value })} />
     </fieldset>}
     <SavedViews projectId={projectId} project={project} actorId={props.actorId} planningItems={planningItems} statuses={statuses} users={data.users} views={projectViews} selectedId={savedViewId}
-      current={{layout:view,...(groupedBoard ? { boardGrouping: 'assignee' } : {}),...(sort?.length ? { sort } : {}),filters}} onSelect={onChangeSavedView} onApply={applySavedView} onOpenGantt={onOpenGantt}
+      current={currentView} latestConditionsPending={latestConditionsPending} onSelect={onChangeSavedView} onApply={applySharedView} onOpenGantt={onOpenGantt}
       onOpenFieldBreakdown={onOpenFieldBreakdown}
       onViewsLoaded={values => setLoadedViews({ projectId, snapshot: data.savedViews, values })} onViewsChanged={refresh} notify={notify} />
     <div className="issue-results">

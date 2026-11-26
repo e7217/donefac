@@ -81,7 +81,7 @@ async function expectFitsMobile(dialog: Locator) {
 test('360px 내장 템플릿의 문서 생성 응답을 잃어도 한 번만 만들고 목록을 다시 연다', async ({ page, request }) => {
   test.setTimeout(75_000);
   await page.setViewportSize({ width: 360, height: 820 });
-  const { projects: [project], users: [actor] } = await workspace(request);
+  const { projects: [project], users: [actor, otherActor], restoreGeneration } = await workspace(request);
   const prefix = `내장 문서 생성 ${randomUUID().slice(0, 8)}`;
   const title = `${prefix} 회의록`;
   const parent = await createDocument(request, project.id, `${prefix} 상위 문서`);
@@ -91,6 +91,7 @@ test('360px 내장 템플릿의 문서 생성 응답을 잃어도 한 번만 만
 
   try {
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    page.on('dialog', dialog => void dialog.accept());
     await page.goto(`/#/${project.id}/documents/${parent.id}`);
     const { dialog, title: titleInput, submit } = await openNew(page);
     await dialog.getByRole('button', { name: /회의록/u }).click();
@@ -114,12 +115,25 @@ test('360px 내장 템플릿의 문서 생성 응답을 잃어도 한 번만 만
     });
 
     await submit.click();
-    const retry = dialog.getByRole('button', { name: /^(문서 만들기|저장 다시 확인)$/u });
+    const retry = dialog.getByRole('button', { name: '저장 다시 확인', exact: true });
     await expect(retry).toBeEnabled();
     const first = await createdDocuments();
     expect(first).toHaveLength(1);
     expect(first[0]).toMatchObject({ version: 1, projectId: project.id, parentId: parent.id, authorId: actor.id });
     expect(first[0].plainText).toContain('회의 정보');
+    expect(JSON.parse(attempts[0].body!)).toMatchObject({ expectedRestoreGeneration: restoreGeneration });
+
+    await page.reload();
+    const recovery = page.getByRole('region', { name: '새 문서 생성 결과', exact: true });
+    const openRecovery = recovery.getByRole('button', { name: '생성 결과 열기', exact: true });
+    await expect(recovery).toContainText(title);
+    const actorPicker = page.getByLabel('작업자 선택', { exact: true });
+    await actorPicker.selectOption(otherActor.id);
+    await expect(recovery).toHaveCount(0);
+    await actorPicker.selectOption(actor.id);
+    await openRecovery.click();
+    await expect(titleInput).toHaveValue(title);
+    await expect(parentInput).toHaveValue(parent.id);
     await retry.click();
     await expect.poll(() => attempts.length).toBe(2);
     expect(await createdDocuments()).toEqual(first);
@@ -132,16 +146,62 @@ test('360px 내장 템플릿의 문서 생성 응답을 잃어도 한 번만 만
     await expect(dialog.getByRole('alert')).toContainText('목록');
     await expect(titleInput).toBeDisabled();
     await expect(parentInput).toBeDisabled();
+    await page.reload();
+    await openRecovery.click();
+    await expect(reopen).toBeFocused();
     await reopen.click();
     await expect(dialog).toBeHidden();
     await expect(page).toHaveURL(new RegExp(`/documents/${first[0].id}$`));
     await expect(page.locator('.docs-prose')).toContainText('회의 정보');
+    await expect(recovery).toHaveCount(0);
     expect(attempts).toHaveLength(2);
     expect(await createdDocuments()).toEqual(first);
     const revisions = await json<DocRevision[]>(await request.get(`/api/documents/${first[0].id}/revisions`));
     expect(revisions.map(revision => revision.version)).toEqual([1]);
   } finally {
     await cleanup(request, prefix, project.id);
+  }
+});
+
+test('빈 문서 공간에서 저장한 문서가 목록에 나타날 때까지 생성 결과를 보관한다', async ({ page, request }) => {
+  const { projects: [project], users: [actor] } = await workspace(request);
+  const title = `빈 목록 문서 생성 ${randomUUID().slice(0, 8)}`;
+  let documentId: string | undefined;
+  let creationRequests = 0;
+  let showCreatedDocument = false;
+
+  try {
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.route('**/api/workspace', async route => {
+      const response = await route.fetch();
+      const snapshot = await response.json() as WorkspaceSnapshot;
+      await route.fulfill({ response, json: { ...snapshot,
+        documents: showCreatedDocument ? snapshot.documents.filter(document => document.id === documentId) : [],
+      } });
+    });
+    await page.route('**/api/documents', async route => {
+      if (route.request().method() !== 'POST' || route.request().postDataJSON()?.title !== title) return route.continue();
+      creationRequests++;
+      const response = await route.fetch();
+      documentId = (await response.json() as DocPage).id;
+      await route.fulfill({ response });
+    });
+    await page.goto(`/#/${project.id}/documents`);
+    const { dialog, title: titleInput, submit } = await openNew(page);
+    await titleInput.fill(title);
+    await submit.click();
+    const reopen = dialog.getByRole('button', { name: '저장한 문서 열기', exact: true });
+    await expect(reopen).toBeEnabled();
+    await expect(dialog.getByRole('alert')).toContainText('목록');
+    await expect(page).toHaveURL(new RegExp(`/documents$`));
+
+    showCreatedDocument = true;
+    await reopen.click();
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(new RegExp(`/documents/${documentId}$`));
+    expect(creationRequests).toBe(1);
+  } finally {
+    await cleanup(request, title, project.id);
   }
 });
 

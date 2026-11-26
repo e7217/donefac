@@ -31,6 +31,68 @@ async function removeIssue(request: APIRequestContext, issue: Issue) {
   if (response.ok()) await request.delete(`/api/trash/${(await response.json()).trashEntryId}`);
 }
 
+test('공유 보기의 최신 조건은 그대로 보던 화면에 적용하고 내 임시 조건은 유지한다', async ({ page, request }) => {
+  const { projects: [project], users: [, peer] } = await workspace(request);
+  const prefix = `공유 보기 갱신 ${randomUUID().slice(0, 8)}`;
+  const issues: Issue[] = [];
+  let saved: SavedView | undefined;
+  const updateView = async (view: SavedView, query: string, layout: SavedView['layout']) => {
+    const response = await request.patch(`/api/views/${view.id}`, { headers: { 'X-Actor-Id': peer.id }, data: {
+      expectedVersion: view.version, layout, filters: { ...view.filters, query },
+    } });
+    expect(response.ok(), await response.text()).toBeTruthy();
+    return await response.json() as SavedView;
+  };
+  try {
+    const original = await createIssue(request, project.id, `${prefix} 원래 업무`);
+    issues.push(original);
+    const peerIssue = await createIssue(request, project.id, `${prefix} 팀원이 새로 고른 업무`);
+    issues.push(peerIssue);
+    const local = await createIssue(request, project.id, `${prefix} 내가 임시로 고른 업무`);
+    issues.push(local);
+    saved = await createView(request, project.id, `${prefix} 공유`, original.title, 'board');
+    const path = `#/${project.id}/issues?savedView=${saved.id}`;
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/${path}`);
+    const search = page.getByLabel('업무 검색', { exact: true });
+    const savedViews = page.getByLabel('저장된 업무 보기', { exact: true });
+    const refresh = page.getByRole('button', { name: '업무 새로고침', exact: true });
+    const list = page.getByRole('region', { name: '업무 목록', exact: true });
+    await expect(savedViews).toBeEnabled();
+    await expect(search).toHaveValue(original.title);
+    await expect(page.locator('.issue-board-card').filter({ hasText: original.title })).toBeVisible();
+
+    saved = await updateView(saved, peerIssue.title, 'list');
+    await refresh.click();
+    await expect(search).toHaveValue(peerIssue.title);
+    await expect(list.getByText(peerIssue.title, { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '저장된 조건 다시 적용', exact: true })).toHaveCount(0);
+    await expect(page).toHaveURL(url => url.hash === path);
+
+    await search.fill(local.title);
+    await page.getByRole('button', { name: '보드', exact: true }).click();
+    const localCard = page.locator('.issue-board-card').filter({ hasText: local.title });
+    await expect(localCard).toBeVisible();
+    saved = await updateView(saved, original.title, 'list');
+    await refresh.click();
+    const latest = page.getByRole('button', { name: '최신 보기 조건 적용', exact: true });
+    await expect(latest).toBeVisible();
+    await expect(search).toHaveValue(local.title);
+    await expect(localCard).toBeVisible();
+    await expect(page.getByRole('button', { name: '보기 수정', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: '현재 보기 저장', exact: true })).toBeEnabled();
+    await latest.click();
+    await expect(search).toHaveValue(original.title);
+    await expect(list.getByText(original.title, { exact: true })).toBeVisible();
+    await expect(latest).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '보기 수정', exact: true })).toBeEnabled();
+    await expect(page).toHaveURL(url => url.hash === path);
+  } finally {
+    if (saved) await deleteView(request, saved);
+    for (const issue of issues) await removeIssue(request, issue);
+  }
+});
+
 test('360px에서 문서로 이동한 뒤 개인 담당자별 보드를 복원하고 공유 보기와 분리한다', async ({ page, request }) => {
   const { projects: [project, otherProject], users: [actor, teammate] } = await workspace(request);
   const saved = await createView(request, project.id, `개인 보기 대조 ${randomUUID().slice(0, 8)}`, '', 'list');

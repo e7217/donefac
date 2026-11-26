@@ -209,6 +209,12 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     await expect(jobs).toContainText('작업 스크립트 실패');
     expect(calls.filter(call => call.path === upstreamJobs)).toHaveLength(1);
     expect(await jobs.evaluate(region => region.getBoundingClientRect().width)).toBeLessThanOrEqual(360);
+    const addJob = button(jobs, '실패한 MR 통합 검사 댓글 초안에 추가');
+    const beforeAddingJob = calls.length;
+    await addJob.click();
+    const jobDraft = `보내지 않은 검토 댓글\n\nGitLab CI 작업 #${jobId} · 확인 상태 실패 · 단계 integration · 실패한 MR 통합 검사\n<${jobUrl()}>`;
+    await expect(comment).toHaveValue(jobDraft);
+    expect(calls).toHaveLength(beforeAddingJob);
 
     await button(panel, '테스트 결과 닫기').press('Enter');
     mode = 'null';
@@ -245,7 +251,7 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     await expect(panel).toContainText('변경되었습니다.');
     await expect(openPipeline).toHaveCount(0);
     await expect(title).toHaveValue('저장하지 않은 업무 제목');
-    await expect(comment).toHaveValue('보내지 않은 검토 댓글');
+    await expect(comment).toHaveValue(jobDraft);
     currentSourceSha = sourceSha;
 
     const development = await page.context().newPage();
@@ -321,7 +327,7 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     await page.unroute(attachmentRoute);
     expect(browserWrites).toEqual([`POST ${lookupPath}`, `POST ${lookupPath}`]);
     await expect(title).toHaveValue('저장하지 않은 업무 제목');
-    await expect(comment).toHaveValue('보내지 않은 검토 댓글');
+    await expect(comment).toHaveValue(jobDraft);
     const attachedWorkspace = await snapshot();
     const attachedLinks = attachedWorkspace.gitlabLinks.filter(link => link.issueId === issue.id);
     expect(attachedLinks).toHaveLength(2);
@@ -343,7 +349,7 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     const form = ticket.locator('form.issue-detail-form');
     await expect(form.getByRole('combobox', { name: '상태', exact: true })).toHaveValue('done');
     await expect(title).toHaveValue('저장하지 않은 업무 제목');
-    await expect(comment).toHaveValue('보내지 않은 검토 댓글');
+    await expect(comment).toHaveValue(jobDraft);
     expect((await snapshot()).issues.find(item => item.id === issue.id)).toEqual(issue);
     const applying = page.waitForResponse(response => new URL(response.url()).pathname === `/api/issues/${encodeURIComponent(issue.id)}` && response.request().method() === 'PATCH');
     await button(form, '변경사항 저장').click();

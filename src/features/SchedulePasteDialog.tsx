@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { ArrowDown, CalendarRange, Check, ClipboardList, Link2, Loader2, RefreshCw, X } from 'lucide-react';
+import { MAX_WORKING_DURATION_DAYS } from '../../shared/calendar';
 import { DEPENDENCY_LABELS, isDependencyLag } from '../../shared/schedule-dependencies';
 import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_LINK_ISSUES } from '../../shared/types';
 import type {
@@ -69,7 +70,7 @@ type Review = {
 };
 type DateDraftChoices = Partial<Record<BulkLinkDateField, { saved: string | null; choice: BulkLinkDateChoice }>>;
 type DateField = 'startDate' | 'endDate' | 'dueDate';
-type DateAction = 'keep' | 'set' | 'clear';
+type DateAction = 'keep' | 'set' | 'clear' | 'workdays';
 type DateEntry = { action: DateAction; value: string };
 type DateDraft = Record<DateField, DateEntry>;
 type LinkMode = 'anchor' | 'chain';
@@ -154,6 +155,7 @@ function ProjectScheduleEditDialog({
   const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
   const [includeTeamBlockers, setIncludeTeamBlockers] = useState(false);
   const [dates, setDates] = useState<DateDraft>({ startDate: keepDate, endDate: keepDate, dueDate: keepDate });
+  const [workingDays, setWorkingDays] = useState('3');
   const [link, setLink] = useState<BulkLinkDraft>(defaultLink);
   const [linkOperation, setLinkOperation] = useState<BulkLinkOperation>('add');
   const [linkRuleChanges, setLinkRuleChanges] = useState<BulkLinkRuleChanges>({ type: false, lagDays: false });
@@ -210,6 +212,11 @@ function ProjectScheduleEditDialog({
   const title = blockerLinks ? '차단 관계 선후행 검토'
     : bulkLinks ? `선후행 연결 일괄 ${linkOperationLabel}` : clipboard ? '붙여넣은 날짜 검토' : bulkDates ? '일정 일괄 편집' : '일정 붙여넣기';
   const datesEdited = bulkFields.some(({ field }) => dates[field].action !== 'keep');
+  const durationEndpoint = dates.startDate.action === 'workdays' ? 'startDate' : dates.endDate.action === 'workdays' ? 'endDate' : null;
+  const workdayDuration: ScheduleBulkDateInput['workdayDuration'] | null =
+    durationEndpoint && { endpoint: durationEndpoint, workingDays: Number(workingDays) };
+  const durationValid = !workdayDuration || Number.isSafeInteger(workdayDuration.workingDays) &&
+    workdayDuration.workingDays >= 1 && workdayDuration.workingDays <= MAX_WORKING_DURATION_DAYS;
   const chainMode = linkMode === 'chain';
   const chainEdited = chainRule.type !== defaultLinkRule.type || chainRule.lagDays !== defaultLinkRule.lagDays ||
     chainOrder.some((id, index) => id !== bulkIssues[index]?.id);
@@ -286,7 +293,7 @@ function ProjectScheduleEditDialog({
       ? [linkMode, chainOrder]
       : [linkMode, link.choice?.id, link.direction],
       linkAction, ...reviewChoices])
-      : bulkDates ? JSON.stringify([dates, ...reviewChoices])
+      : bulkDates ? JSON.stringify([dates, durationEndpoint ? workingDays : null, ...reviewChoices])
         : JSON.stringify([text, rescheduleSuccessors, includeTeamBlockers, sheetChoices]);
   const linkRulesValid = projectId !== null && !unavailableTargets?.length && !hasConflictingDateDrafts &&
     issues.length >= 2 && issues.length <= MAX_SCHEDULE_BULK_LINK_ISSUES;
@@ -329,7 +336,7 @@ function ProjectScheduleEditDialog({
     : bulkLinks
     ? Boolean(bulkLinkInput || bulkChainInput)
     : bulkDates
-      ? issues.length > 0 && (datesEdited || hasDateDraftEdits) && !hasConflictingDateDrafts && !clipboard?.unavailableKeys.length &&
+      ? issues.length > 0 && (datesEdited || hasDateDraftEdits) && durationValid && !hasConflictingDateDrafts && !clipboard?.unavailableKeys.length &&
         bulkFields.every(({ field }) => dates[field].action !== 'set' || dates[field].value)
       : Boolean(text.trim());
   const editLocked = Boolean(pending || applied || (preserveUnknownResult && retryApply));
@@ -592,9 +599,11 @@ function ProjectScheduleEditDialog({
       const changes: ScheduleBulkDateChanges = {};
       for (const { field } of bulkFields) {
         const { action, value } = dates[field];
-        if (action !== 'keep') changes[field] = action === 'clear' ? null : value;
+        if (action === 'clear') changes[field] = null;
+        else if (action === 'set') changes[field] = value;
       }
-      payload = { projectId, issues, changes, ...rowDatesInput, ...followUpInput, ...teamFollowUpInput };
+      payload = { projectId, issues, changes, ...rowDatesInput, ...followUpInput, ...teamFollowUpInput,
+        ...(workdayDuration ? { workdayDuration } : {}) };
     } else payload = { projectId, text, ...followUpInput, ...teamFollowUpInput, ...sheetChoiceInput };
     try {
       const endpoint = blockerLinks ? '/schedule/blocker-links/preview'
@@ -907,16 +916,26 @@ function ProjectScheduleEditDialog({
                           <option value="keep">유지</option>
                           <option value="set">지정</option>
                           <option value="clear">삭제</option>
+                          {field !== 'dueDate' && <option value="workdays" disabled={durationEndpoint !== null && durationEndpoint !== field}>근무일로 계산</option>}
                         </select>
                         {entry.action === 'set' && (
                           <input type="date" className="field" aria-label={`${label} 값`}
                             max="9999-12-31" required value={entry.value}
                             onChange={event => updateDate(field, { ...entry, value: event.target.value })} />
                         )}
+                        {entry.action === 'workdays' && <>
+                          <label htmlFor={`schedule-bulk-${field}-duration`}>근무일 수</label>
+                          <input id={`schedule-bulk-${field}-duration`} type="number" className="field" aria-label={`${label} 근무일 수`} inputMode="numeric"
+                            min={1} max={MAX_WORKING_DURATION_DAYS} step={1} required value={workingDays} onChange={event => {
+                              setWorkingDays(event.currentTarget.value);
+                              resetReview(true);
+                            }} />
+                        </>}
                       </div>
                     );
                   })}
                 </div>}
+                {durationEndpoint && <p className="muted">각 업무의 {durationEndpoint === 'endDate' ? '시작일' : '종료일'}과 프로젝트 달력으로 계산합니다. 포함한 간트 초안의 날짜가 우선합니다.</p>}
                 {dateDraftFields}
                 {followUpOption}
               </>

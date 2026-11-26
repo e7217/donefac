@@ -1371,7 +1371,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
   }, [writeRoute]);
   // The document tree already confirms/cache-preserves its local draft before invoking this callback.
-  const selectDocument = (id: string, recovery?: { documentId: string; beforeOpen: () => void; expectedRestoreGeneration?: string }, reading = false) => {
+  const selectDocument = (id: string, recovery?: { documentId: string | null; beforeOpen: () => void; expectedRestoreGeneration?: string }, reading = false) => {
     const snapshot = dataRef.current;
     const previous = acceptedRouteRef.current;
     if (!snapshot || recovery && (previous?.view !== 'documents' || previous.documentId !== recovery.documentId ||

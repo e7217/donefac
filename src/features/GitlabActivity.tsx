@@ -522,7 +522,9 @@ function BranchMergeRequestCreation({ url, title }: { url: URL; title: string })
   </>;
 }
 
-function PipelineJobs({ target, revision }: { target: PipelineTarget; revision: string }) {
+function PipelineJobs({ target, revision, commentActions }: {
+  target: PipelineTarget; revision: string; commentActions?: GitlabActivityCommentActions;
+}) {
   const { view, toggle, load } = useActivityLookup(revision, async signal => {
     const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/pipeline-jobs`;
     const result = await api<GitlabPipelineJobs | undefined>(path, { method: 'GET', cache: 'no-store', signal });
@@ -530,7 +532,7 @@ function PipelineJobs({ target, revision }: { target: PipelineTarget; revision: 
   }, '연결된 파이프라인의 CI 작업 응답을 확인할 수 없습니다.', pipelineJobsMessage);
 
   return <PipelineJobsInspection view={view} toggle={toggle} reload={() => void load()}>
-    {view?.kind === 'ready' && <PipelineJobsResult result={view.result} target={target} />}
+    {view?.kind === 'ready' && <PipelineJobsResult result={view.result} target={target} commentActions={commentActions} />}
   </PipelineJobsInspection>;
 }
 
@@ -560,7 +562,9 @@ function PipelineJobsInspection({ view, toggle, reload, disabled = false, childr
   </div>;
 }
 
-function PipelineJobsResult({ result, target, showStatus = true }: { result: GitlabPipelineJobs; target: PipelineTarget; showStatus?: boolean }) {
+function PipelineJobsResult({ result, target, commentActions, showStatus = true }: {
+  result: GitlabPipelineJobs; target: PipelineTarget; commentActions?: GitlabActivityCommentActions; showStatus?: boolean;
+}) {
   const triggers = isTriggerJobsResult(result.triggerJobs) ? result.triggerJobs : null;
   return <>
     {showStatus && <p className="gitlab-activity-inspection-meta" role="status">파이프라인 상태 <strong>{gitlabActivityStateLabel(result.status)}</strong>
@@ -569,7 +573,7 @@ function PipelineJobsResult({ result, target, showStatus = true }: { result: Git
     {result.configurationError && <p className="gitlab-activity-inspection-warning">GitLab에서 파이프라인 설정 오류를 보고했습니다.</p>}
     {result.jobs.length === 0 ? <p>조회한 CI 작업 중 실패 또는 수동 대기 상태가 없습니다.</p> :
       <ul className="gitlab-pipeline-job-list" aria-label="실패 및 수동 실행 작업">
-        {result.jobs.map(job => <PipelineJobRow key={job.id} job={job} target={target} />)}
+        {result.jobs.map(job => <PipelineJobRow key={job.id} job={job} target={target} commentActions={commentActions} />)}
       </ul>}
     {result.hasMore && <p>조회 한도를 넘은 작업은 <a href={target.url.href} target="_blank" rel="noopener noreferrer">GitLab</a>에서 확인하세요.</p>}
     <section className="gitlab-trigger-jobs" aria-label="GitLab 트리거 작업">
@@ -577,7 +581,7 @@ function PipelineJobsResult({ result, target, showStatus = true }: { result: Git
       {!triggers ? <p className="gitlab-activity-inspection-warning">GitLab 트리거 작업을 확인하지 못했습니다.</p>
         : !triggers.jobs.length ? <p>조회한 트리거 작업이 없습니다.</p>
           : <ul className="gitlab-pipeline-job-list" aria-label="트리거 작업">
-            {triggers.jobs.map(job => <PipelineJobRow key={job.id} job={job} target={target}>
+            {triggers.jobs.map(job => <PipelineJobRow key={job.id} job={job} target={target} commentActions={commentActions}>
               {job.downstream && <DownstreamPipeline downstream={job.downstream} target={target} />}
             </PipelineJobRow>)}
           </ul>}
@@ -586,8 +590,12 @@ function PipelineJobsResult({ result, target, showStatus = true }: { result: Git
   </>;
 }
 
-function PipelineJobRow({ job, target, children }: { job: GitlabPipelineJob | GitlabPipelineTriggerJob; target: PipelineTarget; children?: React.ReactNode }) {
+function PipelineJobRow({ job, target, commentActions, children }: {
+  job: GitlabPipelineJob | GitlabPipelineTriggerJob; target: PipelineTarget;
+  commentActions?: GitlabActivityCommentActions; children?: ReactNode;
+}) {
   const href = pipelineJobUrl(job, target);
+  const commentUrl = commentActions && href && commentWebUrl(href.href.replaceAll("'", '%27'));
   const reason = job.failureReason && (failureReasonLabels.get(job.failureReason) ?? job.failureReason);
   return <li className="gitlab-pipeline-job">
     {href ? <a className="gitlab-pipeline-job-link" href={href.href} target="_blank" rel="noopener noreferrer">
@@ -600,6 +608,14 @@ function PipelineJobRow({ job, target, children }: { job: GitlabPipelineJob | Gi
       {reason && <span>{reason}</span>}
     </div>
     {children}
+    {commentActions && commentUrl && <button className="btn btn-ghost" type="button" disabled={commentActions.disabled}
+      aria-label={`${job.name} 댓글 초안에 추가`} onClick={() => {
+        const name = gitlabCommentCaption(job.name);
+        const stage = gitlabCommentCaption(job.stage);
+        const summary = [`GitLab CI 작업 #${job.id}`, `확인 상태 ${states.get(job.status) ?? '미확인'}`, stage ? `단계 ${stage}` : '', name]
+          .filter(Boolean).join(' · ');
+        commentActions.add({ href: commentUrl, body: `${summary}\n<${commentUrl}>` });
+      }}><MessageSquarePlus size={14} aria-hidden="true" />작업을 댓글 초안에 추가</button>}
   </li>;
 }
 
@@ -868,8 +884,9 @@ function mergeRequestPipelineMessage(cause: unknown): string {
   return 'GitLab MR의 최신 파이프라인을 불러오지 못했습니다. 다시 확인해 주세요.';
 }
 
-function MergeRequestPipeline({ target, revision, mr, manualActions, reviewStatus }: {
+function MergeRequestPipeline({ target, revision, mr, manualActions, commentActions, reviewStatus }: {
   target: ReviewTarget; revision: string; mr: GitlabLink; manualActions?: ManualLinkActions;
+  commentActions?: GitlabActivityCommentActions;
   reviewStatus?: GitlabActivityStatusActions['reviewStatus'];
 }) {
   const panelId = useId();
@@ -888,7 +905,7 @@ function MergeRequestPipeline({ target, revision, mr, manualActions, reviewStatu
       {view.kind === 'stale' && <p role="status">MR이 변경되었습니다. 최신 파이프라인을 다시 확인해 주세요.</p>}
       {view.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{view.message}</p>}
       {view.kind === 'ready' && <MergeRequestPipelineDetails initial={view.result} target={target} revision={revision}
-        mr={mr} manualActions={manualActions} reviewStatus={reviewStatus} />}
+        mr={mr} manualActions={manualActions} commentActions={commentActions} reviewStatus={reviewStatus} />}
       <button type="button" className="btn btn-ghost" aria-disabled={disabled || view.kind === 'loading'}
         onClick={() => { if (!disabled) void load(); }}>
         <RefreshCw aria-hidden="true" size={14} />MR 최신 파이프라인 다시 확인
@@ -897,8 +914,9 @@ function MergeRequestPipeline({ target, revision, mr, manualActions, reviewStatu
   </div>;
 }
 
-function MergeRequestPipelineDetails({ initial, target, revision, mr, manualActions, reviewStatus }: {
+function MergeRequestPipelineDetails({ initial, target, revision, mr, manualActions, commentActions, reviewStatus }: {
   initial: MergeRequestPipelineSnapshot; target: ReviewTarget; revision: string; mr: GitlabLink; manualActions?: ManualLinkActions;
+  commentActions?: GitlabActivityCommentActions;
   reviewStatus?: GitlabActivityStatusActions['reviewStatus'];
 }) {
   const [observation, setObservation] = useState({ initial, current: initial, changed: false });
@@ -933,7 +951,7 @@ function MergeRequestPipelineDetails({ initial, target, revision, mr, manualActi
       reviewStatus={reviewStatus} verifying={view?.kind === 'loading'} />}
     <PipelineJobsInspection view={view} toggle={toggle} reload={() => void load()} disabled={manualActions?.disabled}>
       {view?.kind === 'ready' && view.result === current && (current.jobs
-        ? <PipelineJobsResult result={current.jobs} target={current.target} showStatus={false} />
+        ? <PipelineJobsResult result={current.jobs} target={current.target} commentActions={commentActions} showStatus={false} />
         : <p role="status">현재 파이프라인의 CI 작업을 다시 확인해 주세요.</p>)}
     </PipelineJobsInspection>
     <PipelineTestReport target={{ ...current.target, mergeRequestRevision: current.revision }}
@@ -1343,6 +1361,18 @@ function savedActivityCommentUrl(link: GitlabLink, url: URL | null): string | un
   return commentWebUrl(link.kind === 'branch' ? `${safePath}?ref_type=heads` : safePath);
 }
 
+export function gitlabCommentReferenceKey(href: string): string | null {
+  const activity = normalizeGitlabSearchInput(href);
+  if (activity) return activity;
+  const url = gitlabActivityUrl(commentWebUrl(href), 'pipeline');
+  return url && /^\/(?:[^/]+\/){2,}-\/jobs\/[1-9]\d*\/?$/u.test(url.pathname)
+    ? `${url.origin}${url.pathname.replace(/\/$/u, '')}` : null;
+}
+
+function gitlabCommentCaption(value: string) {
+  return value.replace(/[\s\p{Cc}\p{Cf}]+/gu, ' ').trim().slice(0, 200).toWellFormed();
+}
+
 function ActivityRow({ link, issueContext, issueVersion, manualActions, statusActions, commentActions, followUpActions, selectedRowRef, onCopyActivityLink, checkedActivityTrigger }: {
   link: GitlabLink; issueContext?: IssueContext; issueVersion?: number; manualActions?: ManualLinkActions; statusActions?: GitlabActivityStatusActions;
   selectedRowRef?: RefObject<HTMLLIElement | null>;
@@ -1408,11 +1438,12 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
     {branchTarget && <BranchMergeRequests key={`${link.id}:${link.manualLinkId ?? ''}:${link.webUrl}`} branch={link} target={branchTarget} manualActions={manualActions}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, issueVersion])} />}
     {pipeline && <>
-      <PipelineJobs key={`jobs:${link.id}:${link.manualLinkId ?? ''}:${pipeline.url.href}`} target={pipeline} revision={pipelineRevision} />
+      <PipelineJobs key={`jobs:${link.id}:${link.manualLinkId ?? ''}:${pipeline.url.href}`} target={pipeline} revision={pipelineRevision}
+        commentActions={commentActions} />
       <PipelineTestReport key={`tests:${link.id}:${link.manualLinkId ?? ''}:${pipeline.url.href}`} target={pipeline} revision={pipelineRevision} />
     </>}
     {mr && <MergeRequestPipeline key={`mr-pipeline:${link.id}:${link.manualLinkId ?? ''}:${mr.url.href}`} target={mr}
-      mr={link} manualActions={manualActions} reviewStatus={reviewStatus}
+      mr={link} manualActions={manualActions} commentActions={commentActions} reviewStatus={reviewStatus}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeCommitShas, manualActions ? issueVersion : null])} />}
     {mr && <MergeRequestChangedFiles key={`mr-files:${link.id}:${link.manualLinkId ?? ''}:${mr.url.href}`} target={mr}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeCommitShas])} />}
@@ -1431,7 +1462,7 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
       </button>}
       {commentActions && commentUrl && <button className="btn btn-ghost" type="button" disabled={commentActions.disabled}
         onClick={() => {
-          const caption = title.replace(/[\s\p{Cc}\p{Cf}]+/gu, ' ').trim().slice(0, 200).toWellFormed();
+          const caption = gitlabCommentCaption(title);
           const activity = [`GitLab ${gitlabActivityKindLabel(link.kind)}`, number, link.kind === 'commit' && sha ? sha.slice(0, 8) : null]
             .filter(Boolean).join(' ');
           const summary = [activity, `저장 상태 ${states.get(state) ?? '미확인'}`, caption].filter(Boolean).join(' · ');
