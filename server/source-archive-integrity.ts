@@ -1,7 +1,7 @@
 import { createHash, type Hash } from 'node:crypto';
 import type { SourceImport, SourceImportIntegrityPackage, SourceRecordArchive } from '../shared/types.js';
 
-const RECORDS_DOMAIN = 'teamspace.source-archive.records.v1\n';
+const RECORDS_DOMAIN = 'donefac.source-archive.records.v1\n';
 
 class InvalidArchiveJson extends Error {}
 

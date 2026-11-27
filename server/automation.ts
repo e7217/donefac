@@ -10,7 +10,7 @@ import { allowedNextStatuses,defaultWorkflow } from '../shared/workflow-helpers.
 import type { Store } from './store.js';
 
 const ISSUE_RUN_PAGE_SIZE = 20;
-const MANUAL_STATUS_TOKEN_DOMAIN = 'teamspace.gitlab-status-suggestion.v3';
+const MANUAL_STATUS_TOKEN_DOMAIN = 'donefac.gitlab-status-suggestion.v3';
 const MANUAL_STATUS_TOKEN_TTL = 5 * 60 * 1_000;
 const MAX_MANUAL_STATUS_TOKEN_LENGTH = 32 * 1024;
 const MANUAL_STATUS_TOKEN = /^[A-Za-z0-9+/]{16}\.[A-Za-z0-9+/]{22}==\.[A-Za-z0-9+/]+={0,2}$/u;
