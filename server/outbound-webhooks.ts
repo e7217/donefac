@@ -73,7 +73,7 @@ export class OutboundWebhookService {
     this.unsubscribe = store.onChange(change => this.capture(change), ['issues', 'documents', 'comments']);
     this.prune();
     if (options.autoStart !== false) {
-      const run = () => { void this.tick().catch(() => { if (!this.closed) console.error('[teamspace webhooks] 작업 상태를 갱신하지 못했습니다.'); }); };
+      const run = () => { void this.tick().catch(() => { if (!this.closed) console.error('[donefac webhooks] 작업 상태를 갱신하지 못했습니다.'); }); };
       this.timer = setInterval(run, Math.max(10, options.pollIntervalMs || 1000)); this.timer.unref();
       this.initialTimer = setTimeout(run, 0); this.initialTimer.unref();
     }
@@ -232,7 +232,7 @@ export class OutboundWebhookService {
     try {
       const secret = this.store.unseal(claim.secret); decoded = Buffer.from(secret.slice('whsec_'.length), 'base64'); if (decoded.length !== 32 || !secret.startsWith('whsec_')) throw new Error('invalid key');
       const timestamp = String(Math.floor(this.now() / 1000)), signature = createHmac('sha256', decoded).update(`${claim.envelope.id}.${timestamp}.${claim.body}`).digest('base64');
-      const response = await fetch(claim.endpoint.url, { method: 'POST', redirect: 'manual', signal: controller.signal, headers: { 'Content-Type': 'application/json', 'User-Agent': 'Teamspace-Webhooks/1', 'webhook-id': claim.envelope.id, 'webhook-timestamp': timestamp, 'webhook-signature': `v1,${signature}` }, body: claim.body });
+      const response = await fetch(claim.endpoint.url, { method: 'POST', redirect: 'manual', signal: controller.signal, headers: { 'Content-Type': 'application/json', 'User-Agent': 'Donefac-Webhooks/1', 'webhook-id': claim.envelope.id, 'webhook-timestamp': timestamp, 'webhook-signature': `v1,${signature}` }, body: claim.body });
       httpStatus = response.status;
       // No response content is needed, read or persisted. Cancel its stream
       // immediately so an arbitrarily large receiver body stays bounded.

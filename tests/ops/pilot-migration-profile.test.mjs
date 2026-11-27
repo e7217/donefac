@@ -33,15 +33,15 @@ const attachment = Buffer.from('PRIVATE_ATTACHMENT_BYTES\n');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
 async function fixture(t) {
-  const directory = await mkdtemp(join(tmpdir(), 'teamspace-migration-profile-'));
+  const directory = await mkdtemp(join(tmpdir(), 'donefac-migration-profile-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const manifestPath = join(directory, 'private-manifest.json');
   async function write(filename, value) { await writeFile(join(directory, filename), value); }
   async function manifest(packages) { await writeFile(manifestPath, JSON.stringify({ packages })); }
   async function runCommand(args) {
     const child = spawn(process.execPath, ['--import', 'tsx', 'scripts/pilot-migration.mjs', ...args], {
-      cwd: repo, env: { ...process.env, TEAMSPACE_DATA_DIR: join(directory, 'do-not-start'),
-        TEAMSPACE_PILOT_ACCESS_FILE: join(directory, 'missing-key'), TEAMSPACE_PILOT_ORIGIN: 'https://no-pilot.invalid' },
+      cwd: repo, env: { ...process.env, DONEFAC_DATA_DIR: join(directory, 'do-not-start'),
+        DONEFAC_PILOT_ACCESS_FILE: join(directory, 'missing-key'), DONEFAC_PILOT_ORIGIN: 'https://no-pilot.invalid' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '', stderr = '';
@@ -119,7 +119,7 @@ test('offline profile reads Jira XML, Jira REST and Confluence ZIP and writes on
   assert.equal((await stat(reportPath)).mode & 0o777, 0o600);
   assert.deepEqual((await readdir(f.directory)).sort(), [...before, 'profile.json'].sort());
   const report = JSON.parse(raw);
-  assert.equal(report.format, 'teamspace-migration-source-profile');
+  assert.equal(report.format, 'donefac-migration-source-profile');
   assert.equal(report.version, 2);
   assert.equal(report.status, 'review');
   assert.deepEqual(report.limits, { packageCount: 20, packageBytes, totalBytes });
@@ -190,7 +190,7 @@ test('offline profile stages identified Confluence restrictions for review and b
   ]);
   const staged = await f.stage('stage');
   assert.equal(staged.code, 0, staged.stdout + staged.stderr);
-  const state = JSON.parse(await readFile(join(f.directory, 'stage', 'workspace', '.teamspace-rehearsal', 'stage.json'), 'utf8'));
+  const state = JSON.parse(await readFile(join(f.directory, 'stage', 'workspace', '.donefac-rehearsal', 'stage.json'), 'utf8'));
   assert.equal(state.profile.status, 'review');
   assert.equal(state.profile.sha256, hash(raw));
   assert.equal(state.packages[0].errors, 2);

@@ -55,7 +55,7 @@ async function fixture(request: APIRequestContext, layout: SavedView['layout']) 
 async function openProject(page: Page, data: Awaited<ReturnType<typeof fixture>>) {
   await page.setViewportSize({ width: 360, height: 820 });
   await page.clock.install();
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), data.actor.id);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), data.actor.id);
   await page.goto(`/${data.route}`);
   const search = page.getByLabel('업무 검색', { exact: true });
   const picker = page.getByLabel('저장된 업무 보기', { exact: true });

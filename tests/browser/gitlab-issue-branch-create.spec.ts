@@ -74,7 +74,7 @@ test('360px 티켓에서 GitLab 브랜치 응답 유실을 확인하고 삭제 �
     const settings = await json<GitlabSettings>(await request.patch('/api/integrations/gitlab', {
       headers, data: { expectedVersion: original.version, baseUrl, projectIds: [repoId], token: readToken, webhookSecret },
     }));
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     const query = new URLSearchParams({ boardQuery: issue.title });
     await page.goto(`/#/${project.id}/teamboard?${query}`);
     const board = page.getByRole('region', { name: '전체 프로젝트 보드', exact: true });

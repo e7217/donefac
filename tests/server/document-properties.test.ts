@@ -21,7 +21,7 @@ const properties = (attrs: Record<string, unknown>): RichContent => ({ type: 'do
 const report = (attrs: Record<string, unknown>): RichContent => ({ type: 'documentPropertyReport', attrs });
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-document-properties-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-document-properties-'));
   const service = createApp({ dataDir: directory, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {

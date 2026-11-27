@@ -48,7 +48,7 @@ test('차단 관계가 바뀌면 선행 날짜 입력을 유지하고 최신 후
     const oldRelation = await block(removed);
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${first.id}/gantt?${new URLSearchParams({ scope: 'team', ganttQ: prefix })}`);
     await page.getByRole('button', { name: '프로젝트 간 차단', exact: true }).click();
     const blockers = page.getByRole('region', { name: '프로젝트 간 차단', exact: true });
@@ -123,7 +123,7 @@ test('360px 간트 날짜 초안을 티켓 후행 검토에서 수정해 저장�
     }), 201);
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${first.id}/gantt?${new URLSearchParams({ scope: 'team', ganttQ: prefix })}`);
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });
     const row = (value: Issue) => chart.locator(`[data-issue-id="${value.id}"]`);
@@ -245,7 +245,7 @@ test('360px 차단 목록에서 고른 여러 프로젝트의 후행 일정만 �
     const boardHash = `#/${sourceProject.id}/gantt?${new URLSearchParams({ scope: 'team', ganttProject: sourceProject.id, ganttQ: prefix })}`;
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/${boardHash}`);
     await page.getByRole('button', { name: '프로젝트 간 차단', exact: true }).click();
     const blockers = page.getByRole('region', { name: '프로젝트 간 차단', exact: true });
@@ -412,7 +412,7 @@ test('360px에서는 간트의 날짜 초안과 고른 Jira 이관 관계를 함
     const applyPath = '/api/schedule/team-follow-up-apply';
     const nextEnd = '2026-11-24';
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });
     const crossArrows = chart.locator('path[data-team-blocker-id]');
     const teamScope = new URLSearchParams({ scope: 'team', ganttQ: prefix });
@@ -528,7 +528,7 @@ test('360px 티켓에서 날짜 초안을 넘겨 여러 프로젝트의 후행�
     }
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${sourceProject.id}/issues?issue=${source.id}`);
     const details = page.getByRole('dialog', { name: source.title, exact: true });
     const panelStart = details.getByLabel('시작일', { exact: true });
@@ -589,7 +589,7 @@ test('360px 티켓에서 날짜 초안을 넘겨 여러 프로젝트의 후행�
 
     let applied: SchedulePasteApplyResult | undefined;
     await page.route(url => url.pathname === applyPath, async route => {
-      expect(route.request().headers()['x-teamspace-schedule-undo-scope']).toBe(`issue:${source.id}`);
+      expect(route.request().headers()['x-donefac-schedule-undo-scope']).toBe(`issue:${source.id}`);
       applied = await json<SchedulePasteApplyResult>(await route.fetch());
       await route.fulfill({ status: 408, json: { error: '합성 응답 유실' } });
     }, { times: 1 });

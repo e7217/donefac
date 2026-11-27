@@ -1,6 +1,6 @@
 import { createApp } from './app.js';
 const {app,attachWebSocket,close}=createApp();
 const port=Number(process.env.PORT||5181);
-const server=app.listen(port,'127.0.0.1',()=>console.log(`Teamspace API listening on http://127.0.0.1:${port}`));
+const server=app.listen(port,'127.0.0.1',()=>console.log(`Donefac API listening on http://127.0.0.1:${port}`));
 attachWebSocket(server);
 for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>{server.close(()=>process.exit(0));close();});

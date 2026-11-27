@@ -37,7 +37,7 @@ type Backup = WorkspaceSnapshot & {
 };
 
 async function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-migration-worklogs-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-migration-worklogs-'));
   const service = createApp({ dataDir: dir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -744,7 +744,7 @@ test('Jira worklog corrections preserve receipt identity, local changes, and the
   assert.deepEqual(decisions(stale), { 'worklog:410': 'apply', 'worklog:411': 'apply', 'worklog:412': 'apply' });
   assert.deepEqual(await f.list(issue.id), initialPage);
   const changed = await f.call<ImportedEntry>(worklogPath(edited.entry), 'PATCH', {
-    expectedVersion: edited.entry.version, note: 'Teamspace에서 편집한 메모',
+    expectedVersion: edited.entry.version, note: 'Donefac에서 편집한 메모',
   }, 'user-seo');
   assert.equal(changed.status, 200, JSON.stringify(changed.data));
   assert.equal((await f.call(worklogPath(deleted.entry), 'DELETE', { expectedVersion: deleted.entry.version }, 'user-seo')).status, 200);

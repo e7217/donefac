@@ -23,7 +23,7 @@ const instanceKey = (origin: string) => createHash('sha256').update(origin).dige
 const instance = instanceKey(base);
 
 function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-deployment-observations-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-deployment-observations-'));
   const store = new Store(dir);
   const deployments = new GitlabDeployments(store);
   t.after(() => {

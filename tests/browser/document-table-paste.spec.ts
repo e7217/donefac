@@ -105,7 +105,7 @@ test('공동 편집에서 동료가 고치고 옮긴 블록을 따라가 표만 
   const f = await fixture(request);
   const contexts = await Promise.all(f.users.slice(0, 2).map(async user => {
     const context = await browser.newContext({ viewport, baseURL });
-    await context.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), user.id);
+    await context.addInitScript(actor => localStorage.setItem('donefac.actor', actor), user.id);
     return context;
   }));
   try {

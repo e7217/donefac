@@ -31,7 +31,7 @@ const pipelineRef = `refs/merge-requests/${iid}/merge`;
 type Options = { method?: string; body?: unknown; headers?: Record<string, string> };
 
 async function fixture(t: TestContext, configuredRepositories = [targetRepository, sourceRepository, unrelatedRepository]) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-gitlab-mr-pipeline-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-gitlab-mr-pipeline-'));
   const calls: { method: string; path: string; query: URLSearchParams; credential?: string | string[] }[] = [];
   let baseUrl = '';
   const targetUrl = () => baseUrl + '/team/app';

@@ -39,7 +39,7 @@ test('GitLab webhook message identity preserves exact IDs and requires unambiguo
 });
 
 test('GitLab webhook history projects delivery diagnostics with private message correlation kept separately', async t => {
-  const receiver = 'https://teamspace.example.test/api/integrations/gitlab/webhook';
+  const receiver = 'https://donefac.example.test/api/integrations/gitlab/webhook';
   const paths: string[] = [];
   const origin = await upstream(t, (request, response) => {
     assert.equal(request.method, 'GET');
@@ -87,7 +87,7 @@ test('GitLab webhook history projects delivery diagnostics with private message 
 });
 
 test('GitLab webhook history distinguishes an empty page, filtered attempts, incomplete coverage and invalid envelopes', async t => {
-  const receiver = 'https://teamspace.example.test/api/integrations/gitlab/webhook';
+  const receiver = 'https://donefac.example.test/api/integrations/gitlab/webhook';
   const attempt = { id: 1, url: receiver, trigger: 'push_hooks', response_status: '200' };
   const fullPage = Array.from({ length: 20 }, (_, index) => ({ ...attempt, id: index + 1 }));
   const fixtures: { rows: unknown; next?: string; status?: number }[] = [

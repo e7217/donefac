@@ -52,8 +52,8 @@ function SchemaEditor({ data, projectId, refresh, notify }: FeatureProps) {
       }
     };
     const unload = (event: BeforeUnloadEvent) => { if (dirtyRef.current || pendingRef.current) { event.preventDefault(); event.returnValue = ''; } };
-    window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
-    return () => { window.removeEventListener('teamspace:navigate', guard); window.removeEventListener('beforeunload', unload); };
+    window.addEventListener('donefac:navigate', guard); window.addEventListener('beforeunload', unload);
+    return () => { window.removeEventListener('donefac:navigate', guard); window.removeEventListener('beforeunload', unload); };
   }, [baseline, notify]);
   async function save(event: FormEvent) {
     event.preventDefault(); if (pendingRef.current) return; pendingRef.current = true; setSaving(true); setError('');

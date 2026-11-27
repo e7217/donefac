@@ -171,8 +171,8 @@ function referenceNode(name: string, idAttribute: string, label: string) {
       [idAttribute]: { default: '', parseHTML: element => element.getAttribute(dataId) || '', renderHTML: attributes => ({ [dataId]: attributes[idAttribute] }) },
       label: { default: '', parseHTML: element => element.getAttribute('data-label') || '', renderHTML: attributes => ({ 'data-label': attributes.label }) },
     }; },
-    parseHTML() { return [{ tag: `div[data-teamspace-node="${name}"]` }]; },
-    renderHTML({ node, HTMLAttributes }) { return ['div', mergeAttributes(HTMLAttributes, { 'data-teamspace-node': name }), String(node.attrs.label || label)]; },
+    parseHTML() { return [{ tag: `div[data-donefac-node="${name}"]` }]; },
+    renderHTML({ node, HTMLAttributes }) { return ['div', mergeAttributes(HTMLAttributes, { 'data-donefac-node': name }), String(node.attrs.label || label)]; },
   });
 }
 
@@ -205,9 +205,9 @@ export const DocumentExcerpt = Node.create({
       },
     };
   },
-  parseHTML() { return [{ tag: 'div[data-teamspace-node="documentExcerpt"]' }]; },
+  parseHTML() { return [{ tag: 'div[data-donefac-node="documentExcerpt"]' }]; },
   renderHTML({ HTMLAttributes }) {
-    return ['div', mergeAttributes(HTMLAttributes, { 'data-teamspace-node': 'documentExcerpt' }), 0];
+    return ['div', mergeAttributes(HTMLAttributes, { 'data-donefac-node': 'documentExcerpt' }), 0];
   },
 });
 export const DocumentRevisionInclude = referenceNode('documentRevisionInclude', 'documentId', '문서 버전 포함').extend({
@@ -235,9 +235,9 @@ function issueBlockNode(name: 'issueList' | 'issueSummary', label: string) {
         renderHTML: (attributes: Record<string, unknown>) => ({ 'data-group-by': attributes.groupBy }),
       } } : {}),
     }; },
-    parseHTML() { return [{ tag: `div[data-teamspace-node="${name}"]` }]; },
+    parseHTML() { return [{ tag: `div[data-donefac-node="${name}"]` }]; },
     renderHTML({ node, HTMLAttributes }) {
-      return ['div', mergeAttributes(HTMLAttributes, { 'data-teamspace-node': name }), String(node.attrs.label || label)];
+      return ['div', mergeAttributes(HTMLAttributes, { 'data-donefac-node': name }), String(node.attrs.label || label)];
     },
   });
 }
@@ -254,7 +254,7 @@ function propertyBlockNode(name: 'documentProperties' | 'documentPropertyReport'
     },
     parseHTML() {
       return [{
-        tag: `div[data-teamspace-node="${name}"][data-document-property-options]`,
+        tag: `div[data-donefac-node="${name}"][data-document-property-options]`,
         getAttrs: element => {
           try {
             const options = normalize(JSON.parse(element.getAttribute('data-document-property-options') ?? ''));
@@ -267,7 +267,7 @@ function propertyBlockNode(name: 'documentProperties' | 'documentPropertyReport'
     },
     renderHTML({ node }) {
       return ['div', {
-        'data-teamspace-node': name,
+        'data-donefac-node': name,
         'data-document-property-options': JSON.stringify(normalize(node.attrs) ?? defaults),
       }, label];
     },
@@ -287,7 +287,7 @@ export const DocumentLabelList = Node.create({
   },
   parseHTML() {
     return [{
-      tag: 'div[data-teamspace-node="documentLabelList"][data-document-label-list]',
+      tag: 'div[data-donefac-node="documentLabelList"][data-document-label-list]',
       getAttrs: element => {
         try {
           return normalizeDocumentLabelListOptions(JSON.parse(element.getAttribute('data-document-label-list') ?? '')) ?? false;
@@ -300,7 +300,7 @@ export const DocumentLabelList = Node.create({
   renderHTML({ node }) {
     const options = normalizeDocumentLabelListOptions(node.attrs);
     return ['div', {
-      'data-teamspace-node': 'documentLabelList',
+      'data-donefac-node': 'documentLabelList',
       'data-document-label-list': JSON.stringify(options ?? DOCUMENT_LABEL_LIST_DEFAULTS),
     }, '라벨별 문서'];
   },
@@ -314,7 +314,7 @@ export const DocumentChildList = Node.create({
   },
   parseHTML() {
     return [{
-      tag: 'div[data-teamspace-node="documentChildList"][data-document-child-list]',
+      tag: 'div[data-donefac-node="documentChildList"][data-document-child-list]',
       getAttrs: element => {
         try {
           return normalizeDocumentChildListOptions(JSON.parse(element.getAttribute('data-document-child-list') ?? '')) ?? false;
@@ -327,7 +327,7 @@ export const DocumentChildList = Node.create({
   renderHTML({ node }) {
     const options = normalizeDocumentChildListOptions(node.attrs);
     return ['div', {
-      'data-teamspace-node': 'documentChildList',
+      'data-donefac-node': 'documentChildList',
       'data-document-child-list': JSON.stringify(options ?? DOCUMENT_CHILD_LIST_DEFAULTS),
     }, '하위 문서 목록'];
   },
@@ -360,19 +360,19 @@ export const DocumentToc = Node.create({
     };
   },
   parseHTML() {
-    return [{ tag: 'nav[data-teamspace-node="documentToc"]',
+    return [{ tag: 'nav[data-donefac-node="documentToc"]',
       getAttrs: element => tocMinLevel.parseHTML(element) <= tocMaxLevel.parseHTML(element) ? null : false }];
   },
   renderHTML({ HTMLAttributes }) {
-    return ['nav', mergeAttributes(HTMLAttributes, { 'data-teamspace-node': 'documentToc' }), '본문 목차'];
+    return ['nav', mergeAttributes(HTMLAttributes, { 'data-donefac-node': 'documentToc' }), '본문 목차'];
   },
 });
 
 export const Details = Node.create({
   name: 'details', group: 'block', content: 'detailsSummary detailsContent', defining: true, isolating: true,
-  parseHTML() { return [{ tag: 'details[data-teamspace-node="details"]' }]; },
+  parseHTML() { return [{ tag: 'details[data-donefac-node="details"]' }]; },
   // Open/closed is a local reading choice, absent from persisted attributes.
-  renderHTML({ HTMLAttributes }) { return ['details', mergeAttributes(HTMLAttributes, { 'data-teamspace-node': 'details', open: '' }), 0]; },
+  renderHTML({ HTMLAttributes }) { return ['details', mergeAttributes(HTMLAttributes, { 'data-donefac-node': 'details', open: '' }), 0]; },
 });
 export const DetailsSummary = Node.create({
   name: 'detailsSummary', content: 'inline*', defining: true,
@@ -380,11 +380,11 @@ export const DetailsSummary = Node.create({
 });
 export const DetailsContent = Node.create({
   name: 'detailsContent', content: 'block+', defining: true,
-  parseHTML() { return [{ tag: 'div[data-teamspace-details-content]' }]; }, renderHTML() { return ['div', { 'data-teamspace-details-content': '' }, 0]; },
+  parseHTML() { return [{ tag: 'div[data-donefac-details-content]' }]; }, renderHTML() { return ['div', { 'data-donefac-details-content': '' }, 0]; },
 });
 
 const layoutGrid = ':scope > div[data-layout-grid]';
-const columnElement = 'div[data-teamspace-node="documentColumn"]';
+const columnElement = 'div[data-donefac-node="documentColumn"]';
 export const DocumentColumnLayout = Node.create({
   name: 'documentColumnLayout', group: 'block', content: `documentColumn{1,${MAX_DOCUMENT_COLUMNS}}`, defining: true, isolating: true,
   addAttributes() {
@@ -395,7 +395,7 @@ export const DocumentColumnLayout = Node.create({
   },
   parseHTML() {
     return [{
-      tag: 'div[data-teamspace-node="documentColumnLayout"]',
+      tag: 'div[data-donefac-node="documentColumnLayout"]',
       contentElement: layoutGrid,
       getAttrs: element => {
         const grid = element.querySelector(layoutGrid);
@@ -410,7 +410,7 @@ export const DocumentColumnLayout = Node.create({
   renderHTML({ node }) {
     const { weights, border } = normalizeDocumentColumnLayoutOptions(node.attrs, node.childCount) ??
       { weights: Array.from({ length: node.childCount }, () => 1), border: false };
-    return ['div', { 'data-teamspace-node': 'documentColumnLayout', 'data-layout-weights': weights.join(','), 'data-layout-border': String(border) },
+    return ['div', { 'data-donefac-node': 'documentColumnLayout', 'data-layout-weights': weights.join(','), 'data-layout-border': String(border) },
       ['div', { 'data-layout-grid': '', style: `--document-column-tracks: ${documentColumnLayoutTracks(weights)}` }, 0]];
   },
 });
@@ -418,10 +418,10 @@ export const DocumentColumnLayout = Node.create({
 export const DocumentColumn = Node.create({
   name: 'documentColumn', content: 'block+', defining: true, isolating: true, selectable: false,
   parseHTML() { return [{ tag: columnElement }]; },
-  renderHTML() { return ['div', { 'data-teamspace-node': 'documentColumn' }, 0]; },
+  renderHTML() { return ['div', { 'data-donefac-node': 'documentColumn' }, 0]; },
 });
 
-const calloutContent = ':scope > div[data-teamspace-callout-content]';
+const calloutContent = ':scope > div[data-donefac-callout-content]';
 export const Callout = Node.create({
   name: 'callout', group: 'block', content: 'block+', defining: true, isolating: true,
   addAttributes() {
@@ -446,7 +446,7 @@ export const Callout = Node.create({
   },
   parseHTML() {
     return [{
-      tag: 'aside[data-teamspace-node="callout"]',
+      tag: 'aside[data-donefac-node="callout"]',
       getAttrs: element => element.querySelector(calloutContent) ? null : false,
       contentElement: calloutContent,
     }];
@@ -454,9 +454,9 @@ export const Callout = Node.create({
   renderHTML({ node, HTMLAttributes }) {
     const variant = isCalloutVariant(node.attrs.variant) ? node.attrs.variant : 'info';
     const title = typeof node.attrs.title === 'string' ? node.attrs.title : '';
-    return ['aside', mergeAttributes(HTMLAttributes, { 'data-teamspace-node': 'callout', class: 'document-callout' }),
+    return ['aside', mergeAttributes(HTMLAttributes, { 'data-donefac-node': 'callout', class: 'document-callout' }),
       ['div', { class: 'document-callout-header', contenteditable: 'false' }, title || CALLOUT_LABELS[variant]],
-      ['div', { class: 'document-callout-content', 'data-teamspace-callout-content': '' }, 0],
+      ['div', { class: 'document-callout-content', 'data-donefac-callout-content': '' }, 0],
     ];
   },
 });
@@ -482,10 +482,10 @@ export const StatusBadge = Node.create({
     };
   },
   parseHTML() {
-    return [{ tag: 'span[data-teamspace-node="statusBadge"]', getAttrs: element => isStatusBadgeLabel(statusBadgeLabel(element)) ? null : false }];
+    return [{ tag: 'span[data-donefac-node="statusBadge"]', getAttrs: element => isStatusBadgeLabel(statusBadgeLabel(element)) ? null : false }];
   },
   renderHTML({ node, HTMLAttributes }) {
-    return ['span', mergeAttributes(HTMLAttributes, { 'data-teamspace-node': 'statusBadge', class: 'document-status-badge' }), String(node.attrs.label)];
+    return ['span', mergeAttributes(HTMLAttributes, { 'data-donefac-node': 'statusBadge', class: 'document-status-badge' }), String(node.attrs.label)];
   },
   renderText({ node }) { return String(node.attrs.label); },
 });

@@ -11,13 +11,13 @@ import { createApp } from '../../server/app.js';
 import type { ApiKeyCreated, Project, User, UserEmailChangeResult, WorkspaceSnapshot } from '../../shared/types.js';
 
 test('member email compare-and-set and durable recovery preserve the member and key without overwriting a later change', async t => {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-member-email-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-member-email-'));
   function start() {
     const runtime = createApp({ dataDir: directory, outboundWorker: false });
     return { runtime, server: runtime.app.listen(0, '127.0.0.1') };
   }
   let service = start();
-  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const observer = new DatabaseSync(join(directory, 'donefac.sqlite'));
   async function stop() {
     service.server.closeAllConnections();
     await new Promise<void>(resolve => service.server.close(() => resolve()));

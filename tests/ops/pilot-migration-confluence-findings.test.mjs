@@ -253,7 +253,7 @@ async function withReview(root, action) {
 }
 
 async function prepareRehearsal(t, sources, findings, bind = true, coverage) {
-  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-confluence-live-restriction-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'donefac-confluence-live-restriction-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const root = join(scratch, 'run');
   const manifest = join(scratch, 'manifest.json');
@@ -268,7 +268,7 @@ async function prepareRehearsal(t, sources, findings, bind = true, coverage) {
   await writeFile(findingsPath, raw, { mode: 0o600 });
   const stage = await rehearsal(['stage', manifest, root, ...(bind ? ['--confluence-findings', findingsPath] : [])]).exited;
   assert.equal(stage.code, 0, stage.stdout + stage.stderr);
-  const stagePath = join(root, 'workspace', '.teamspace-rehearsal', 'stage.json');
+  const stagePath = join(root, 'workspace', '.donefac-rehearsal', 'stage.json');
   const staged = JSON.parse(await readFile(stagePath, 'utf8'));
   return { root, stagePath, staged, raw };
 }
@@ -309,7 +309,7 @@ async function verification(root, exitCode) {
 }
 
 test('split Confluence reviews prove distinct pages on the exact ZIP through stage, review and restore', { timeout: 150_000 }, async t => {
-  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-confluence-split-coverage-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'donefac-confluence-split-coverage-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const ids = Array.from({ length: 503 }, (_, index) => String(9000000000000000000n + BigInt(index)));
   const bytes = wikiArchive('MNY', ids.map((id, index) => ({ id, title: `Coverage page ${index}` })));
@@ -347,13 +347,13 @@ test('split Confluence reviews prove distinct pages on the exact ZIP through sta
   assert.equal(rejected.code, 1, rejected.stdout + rejected.stderr);
   assert.match(rejected.stderr, /ZIP의 현재 페이지 목록과 다릅니다/u);
   assert.ok(!rejected.stderr.includes(foreign));
-  await assert.rejects(readFile(join(rejectedRoot, 'workspace', '.teamspace-rehearsal', 'stage.json')), { code: 'ENOENT' });
+  await assert.rejects(readFile(join(rejectedRoot, 'workspace', '.donefac-rehearsal', 'stage.json')), { code: 'ENOENT' });
 
   const partial = join(scratch, 'partial'), complete = join(scratch, 'complete');
   for (const [root, sidecars, count] of [[partial, [first, overlap], 502], [complete, [first, overlap, last], 503]]) {
     const outcome = await stage(root, sidecars);
     assert.equal(outcome.code, 0, outcome.stdout + outcome.stderr);
-    const raw = await readFile(join(root, 'workspace', '.teamspace-rehearsal', 'stage.json'), 'utf8');
+    const raw = await readFile(join(root, 'workspace', '.donefac-rehearsal', 'stage.json'), 'utf8');
     assert.ok(!raw.includes('permissionCheckedPageIds') && ids.every(id => !raw.includes(id)));
     const { packages } = JSON.parse(raw);
     const [wiki, other] = packages;
@@ -386,7 +386,7 @@ test('split Confluence reviews prove distinct pages on the exact ZIP through sta
 });
 
 test('profile-bound rehearsal still requires explicit exclusion of restrictions recorded in the Confluence XML', { timeout: 90_000 }, async t => {
-  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-confluence-archived-restriction-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'donefac-confluence-archived-restriction-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const root = join(scratch, 'run');
   const manifest = join(scratch, 'manifest.json');
@@ -409,7 +409,7 @@ test('profile-bound rehearsal still requires explicit exclusion of restrictions 
 
   const stage = await rehearsal(['stage', manifest, root, '--profile', profilePath]).exited;
   assert.equal(stage.code, 0, stage.stdout + stage.stderr);
-  const staged = JSON.parse(await readFile(join(root, 'workspace', '.teamspace-rehearsal', 'stage.json'), 'utf8'));
+  const staged = JSON.parse(await readFile(join(root, 'workspace', '.donefac-rehearsal', 'stage.json'), 'utf8'));
   assert.equal(staged.profile.status, 'review');
   assert.equal(staged.packages[0].errors, 2);
   assert.equal(staged.confluenceReviews, undefined);
@@ -600,7 +600,7 @@ test('verification fails for a legacy receipt that linked a live restricted page
 
   // Reconstruct the proof files recorded by the previous, unguarded rehearsal implementation.
   const proof = confluenceFindingsProof(parseConfluenceFindings(JSON.parse(raw)), digest(raw), staged.packages[0].packageId);
-  const proofs = join(root, 'workspace', '.teamspace-rehearsal', 'confluence-findings');
+  const proofs = join(root, 'workspace', '.donefac-rehearsal', 'confluence-findings');
   await mkdir(proofs, { mode: 0o700 });
   await writeFile(join(proofs, `${proof.sha256}.json`), raw, { mode: 0o600 });
   await writeFile(stagePath, JSON.stringify({ ...staged, confluenceReviews: [proof] }));

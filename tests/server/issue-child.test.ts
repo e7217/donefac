@@ -19,7 +19,7 @@ const requestFor = (parent: Issue, issue: Record<string, unknown>) => ({
 });
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-issue-child-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-issue-child-'));
   async function start() {
     const runtime = createApp({ dataDir: directory, outboundWorker: false });
     const server = runtime.app.listen(0, '127.0.0.1');
@@ -147,7 +147,7 @@ test('child creation rolls back sequence and activity on receipt failure and sur
   const parent = await createParent('복원 대상 상위 업무');
   const request = requestFor(parent, { title: '복원 대상 하위 업무' });
   const { data: before } = await call<WorkspaceSnapshot>('/workspace');
-  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const observer = new DatabaseSync(join(directory, 'donefac.sqlite'));
   const nextNumber = () => observer.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(projectId)?.next_number;
   let number: ReturnType<typeof nextNumber>;
   try {

@@ -18,7 +18,7 @@ export type DocumentCreationAttempt = {
   documentId?: string;
 };
 
-const cacheKey = (actorId: string, generation: string) => `teamspace:document-create:${JSON.stringify([actorId, generation])}`;
+const cacheKey = (actorId: string, generation: string) => `donefac:document-create:${JSON.stringify([actorId, generation])}`;
 
 export function readDocumentCreationAttempt(actorId: string, generation?: string) {
   if (!actorId || !generation) return null;

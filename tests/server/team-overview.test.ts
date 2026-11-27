@@ -18,7 +18,7 @@ const reference = '2026-11-20';
 const query = new URLSearchParams({ date: reference }).toString();
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-overview-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-overview-'));
   const service = createApp({ dataDir: directory, seed: false, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -56,7 +56,7 @@ type Fixture = Awaited<ReturnType<typeof fixture>>;
 function gitlabLink(f: Fixture, issue: Issue, id: string, updatedAt: string): void {
   const link: GitlabLink = { id, issueId: issue.id, projectId: 412, iid: 1, kind: 'merge_request', title: id,
     webUrl: 'https://gitlab.example.invalid/test/repo/-/merge_requests/1', state: 'opened', updatedAt };
-  const db = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.directory, 'donefac.sqlite'));
   try { db.prepare('INSERT INTO gitlab_links(id,issue_id,json) VALUES (?,?,?)').run(id, issue.id, JSON.stringify(link)); }
   finally { db.close(); }
 }

@@ -94,13 +94,13 @@ export function DocumentTreeCopy({ source, documents, projects, actorId, refresh
       event.preventDefault();
       event.returnValue = '';
     };
-    window.addEventListener('teamspace:navigate', guard);
+    window.addEventListener('donefac:navigate', guard);
     window.addEventListener('beforeunload', unload);
-    window.addEventListener('teamspace:workspace-imported', onClose);
+    window.addEventListener('donefac:workspace-imported', onClose);
     return () => {
-      window.removeEventListener('teamspace:navigate', guard);
+      window.removeEventListener('donefac:navigate', guard);
       window.removeEventListener('beforeunload', unload);
-      window.removeEventListener('teamspace:workspace-imported', onClose);
+      window.removeEventListener('donefac:workspace-imported', onClose);
     };
   }, [dirty, discardMessage, onClose]);
 

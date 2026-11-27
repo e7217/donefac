@@ -16,7 +16,7 @@ import type { ApiKeyCreated, DocPage, DocRevision, Issue, Project, ProjectReport
 
 type Backup = WorkspaceSnapshot & { schemaVersion: number; exportedAt: string; reportingLedger: ReportingLedgerData; reportSnapshots: ReportSnapshot[]; revisions: DocRevision[] };
 async function fixture(teamAccess = false) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-reporting-integration-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-reporting-integration-'));
   const service = createApp({ dataDir: dir, outboundWorker: false });
   let access: PilotAccess | null = null;
   const web = express();
@@ -37,7 +37,7 @@ async function fixture(teamAccess = false) {
     try {
       const accessCode = 'a'.repeat(64), accessFile = join(dir, 'access.code');
       writeFileSync(accessFile, accessCode, { mode: 0o600 });
-      access = createPilotAccess({ NODE_ENV: 'test', TEAMSPACE_PILOT_ORIGIN: origin, TEAMSPACE_PILOT_ACCESS_FILE: accessFile });
+      access = createPilotAccess({ NODE_ENV: 'test', DONEFAC_PILOT_ORIGIN: origin, DONEFAC_PILOT_ACCESS_FILE: accessFile });
       const login = await fetch(`http://${address}/pilot-access`, {
         method: 'POST', headers: { Origin: origin }, redirect: 'manual', body: new URLSearchParams({ accessCode }),
       });
@@ -155,7 +155,7 @@ test('report snapshot stores canonical query and metrics with a real document an
     assert.deepEqual(laterDocument, document);
     assert.equal((await f.call(`/projects/project-team/report-snapshots/${snapshot.id}`)).status, 404);
     const beforeFailure = (await f.call<Backup>('/export')).data;
-    const db = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+    const db = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
     try {
       db.exec("CREATE TRIGGER reject_report_snapshot BEFORE INSERT ON report_snapshots BEGIN SELECT RAISE(ABORT, 'synthetic snapshot storage failure'); END");
       const rejected = await f.call(`/projects/${p.id}/report-snapshots`, 'POST', { query: q, title: '저장에 실패한 초안' });
@@ -282,7 +282,7 @@ test('public weekly capture uses the writer identity and replays the same frozen
 
 test('public weekly capture rolls back a failed receipt and can safely retry the same request', async () => {
   const f = await fixture(true);
-  const db = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     const p = await project(f), q = query(p.id);
     await createIssue(f, p.id, '원자적으로 저장할 업무 연결');

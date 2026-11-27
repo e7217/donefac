@@ -1,5 +1,7 @@
 'use client';
 
+// Must run before any module reads browser storage under the current key names.
+import './lib/legacy-storage';
 import { Fragment, lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent } from 'react';
 import { ArrowUpRight, Bell, BookOpen, Check, ChevronRight, CircleDot, Command, FolderPlus, Inbox, ListTodo, LoaderCircle, Menu, Plus, Search, SquareChartGantt, X } from 'lucide-react';
 import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, IssueIntakeRequest, TeamBoardFilters, TeamGanttScheduleFilters, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
@@ -106,10 +108,10 @@ function publicationHistoryFocus(value: unknown, hash: string, index: number): P
       !isRelationId(target.documentId) || !isRelationId(target.revisionId) || (target.kind !== 'review' && target.kind !== 'published')) return null;
   return { hash, index, actorId, target };
 }
-const ganttRevisionScope = { query: 'ganttSince', header: 'X-Teamspace-Gantt-Revision' } as const;
+const ganttRevisionScope = { query: 'ganttSince', header: 'X-Donefac-Gantt-Revision' } as const;
 const refreshScopes = {
   issues: ganttRevisionScope,
-  teamboard: { query: 'teamBoardSince', header: 'X-Teamspace-Board-Revision' },
+  teamboard: { query: 'teamBoardSince', header: 'X-Donefac-Board-Revision' },
   gantt: ganttRevisionScope,
 } as const;
 type RefreshScope = keyof typeof refreshScopes;
@@ -279,11 +281,11 @@ function isDocumentLinkedWorkRoute(route: WorkspaceRoute): boolean {
 }
 
 function issueReviewHistoryKey(route: WorkspaceRoute) {
-  if (route.view === 'mywork') return 'teamspaceMyWorkReview';
-  if (route.view === 'teamoverview') return 'teamspaceOverviewIssueReview';
-  if (route.view === 'backlog') return 'teamspaceCycleBoardIssueReview';
-  if (route.view === 'development') return 'teamspaceDevelopmentIssueReview';
-  if (isDocumentLinkedWorkRoute(route)) return 'teamspaceDocumentIssueReview';
+  if (route.view === 'mywork') return 'donefacMyWorkReview';
+  if (route.view === 'teamoverview') return 'donefacOverviewIssueReview';
+  if (route.view === 'backlog') return 'donefacCycleBoardIssueReview';
+  if (route.view === 'development') return 'donefacDevelopmentIssueReview';
+  if (isDocumentLinkedWorkRoute(route)) return 'donefacDocumentIssueReview';
 }
 
 function readIssueReviewHistory(value: unknown, route: WorkspaceRoute, index: number, actorId: string): IssueReviewHistory | undefined {
@@ -357,7 +359,7 @@ function canPreviewIssueDocument(snapshot: WorkspaceSnapshot, issueId: string, d
     countIssueDocumentReferences(document.content, issueId) > 0));
 }
 function requestIssueCommentFocus(issueId: string) {
-  return window.dispatchEvent(new CustomEvent('teamspace:focus-issue-comment', { cancelable: true, detail: { issueId } }));
+  return window.dispatchEvent(new CustomEvent('donefac:focus-issue-comment', { cancelable: true, detail: { issueId } }));
 }
 function hasOpenModal() {
   let modalDialog: Element | null;
@@ -645,7 +647,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setData(snapshot);
     setFailure('');
     setProjectId(id => snapshot.projects.some(p => p.id === id) ? id : snapshot.projects[0]?.id || '');
-    const storedActor = actorRef.current || localStorage.getItem('teamspace.actor') || '';
+    const storedActor = actorRef.current || localStorage.getItem('donefac.actor') || '';
     const selectedActor = snapshot.users.some(user => user.id === storedActor) ? storedActor : snapshot.users[0]?.id || '';
     if (selectedActor !== actorRef.current) {
       publicationOpenRequest.current++;
@@ -800,16 +802,16 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
     if (hasDocumentIssueOverlay(route) || hasContextualIssueOverlay(route) || hasTeamBoardIssueOverlay(route) || route.documentPreviewId) setSearchOpen(false);
     const hash = routeHash(route);
-    const state = { ...(history.state && typeof history.state === 'object' ? history.state : {}), teamspaceRouteIndex: index };
-    delete state.teamspaceMyWorkReview;
-    delete state.teamspaceOverviewIssueReview;
-    delete state.teamspaceCycleBoardIssueReview;
-    delete state.teamspaceDocumentIssueReview;
-    delete state.teamspaceDevelopmentIssueReview;
+    const state = { ...(history.state && typeof history.state === 'object' ? history.state : {}), donefacRouteIndex: index };
+    delete state.donefacMyWorkReview;
+    delete state.donefacOverviewIssueReview;
+    delete state.donefacCycleBoardIssueReview;
+    delete state.donefacDocumentIssueReview;
+    delete state.donefacDevelopmentIssueReview;
     if (reviewHistoryKey && historyReview) state[reviewHistoryKey] = historyReview;
     const returnFocus = route.view === 'publication' && !route.issueId && mode === 'replace' && hash === location.hash
-      ? publicationHistoryFocus(state.teamspacePublicationReturnFocus, hash, index) : null;
-    if (!returnFocus) delete state.teamspacePublicationReturnFocus;
+      ? publicationHistoryFocus(state.donefacPublicationReturnFocus, hash, index) : null;
+    if (!returnFocus) delete state.donefacPublicationReturnFocus;
     const previousHash = previous ? routeHash(previous) : null;
     const sameIndex = routeIndexRef.current === index;
     if (!sameIndex || previousHash !== hash) {
@@ -884,7 +886,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       return;
     }
     const incoming = normalizeRoute(snapshot, location.hash);
-    const storedIndex = history.state?.teamspaceRouteIndex;
+    const storedIndex = history.state?.donefacRouteIndex;
     const index = Number.isInteger(storedIndex) ? storedIndex : previous ? routeIndexRef.current + 1 : 0;
     // A refreshed workspace can update the space of the document already open.
     const movedOpenDocument = previous && location.hash === previousHash && hasSameDocumentContext(previous, incoming) &&
@@ -897,7 +899,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (previous && previousHash && routeHash(incoming) !== previousHash && !movedOpenDocument && !movedOpenIssue && !confirmRouteNavigation(previous, incoming)) {
       const delta = routeIndexRef.current - index;
       if (delta) { rollbackHashRef.current = previousHash; history.go(delta); }
-      else history.replaceState({...history.state, teamspaceRouteIndex:routeIndexRef.current}, '', previousHash);
+      else history.replaceState({...history.state, donefacRouteIndex:routeIndexRef.current}, '', previousHash);
       return;
     }
     writeRoute(incoming, index, 'replace');
@@ -927,7 +929,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       const hash = routeHash(previous);
       if (location.hash === hash) {
         const focus: PublicationHistoryFocus = { hash, index: routeIndexRef.current, actorId: actorRef.current, target: publicationReturnTarget };
-        history.replaceState({ ...history.state, teamspacePublicationReturnFocus: focus }, '', hash);
+        history.replaceState({ ...history.state, donefacPublicationReturnFocus: focus }, '', hash);
       }
     }
     if (!keepIssueReview && previous?.issueId !== next.issueId) setIssueReview(null);
@@ -1503,7 +1505,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
   };
 
-  if (!data) return <div className="loading-screen"><div className="brand-mark"><Command size={26}/></div><h1>Teamspace</h1>{failure ? <><p className="error-text">{failure}</p><button className="btn btn-primary" onClick={() => refresh().catch(e => setFailure(e.message))}>다시 연결</button><p className="muted">API 서버가 실행 중인지 확인해주세요.</p></> : <><LoaderCircle className="spin"/><p className="muted">팀의 업무 공간을 불러오는 중입니다</p></>}</div>;
+  if (!data) return <div className="loading-screen"><div className="brand-mark"><Command size={26}/></div><h1>Donefac</h1>{failure ? <><p className="error-text">{failure}</p><button className="btn btn-primary" onClick={() => refresh().catch(e => setFailure(e.message))}>다시 연결</button><p className="muted">API 서버가 실행 중인지 확인해주세요.</p></> : <><LoaderCircle className="spin"/><p className="muted">팀의 업무 공간을 불러오는 중입니다</p></>}</div>;
   const project = data.projects.find(p => p.id === projectId) || data.projects[0];
   const actor = data.users.find(u => u.id === actorId);
   const props: FeatureProps = { data, projectId, actorId, refresh, notify, openIssue, openDocument };
@@ -1560,7 +1562,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           setIssueReview(null);
           setCommentFocus(focus => focus?.actorId === null ? focus : null);
           actorRef.current = e.target.value;
-          setActorId(e.target.value);setActor(e.target.value);localStorage.setItem('teamspace.actor',e.target.value);
+          setActorId(e.target.value);setActor(e.target.value);localStorage.setItem('donefac.actor',e.target.value);
         }}>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select></div>
       </div></header>
       {currentGroup && currentTab && <SectionTabs group={currentGroup} activeTab={currentTab} onSelect={openNavTab}
@@ -1721,13 +1723,13 @@ function PublicationInboxButton({actorId,onClick}:{actorId:string;onClick:()=>vo
     load();
     const timer = setInterval(load,30_000);
     window.addEventListener('focus',load);
-    window.addEventListener('teamspace:publication-changed',load);
+    window.addEventListener('donefac:publication-changed',load);
     document.addEventListener('visibilitychange',load);
     return () => {
       request?.abort();
       clearInterval(timer);
       window.removeEventListener('focus',load);
-      window.removeEventListener('teamspace:publication-changed',load);
+      window.removeEventListener('donefac:publication-changed',load);
       document.removeEventListener('visibilitychange',load);
     };
   }, [actorId]);

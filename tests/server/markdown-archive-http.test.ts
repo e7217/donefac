@@ -14,7 +14,7 @@ import type { Attachment, DocPage, RichContent, WorkspaceSnapshot } from '../../
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
 async function archiveServer(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-markdown-archive-http-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-markdown-archive-http-'));
   const service = createApp({ dataDir, seed: true, outboundWorker: false, deadlineReminderWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {
@@ -114,7 +114,7 @@ test('Docmost Markdown ZIP imports nested pages and routes links to new sections
     actorId, projectId: 'project-team', parentId: null, timestamp: new Date().toISOString(),
   });
   const [nextRoot, nextChild] = remapped.documents;
-  assert.equal(remapped.format, 'teamspace');
+  assert.equal(remapped.format, 'donefac');
   assert.notEqual(nextChild.id, childId);
   assert.equal(nextChild.parentId, nextRoot.id);
   const nextSection = [...documentNodes(nextChild.content)].find(node => node.type === 'heading' && node.content?.[0]?.text === '설치');
@@ -135,7 +135,7 @@ test('Docmost Markdown ZIP imports nested pages and routes links to new sections
   assert.equal((await upload(applyPath)).status, 404);
 });
 
-test('Teamspace Markdown ZIP restores editable merged tables with rich cells and remaps their links and files', async t => {
+test('Donefac Markdown ZIP restores editable merged tables with rich cells and remaps their links and files', async t => {
   const url = await archiveServer(t);
   const actorId = 'user-min';
   const actorHeaders = { 'X-Actor-Id': actorId };
@@ -202,7 +202,7 @@ test('Teamspace Markdown ZIP restores editable merged tables with rich cells and
     method: 'POST', headers: uploadHeaders, body: bundle,
   });
   const preview = await read<DocumentMarkdownArchivePreview>(await upload('preview?projectId=&parentId='), 200);
-  assert.equal(preview.format, 'teamspace');
+  assert.equal(preview.format, 'donefac');
   assert.equal(preview.attachmentCount, 1);
   assert.deepEqual(preview.warnings, []);
   const result = await read<DocumentMarkdownArchiveResult>(await upload(`apply?previewId=${preview.id}`), 201);

@@ -285,7 +285,7 @@ test('기준선 충돌은 입력을 보존하고 명시적 최신 확인 후 저
   try {
     await form.getByRole('button', { name: '기준선 확정 저장', exact: true }).click(); await held;
     await expect(form.getByLabel('기준선 이름', { exact: true })).toBeDisabled();
-    expect(await page.evaluate(() => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })))).toBe(false);
+    expect(await page.evaluate(() => window.dispatchEvent(new Event('donefac:navigate', { cancelable: true })))).toBe(false);
     release(); await expect(form).toHaveCount(0);
     const saved = (await snapshot(f)).baselines!.find(value => value.name === name)!;
     expect(saved.issues.find(value => value.issueId === issue.id)?.endDate).toBe(day(9));

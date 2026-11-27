@@ -25,7 +25,7 @@ const update = (link: Dependency, related: Issue, type: Dependency['type'], lagD
   ({ ...remove(link, related), action: 'update', type, lagDays });
 
 async function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-row-multiple-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-row-multiple-'));
   const service = createApp({ dataDir: dir, outboundWorker: false, deadlineReminderWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -150,7 +150,7 @@ test('multi-link row edit projects reversal, update and insertion together, roll
   assert.deepEqual(await f.workspace(), before);
   await f.apply(preview.previewId, 409, 'user-seo');
 
-  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     database.exec(`CREATE TRIGGER fail_last_row_link BEFORE INSERT ON dependencies WHEN json_extract(NEW.json,'$.type')='SF'
       BEGIN SELECT RAISE(ABORT,'synthetic late multi-link insert failure'); END`);
@@ -287,7 +287,7 @@ test('row rescheduling uses added, removed and edited links for one atomic trans
   assert.equal(preview.dependencyChanges?.length, 3);
   assert.deepEqual(await f.workspace(), before);
 
-  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     database.exec(`CREATE TRIGGER fail_cascade_write BEFORE UPDATE ON issues
       WHEN json_extract(NEW.json,'$.title')='간접 후행'

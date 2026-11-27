@@ -34,7 +34,7 @@ type Backup = WorkspaceSnapshot & {
 type RequestOptions = { method?: string; body?: unknown; actor?: string; headers?: Record<string, string> };
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-comment-edit-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-comment-edit-'));
   async function start() {
     const app = createApp({ dataDir: directory, outboundWorker: false, deadlineReminderWorker: false });
     const server = app.app.listen(0, '127.0.0.1');
@@ -134,7 +134,7 @@ test('author edits are versioned, retry-safe, and notify only new mentions while
   const beforeOutsider = await f.inbox(outsider, comment.id);
   const beforeReviewer = await f.inbox(reviewer, comment.id);
   const beforeParticipant = await f.inbox(participant, comment.id);
-  const database = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.directory, 'donefac.sqlite'));
   try {
     database.exec(`CREATE TRIGGER fail_comment_edit_mention BEFORE INSERT ON team_notifications
       WHEN new.kind='issue-comment-mentioned'

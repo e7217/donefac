@@ -94,7 +94,7 @@ test('360px에서 저장된 문서 트리를 다른 공간으로 복제하고 �
       includeDescendants: true, expectedSourceVersion: source.version } satisfies DocumentTreeCopyOptions;
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(documentUrl(source));
     await expect(title(page)).toHaveValue(source.title);
     await editor(page).fill(localText);

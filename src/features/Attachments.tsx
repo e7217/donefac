@@ -92,11 +92,11 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
     xhrRef.current = null;
     const initialLoad = setTimeout(() => void load(), 0);
     const trashChanged = () => { versionCache.current.clear(); void load(); };
-    window.addEventListener('teamspace:trash-changed', trashChanged);
+    window.addEventListener('donefac:trash-changed', trashChanged);
     return () => {
       mountedRef.current = false;
       clearTimeout(initialLoad);
-      window.removeEventListener('teamspace:trash-changed', trashChanged);
+      window.removeEventListener('donefac:trash-changed', trashChanged);
       listRequest.current?.abort();
       xhrRef.current?.abort();
       versionRequest.current?.abort();
@@ -207,7 +207,7 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
     try {
       const expected = encodeURIComponent(attachment.currentVersionId);
       await api(`/attachments/${encodeURIComponent(attachment.id)}?expectedVersionId=${expected}`, { method: 'DELETE', headers: { 'X-Actor-Id': actorId } });
-      window.dispatchEvent(new Event('teamspace:trash-changed'));
+      window.dispatchEvent(new Event('donefac:trash-changed'));
       if (mountedRef.current) {
         setAttachments(previous => previous.filter(item => item.id !== attachment.id));
         versionCache.current.delete(attachment.id);

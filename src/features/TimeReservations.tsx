@@ -27,7 +27,7 @@ type ReservationDeletion = { entry: IssueTimeReservationEntry; generation: Props
 type ReservationList = { key: string; entries: IssueTimeReservationEntry[]; error?: string };
 type MutationAttempt = { fingerprint: string; requestId: string };
 const MIN_DATE = '0001-01-01', MAX_DATE = '9999-12-30';
-const CHANGE_EVENT = 'teamspace:time-reservations-changed';
+const CHANGE_EVENT = 'donefac:time-reservations-changed';
 
 function issueReservationsPath(issueId: string) {
   return `/issues/${encodeURIComponent(issueId)}/time-reservations`;
@@ -108,7 +108,7 @@ export function TimeReservations(props: Props) {
   }, [listPath, key, actorId]);
   useEffect(() => {
     const reload = () => setRevision(value => value + 1);
-    const events = [CHANGE_EVENT, 'teamspace:trash-changed', 'teamspace:workspace-imported', 'focus'];
+    const events = [CHANGE_EVENT, 'donefac:trash-changed', 'donefac:workspace-imported', 'focus'];
     for (const event of events) window.addEventListener(event, reload);
     return () => { for (const event of events) window.removeEventListener(event, reload); };
   }, []);

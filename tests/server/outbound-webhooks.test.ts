@@ -25,7 +25,7 @@ async function receiver(handler: (message: Received) => void = message => { mess
   };
 }
 function fixture(extra: ConstructorParameters<typeof OutboundWebhookService>[1] = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-webhook-')), store = new Store(dir); seed(store);
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-webhook-')), store = new Store(dir); seed(store);
   let clock = Date.now(); const service = new OutboundWebhookService(store, { autoStart: false, now: () => clock, ...extra });
   const context = <T>(action: () => T) => store.withMutationContext({ actorId: 'user-seo', origin: 'user' }, action);
   const endpoint = (url: string, scopes: string[] | null = ['project-neo'], eventTypes = OUTBOUND_EVENT_TYPES) => { const created = service.create({ name: '합성 수신처', url, projectIds: scopes, eventTypes }); const enabled = service.update(created.endpoint.id, { enabled: true }, created.endpoint.version); return { ...created, endpoint: enabled }; };

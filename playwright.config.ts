@@ -2,9 +2,9 @@ import { defineConfig } from '@playwright/test';
 import { existsSync } from 'node:fs';
 
 const cachedBrowser = '/home/sfa/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome';
-const externalUrl = process.env.TEAMSPACE_TEST_URL;
-const testWebPort = process.env.TEAMSPACE_TEST_WEB_PORT || '5179';
-const testApiPort = process.env.TEAMSPACE_TEST_API_PORT || '5189';
+const externalUrl = process.env.DONEFAC_TEST_URL;
+const testWebPort = process.env.DONEFAC_TEST_WEB_PORT || '5179';
+const testApiPort = process.env.DONEFAC_TEST_API_PORT || '5189';
 const testUrl = `http://127.0.0.1:${testWebPort}`;
 export default defineConfig({
   testDir: './tests/browser',
@@ -26,7 +26,7 @@ export default defineConfig({
   ...(!externalUrl ? { webServer: {
     command: 'node scripts/browser-test-server.mjs',
     url: `${testUrl}/api/health`,
-    env: { TEAMSPACE_TEST_WEB_PORT: testWebPort, TEAMSPACE_TEST_API_PORT: testApiPort },
+    env: { DONEFAC_TEST_WEB_PORT: testWebPort, DONEFAC_TEST_API_PORT: testApiPort },
     reuseExistingServer: false,
     timeout: 130_000,
     stdout: 'pipe' as const,

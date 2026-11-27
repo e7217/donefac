@@ -120,9 +120,9 @@ test('공동 편집에서 블록을 옮겨도 같은 절의 동료 입력과 커
   const peerContext = await browser.newContext({ baseURL, viewport: { width: 1050, height: 840 } });
   const offlineContext = await browser.newContext({ baseURL, viewport });
   try {
-    await page.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), users[0].id);
-    await peerContext.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), users[1].id);
-    await offlineContext.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), users[2].id);
+    await page.addInitScript(actor => localStorage.setItem('donefac.actor', actor), users[0].id);
+    await peerContext.addInitScript(actor => localStorage.setItem('donefac.actor', actor), users[1].id);
+    await offlineContext.addInitScript(actor => localStorage.setItem('donefac.actor', actor), users[2].id);
     const peer = await peerContext.newPage(), offline = await offlineContext.newPage();
     const enabled = await request.post(`/api/documents/${document.id}/collaboration/enable`, { data: { expectedVersion: document.version } });
     expect(enabled.ok(), await enabled.text()).toBe(true);

@@ -30,7 +30,7 @@ test('360px에서 Markdown 설명을 편집·미리보기·저장하고 복제�
     await intercepted.abort();
   });
   try {
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/issues`);
     await page.locator('.issue-heading-actions').getByRole('button', { name: '업무 만들기', exact: true }).click();
     const create = page.getByRole('dialog', { name: '새 업무 만들기', exact: true });
@@ -107,7 +107,7 @@ test('기존 평문을 그대로 보여 주고 버전 충돌에서 Markdown 방�
     projectId: project.id, title, description: '## 일반 입력 그대로',
   } }), 201);
   try {
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/issues?issue=${old.id}`);
     const details = page.getByRole('dialog', { name: title, exact: true });
     const format = details.getByRole('combobox', { name: '설명 서식', exact: true });

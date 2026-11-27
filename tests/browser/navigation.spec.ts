@@ -166,7 +166,7 @@ test('문서 작업자 전환은 초안을 분리하고 가져오기 승인 뒤�
   // Backup import lives in the '데이터' settings section.
   await page.getByRole('navigation', { name: '설정 섹션' }).getByRole('button', { name: '데이터', exact: true }).click();
   await expect(page).toHaveURL(/\/settings\?section=data$/);
-  const draftKey = `teamspace:document-draft:${originalActor}:${document.id}`;
+  const draftKey = `donefac:document-draft:${originalActor}:${document.id}`;
   await expect.poll(() => page.evaluate(key => Boolean(localStorage.getItem(key)), draftKey)).toBe(true);
   await page.evaluate(() => localStorage.setItem('navigation-test-marker', 'keep'));
 
@@ -194,7 +194,7 @@ test('문서 작업자 전환은 초안을 분리하고 가져오기 승인 뒤�
   await confirmation.getByRole('button', { name: '확인하고 가져오기', exact: true }).click();
   await expect(confirmation).toHaveCount(0);
   expect(imports).toBe(1);
-  await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith('teamspace:document-draft:')))).toEqual([]);
+  await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith('donefac:document-draft:')))).toEqual([]);
   expect(await page.evaluate(() => localStorage.getItem('navigation-test-marker'))).toBe('keep');
   await setHash(page, `#/${document.projectId}/documents/${document.id}`);
   await expect(title).toHaveValue(document.title);

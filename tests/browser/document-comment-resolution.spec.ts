@@ -46,7 +46,7 @@ test('360px 문서 댓글 검색은 발췌·작성자·답글을 찾고 작성 �
       headers: actor(author), data: { state: 'resolved', expectedVersion: 0 },
     }));
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
     await page.goto(`/${documentHash}`);
     await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
     const search = page.getByRole('searchbox', { name: '문서 댓글 검색', exact: true });
@@ -123,7 +123,7 @@ test('360px 열린 문서 댓글에 팀원의 변경을 표시하고 본문과 �
       headers: actor(author), data: { requestId: randomUUID(), expectedDocumentVersion: source.version,
         sourceSelection: { from: 1, to: quote.length + 1, text: quote }, body: '동시에 검토할 문장 댓글' },
     }), 201);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
     await page.goto(`/#/${project.id}/documents/${source.id}`);
     const editor = page.locator('.docs-prose');
     await expect(editor).toHaveText(quote, { timeout: 30_000 });
@@ -191,7 +191,7 @@ test('문서 댓글을 새로고침하는 동안 등록한 댓글을 보존하�
   const delivered = Promise.withResolvers<void>();
   let nextRead: 'hold' | 'fail' | undefined;
   try {
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
     await page.goto(`/#/${project.id}/documents/${source.id}`);
     const panel = page.getByRole('complementary', { name: '문서 상세 정보', exact: true });
     await expect(panel.getByText('아직 댓글이 없어요', { exact: true })).toBeVisible({ timeout: 30_000 });
@@ -271,7 +271,7 @@ test('360px에서 문장 댓글을 해결하고 멘션과 공유 링크로 원�
     const waitForChange = (screen: Page) => screen.waitForResponse(response =>
       new URL(response.url()).pathname === resolutionPath && response.request().method() === 'PATCH');
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
     await page.goto(documentRoute);
     const editor = page.locator('.docs-prose');
     await expect(editor).toHaveText(currentText, { timeout: 30_000 });
@@ -306,7 +306,7 @@ test('360px에서 문장 댓글을 해결하고 멘션과 공유 링크로 원�
     await expect(page.locator(`#document-comment-${other.id}`)).toHaveCount(0);
 
     await reviewerContext.addInitScript(id => {
-      localStorage.setItem('teamspace.actor', id);
+      localStorage.setItem('donefac.actor', id);
       let copied = '';
       Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
         writeText: async (value: string) => { copied = value; }, readText: async () => copied,
@@ -409,7 +409,7 @@ test('360px 문장 답글은 응답을 잃고 대화가 해결돼도 결과를 �
       initialReply = (await committed.json() as DocumentCommentReplyResult).comment;
       await route.abort('failed');
     });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), reviewer.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), reviewer.id);
     await page.goto(routeUrl);
     const editor = page.locator('.docs-prose');
     await expect(editor).toHaveText(updatedBody);
@@ -458,7 +458,7 @@ test('360px 문장 답글은 응답을 잃고 대화가 해결돼도 결과를 �
     await expect(editor).toHaveText(`${updatedBody} 미저장 본문`);
 
     await authorContext.addInitScript(actorId => {
-      localStorage.setItem('teamspace.actor', actorId);
+      localStorage.setItem('donefac.actor', actorId);
       let copied = '';
       Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
         writeText: async (value: string) => { copied = value; }, readText: async () => copied,

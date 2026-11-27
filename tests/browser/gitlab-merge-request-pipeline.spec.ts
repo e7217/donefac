@@ -319,7 +319,7 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     const attached = await attaching;
     expect(attached.request().postDataJSON()).toEqual({ repositoryId, pipelineId, sha: pipelineSha, revision: fresh.revision });
     expect(attached.status()).toBe(408);
-    if (!savedLink) throw new Error('Teamspace did not save the inspected pipeline.');
+    if (!savedLink) throw new Error('Donefac did not save the inspected pipeline.');
     expect(savedLink).toMatchObject({ issueId: issue.id, projectId: repositoryId, kind: 'pipeline', state: 'failed',
       sourceSha: pipelineSha, pipelineSource: 'merge_request_event', webUrl: pipelineUrl(), manualLinkId: expect.any(String) });
     const review = button(panel, '연결한 파이프라인으로 상태 검토');

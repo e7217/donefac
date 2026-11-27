@@ -7,7 +7,7 @@ export type IssueCommentComposer = {
 };
 
 export function issueCommentDraftKey(actorId: string, issueId: string, generation: string | undefined) {
-  return generation ? `teamspace:issue-comment-draft:1:${JSON.stringify([actorId, issueId, generation])}` : null;
+  return generation ? `donefac:issue-comment-draft:1:${JSON.stringify([actorId, issueId, generation])}` : null;
 }
 
 export function readIssueCommentDraft(key: string | null): IssueCommentComposer {

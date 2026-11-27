@@ -477,7 +477,7 @@ function statusIntersection(clauses: readonly StatusClause[], context: JiraViewQ
 
 function priorityFilter(clauses: readonly PriorityClause[], requireSource: boolean, resolveSourceAlias?: JiraViewSourceAliasResolver): Priority[] | undefined {
   if (!clauses.length) return undefined;
-  // Intersect original values before converting them. One Teamspace priority can represent several Jira options.
+  // Intersect original values before converting them. One Donefac priority can represent several Jira options.
   const coverage = new Map<Priority, Set<string | null>>();
   let selected: Map<Priority, Set<string | null>> | undefined;
   for (const { values } of clauses) {

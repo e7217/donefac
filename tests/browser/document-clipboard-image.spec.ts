@@ -171,7 +171,7 @@ test('공동 편집에서 스크린샷 업로드 중 동료가 앞에 문단을 
   const document = await createDocument(request, project.id, `클립보드 공동 편집 ${suffix}`);
   const contexts = await Promise.all([firstActor, secondActor].map(async actor => {
     const context = await browser.newContext({ baseURL, viewport });
-    await context.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await context.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     return context;
   }));
   try {

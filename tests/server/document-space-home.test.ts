@@ -13,7 +13,7 @@ const path = (space: string | null = project) => '/document-space-home' + (space
 const docPath = (documentId: string) => `/documents/${documentId}`;
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-space-home-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-space-home-'));
   const runtime = createApp({ dataDir, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   t.after(async () => {

@@ -89,10 +89,10 @@ export function JiraSavedViewDialog({ actorId, project, notify, currentLayout, i
       event.preventDefault();
       event.returnValue = '';
     }
-    window.addEventListener('teamspace:navigate', guard);
+    window.addEventListener('donefac:navigate', guard);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', guard);
+      window.removeEventListener('donefac:navigate', guard);
       window.removeEventListener('beforeunload', unload);
     };
   }, [dirty, notify, onClose, uncertain]);
@@ -251,7 +251,7 @@ export function JiraSavedViewDialog({ actorId, project, notify, currentLayout, i
             <p><code>ORDER BY {review.orderBy.map(({ field, direction }) => [field, direction?.toUpperCase()].filter(Boolean).join(' ')).join(', ')}</code></p>
             {review.sort?.length ? <>
               <p>저장할 정렬 · {review.sort.map(({ field, direction }) => `${ISSUE_VIEW_SORT_LABELS[field]} ${direction === 'asc' ? '오름차순' : '내림차순'}`).join(', ')}</p>
-              <p>현재 Teamspace 업무 값으로 정렬합니다. {review.sort.some(({ field }) => field === 'dueDate') && '목표 마감일이 비어 있으면 뒤에 표시합니다.'}</p>
+              <p>현재 Donefac 업무 값으로 정렬합니다. {review.sort.some(({ field }) => field === 'dueDate') && '목표 마감일이 비어 있으면 뒤에 표시합니다.'}</p>
             </> : null}
             {requiresProjectOrder && <>
               <p>공유 보기에서는 대상 프로젝트에 저장된 업무 순서를 사용합니다.</p>

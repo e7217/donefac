@@ -18,14 +18,14 @@ import { prepareNativeTeamPilot, verifyNativeTeamData } from './pilot-native-fix
 const mode = process.argv[2];
 assert.ok(process.argv.length === 2 || (process.argv.length === 3 && ['--team', '--team-native'].includes(mode)),
   'Usage: node scripts/test-pilot.mjs [--team|--team-native]');
-const teamSeconds = mode ? Number(process.env.TEAMSPACE_PILOT_TEAM_SECONDS ?? 75) : null;
+const teamSeconds = mode ? Number(process.env.DONEFAC_PILOT_TEAM_SECONDS ?? 75) : null;
 if (teamSeconds !== null) {
   assert.ok(Number.isSafeInteger(teamSeconds) && teamSeconds >= 30 && teamSeconds <= 1800,
-    'TEAMSPACE_PILOT_TEAM_SECONDS must be an integer from 30 to 1800.');
+    'DONEFAC_PILOT_TEAM_SECONDS must be an integer from 30 to 1800.');
 }
 
 const repo = fileURLToPath(new URL('../', import.meta.url));
-const scratch = mkdtempSync(join(tmpdir(), 'teamspace-pilot-'));
+const scratch = mkdtempSync(join(tmpdir(), 'donefac-pilot-'));
 const source = join(scratch, 'source');
 const backup = join(scratch, 'backup');
 const restored = join(scratch, 'restored');
@@ -58,12 +58,12 @@ async function deadline(completion, milliseconds, message) {
 
 async function start(dataDir, demo = false, access) {
   interruption.signal.throwIfAborted();
-  const env = {...process.env, TEAMSPACE_PILOT_PORT: '0', TEAMSPACE_PILOT_DEMO: demo ? '1' : '0', TEAMSPACE_PILOT_OUTBOUND: '0'};
-  delete env.TEAMSPACE_PILOT_ORIGIN;
-  delete env.TEAMSPACE_PILOT_ACCESS_FILE;
+  const env = {...process.env, DONEFAC_PILOT_PORT: '0', DONEFAC_PILOT_DEMO: demo ? '1' : '0', DONEFAC_PILOT_OUTBOUND: '0'};
+  delete env.DONEFAC_PILOT_ORIGIN;
+  delete env.DONEFAC_PILOT_ACCESS_FILE;
   if (access) {
-    env.TEAMSPACE_PILOT_ORIGIN = access.origin;
-    env.TEAMSPACE_PILOT_ACCESS_FILE = access.file;
+    env.DONEFAC_PILOT_ORIGIN = access.origin;
+    env.DONEFAC_PILOT_ACCESS_FILE = access.file;
   }
   const child = spawn('bash', ['scripts/pilot-lock.sh', dataDir, process.execPath, '--import', 'tsx', 'server/pilot.ts'], {
     cwd: repo, stdio: ['ignore', 'pipe', 'pipe'], env,
@@ -75,7 +75,7 @@ async function start(dataDir, demo = false, access) {
   const ready = new Promise(resolve => {
     child.stdout.on('data', chunk => {
       logs = (logs + chunk).slice(-3000);
-      const url = /Teamspace pilot listening on (http:\/\/127\.0\.0\.1:\d+)\s/.exec(logs)?.[1];
+      const url = /Donefac pilot listening on (http:\/\/127\.0\.0\.1:\d+)\s/.exec(logs)?.[1];
       if (url) resolve(url);
     });
   });
@@ -141,9 +141,9 @@ async function openTeamPilot(proxy, access, dataDir, retiredCookies) {
   });
   assert.equal(login.status, 303, 'The team pilot did not accept the synthetic key.');
   const [cookie] = login.headers['set-cookie'] ?? [];
-  const token = /^__Host-teamspace-pilot=([A-Za-z0-9_-]{43});/.exec(cookie)?.[1];
+  const token = /^__Host-donefac-pilot=([A-Za-z0-9_-]{43});/.exec(cookie)?.[1];
   assert.ok(token && /; Secure; HttpOnly; SameSite=Lax$/.test(cookie), 'Missing opaque secure team session.');
-  const session = `__Host-teamspace-pilot=${token}`;
+  const session = `__Host-donefac-pilot=${token}`;
   assert.ok(!retiredCookies.has(session), 'A new session must have a fresh cookie.');
   retiredCookies.add(session);
 
@@ -452,12 +452,12 @@ async function verifyPilotCrossProjectJiraRelation(url, { receipt, sourceIssueId
 async function browser(url, { teamFixture, accessFile, spec } = {}) {
   interruption.signal.throwIfAborted();
   const playwright = fileURLToPath(new URL('../node_modules/@playwright/test/cli.js', import.meta.url));
-  const env = { ...process.env, TEAMSPACE_PILOT_TEST_URL: url };
-  delete env.TEAMSPACE_PILOT_TEAM_FIXTURE;
-  delete env.TEAMSPACE_PILOT_TEST_ACCESS_FILE;
+  const env = { ...process.env, DONEFAC_PILOT_TEST_URL: url };
+  delete env.DONEFAC_PILOT_TEAM_FIXTURE;
+  delete env.DONEFAC_PILOT_TEST_ACCESS_FILE;
   if (teamFixture) {
-    env.TEAMSPACE_PILOT_TEAM_FIXTURE = JSON.stringify(teamFixture);
-    env.TEAMSPACE_PILOT_TEST_ACCESS_FILE = accessFile;
+    env.DONEFAC_PILOT_TEAM_FIXTURE = JSON.stringify(teamFixture);
+    env.DONEFAC_PILOT_TEST_ACCESS_FILE = accessFile;
     delete env.DEBUG;
     delete env.PWDEBUG;
     delete env.NODE_DEBUG;
@@ -832,7 +832,7 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   assert.equal(await verifyDetails(copy, restored), dataBaseline, 'The separate restoration changed the team workflow evidence.');
   await stop(copy);
   const records = native
-    ? 'native intake, cycle carryover and retrospective, published and draft documents, attachment bytes, member email, revoked API key, and GitLab activity by Teamspace key and authenticated webhook evidence'
+    ? 'native intake, cycle carryover and retrospective, published and draft documents, attachment bytes, member email, revoked API key, and GitLab activity by Donefac key and authenticated webhook evidence'
     : 'Jira and Confluence records, attachment bytes and GitLab links by original Jira key';
   console.log(`Team pilot passed: ${evidence.peerCount} independent HTTPS browser sessions, ${evidence.rounds} rounds, ${evidence.editCount} retained edits, ` +
     `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched ${records}, ` +
@@ -1061,7 +1061,7 @@ async function runStandardPilot() {
   const tablePreview = await (await call(pilot.url, '/document-markdown-import/preview?projectId=&parentId=', {
     method: 'POST', headers: archiveContentHeaders, body: exportedTable,
   })).json();
-  assert.equal(tablePreview.format, 'teamspace');
+  assert.equal(tablePreview.format, 'donefac');
   assert.deepEqual(tablePreview.warnings, []);
   const tableApplyPath = `/document-markdown-import/apply?previewId=${encodeURIComponent(tablePreview.id)}`;
   const tableApplyOptions = { method: 'POST', headers: archiveContentHeaders, body: exportedTable };
@@ -1096,12 +1096,12 @@ async function runStandardPilot() {
   const readInbox = await (await call(pilot.url,'/notifications',{headers:reviewerHeaders})).json();
   const readNotification = readInbox.items.find(item=>item.id===reviewNotification.id);
   assert.equal(typeof readNotification?.readAt,'string');
-  const file = Buffer.from('Teamspace pilot attachment\n동일한 첨부 바이트\n');
+  const file = Buffer.from('Donefac pilot attachment\n동일한 첨부 바이트\n');
   const target = `/attachments?resourceType=issue&resourceId=${encodeURIComponent(issue.id)}&filename=pilot.bin`;
   const attachment = await (await call(pilot.url,target,{
     method:'POST',status:201,headers:{'Content-Type':'application/octet-stream','X-File-Type':'application/octet-stream'},body:file,
   })).json();
-  const revisedFile = Buffer.from('Teamspace pilot attachment v2\n최신 첨부 바이트\n');
+  const revisedFile = Buffer.from('Donefac pilot attachment v2\n최신 첨부 바이트\n');
   const updatedAttachment = await (await call(pilot.url,`/attachments/${attachment.id}/versions?expectedVersionId=${attachment.currentVersionId}&filename=pilot.bin`,{
     method:'POST',status:201,headers:{'Content-Type':'application/octet-stream'},body:revisedFile,
   })).json();

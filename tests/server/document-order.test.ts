@@ -17,7 +17,7 @@ type Backup = WorkspaceSnapshot & { schemaVersion: number; documentOrders: Docum
 type OrderFailure = { details: { reason: string } };
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-order-http-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-order-http-'));
   const runtime = createApp({ dataDir, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   await once(server, 'listening');

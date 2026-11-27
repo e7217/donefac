@@ -90,7 +90,7 @@ test('360px에서 Jira 댓글의 링크를 이관하고 댓글 수정과 백업 
     } }), 201);
     expect(native.mentions).toEqual(mentions);
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${issue.projectId}/issues?issue=${issue.id}`);
     const panel = page.getByRole('dialog', { name: title, exact: true });
     const article = (comment: Comment) => panel.locator(`#issue-comment-${comment.id}`);

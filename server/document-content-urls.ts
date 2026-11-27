@@ -2,7 +2,7 @@ import { documentNodes } from '../shared/document-references.js';
 import type { RichContent } from '../shared/types.js';
 
 export type DocumentUrlReference = { attrs: Record<string, unknown>; key: 'href' | 'src'; value: string };
-export const contentOriginPlaceholder = 'https://teamspace.invalid';
+export const contentOriginPlaceholder = 'https://donefac.invalid';
 export const attachmentContentPath = /^\/api\/(?:attachments\/([\s\S]*)\/content|attachment-versions\/([\s\S]*)\/download)\/?$/iu;
 
 export function* documentUrlReferences(content: RichContent): Generator<DocumentUrlReference> {

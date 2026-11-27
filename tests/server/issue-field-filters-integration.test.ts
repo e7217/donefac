@@ -16,7 +16,7 @@ function field(id: string, kind: CustomFieldDefinition['kind'], options: string[
 function filter(...rules: IssueFieldRule[]): IssueFieldFilter { return { match: 'all', rules }; }
 const basicFilters = { query: '', status: 'all', assigneeId: 'all', type: 'all' };
 async function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-field-filters-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-field-filters-'));
   const service = createApp({ dataDir: dir, outboundWorker: false }), server = service.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;

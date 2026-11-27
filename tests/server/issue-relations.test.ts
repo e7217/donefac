@@ -38,7 +38,7 @@ type Backup = WorkspaceSnapshot & {
 type RequestOptions = { method?: string; body?: unknown; headers?: Record<string, string> };
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-issue-relations-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-issue-relations-'));
   const runtime = createApp({ dataDir: directory, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -83,7 +83,7 @@ test('team issue links are symmetric or directional as requested, idempotent, ve
   await f.call(pathFor(a.id), { method: 'POST', body: add(b.id, 'blocks', 'sideways') }, 400);
   await f.call(pathFor(a.id), { method: 'POST', body: add('missing-issue') }, 404);
 
-  const sql = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  const sql = new DatabaseSync(join(f.directory, 'donefac.sqlite'));
   try {
     const lastEndpoint = [a.id, b.id].sort()[1];
     sql.exec(`CREATE TRIGGER fail_issue_relation_activity BEFORE INSERT ON activities
@@ -104,7 +104,7 @@ test('team issue links are symmetric or directional as requested, idempotent, ve
   assert.deepEqual(sameLink.map(result => result.status).sort(), [200, 201]);
   const relation = sameLink[0].data;
   assert.deepEqual(sameLink[1].data, relation);
-  assert.equal(relation.origin, 'teamspace');
+  assert.equal(relation.origin, 'donefac');
   assert.equal(relation.type, 'related');
   assert.deepEqual([relation.sourceIssueId, relation.targetIssueId], [a.id, b.id].sort());
   assert.deepEqual(await f.call(pathFor(a.id)), [relation]);
@@ -185,7 +185,7 @@ test('creating a cross-project blocked issue commits both resources and replays 
     issue: { projectId: secondary, title: '다른 프로젝트 검증', assigneeId: otherActor, startDate: '2026-11-25', endDate: '2026-11-26' } };
   const post = { method: 'POST', body };
   const before = await f.call<WorkspaceSnapshot>('/workspace');
-  const sql = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  const sql = new DatabaseSync(join(f.directory, 'donefac.sqlite'));
   try {
     sql.exec(`CREATE TRIGGER fail_cross_project_relation BEFORE INSERT ON issue_relations
       WHEN NEW.source_issue_id='${source.id}' BEGIN SELECT RAISE(ABORT, 'synthetic blocked issue relation failure'); END`);
@@ -207,7 +207,7 @@ test('creating a cross-project blocked issue commits both resources and replays 
   assert.deepEqual([first.issue.startDate, first.issue.endDate], ['2026-11-25', '2026-11-26']);
   assert.ok(first.relation);
   const relation = first.relation;
-  assert.deepEqual([relation.sourceIssueId, relation.targetIssueId, relation.type, relation.origin], [source.id, first.issue.id, 'blocks', 'teamspace']);
+  assert.deepEqual([relation.sourceIssueId, relation.targetIssueId, relation.type, relation.origin], [source.id, first.issue.id, 'blocks', 'donefac']);
   assert.deepEqual(await f.call<IssueRelation[]>(pathFor(first.issue.id)), [relation]);
   const blockers = await f.call<TeamScheduleBlocker[]>('/schedule/team-blockers');
   assert.ok(blockers.some(item => item.id === relation.id));
@@ -331,7 +331,7 @@ test('close as duplicate commits the selected terminal status, records actor his
   assert.ok(closed.issue.completedAt);
   assert.deepEqual([closed.issue.startDate, closed.issue.endDate, closed.issue.dueDate], [newSource.startDate, newSource.endDate, newSource.dueDate]);
   assert.deepEqual([closed.relation.origin, closed.relation.type, closed.relation.sourceIssueId, closed.relation.targetIssueId],
-    ['teamspace', 'duplicates', newSource.id, original.id]);
+    ['donefac', 'duplicates', newSource.id, original.id]);
   assert.deepEqual(await f.call(pathFor(newSource.id)), [closed.relation]);
 
   const reused = await f.call<DuplicateClosure>(duplicatePath(existingSource.id), { method: 'POST',
@@ -385,7 +385,7 @@ test('close as duplicate rolls back workflow rejection and failures while record
   const changes = () => f.call<IssueChangeHistoryPage>(`/issues/${source.id}/change-history`);
   const readyHistory = await changes();
   const operation = { method: 'POST', body: duplicateBody(updated, original, workflow) };
-  const database = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.directory, 'donefac.sqlite'));
   try {
     for (const [action, resourceId] of [['업무 관계 추가', original.id], ['중복으로 닫기', source.id]]) {
       database.exec(`CREATE TRIGGER fail_duplicate_closure BEFORE INSERT ON activities
@@ -539,7 +539,7 @@ test('team Gantt blocker writes check both reviewed versions and retain an exist
   assert.deepEqual(results[1].data, relation);
   assert.ok(results.every(result => result.headers.get('cache-control') === 'no-store'));
   assert.deepEqual({ origin: relation.origin, type: relation.type, source: relation.sourceIssueId, target: relation.targetIssueId },
-    { origin: 'teamspace', type: 'blocks', source: source.id, target: target.id });
+    { origin: 'donefac', type: 'blocks', source: source.id, target: target.id });
   assert.deepEqual(await f.call<IssueRelation>(path, post), relation);
   assert.deepEqual(await f.call(pathFor(source.id)), [relation]);
   assert.deepEqual(await f.call(pathFor(target.id)), [relation]);
@@ -634,7 +634,7 @@ test('schedule creation from a native blocking relation verifies its member, dir
   await f.call(schedulePath(a.id, relation), { method: 'POST', body: { ...body, type: 'other' } }, 400);
   await f.call(schedulePath(a.id, relation), { method: 'POST', body: { ...body, lagDays: 3_651 } }, 400);
 
-  const db = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.directory, 'donefac.sqlite'));
   try {
     db.exec(`CREATE TRIGGER reject_schedule_relation_activity BEFORE INSERT ON activities
       WHEN json_extract(NEW.json, '$.action')='선행 업무 연결'

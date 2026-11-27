@@ -219,7 +219,7 @@ test('설정 섹션은 주소로 열리고 숨긴 섹션의 미저장 입력을 
 test('설정 섹션 전환은 진행 중인 요청을 기다리고 결과 창이 열린 섹션을 숨기지 않는다', async ({ page, navigationGroups }) => {
   const { project, prefix, requests } = navigationGroups;
   const [owner] = (await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot).users;
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), owner.id);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), owner.id);
   let created: ApiKeyCreated | null = null;
   let release = () => {};
   const gate = new Promise<void>(resolve => { release = resolve; });

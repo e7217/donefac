@@ -225,8 +225,8 @@ export function Development(props: FeatureProps & DevelopmentActivityProps & {
       });
     };
     const unload=(event:BeforeUnloadEvent)=>{if(pending.current||dirtyRef.current){event.preventDefault();event.returnValue='';}};
-    window.addEventListener('teamspace:navigate',guard);window.addEventListener('beforeunload',unload);
-    return()=>{window.removeEventListener('teamspace:navigate',guard);window.removeEventListener('beforeunload',unload);};
+    window.addEventListener('donefac:navigate',guard);window.addEventListener('beforeunload',unload);
+    return()=>{window.removeEventListener('donefac:navigate',guard);window.removeEventListener('beforeunload',unload);};
   },[baseline,clearPreview,clearRepositorySearch,clearDeploymentPreview,notify]);
   function edit<K extends keyof Draft>(key: K, value: Draft[K]) {
     clearPreview();
@@ -265,9 +265,9 @@ export function Development(props: FeatureProps & DevelopmentActivityProps & {
   async function save(event:FormEvent){event.preventDefault();if(!settings)return;await execute(async()=>{
     const projectIds=readProjectIds(draft.ids);
     const jiraRoutes = submittedRoutes(projectIds);
-    const saved=await patch<GitlabSettings>('/integrations/gitlab',{expectedVersion:settings.version,baseUrl:draft.baseUrl,projectIds,...(jiraRoutes.length||settings.jiraRoutes?.length?{jiraRoutes}:{}),...(draft.token?{token:draft.token}:{}),...(draft.secret?{webhookSecret:draft.secret}:{}),...(draft.signingToken?{signingToken:draft.signingToken}:{})});accept(saved);window.dispatchEvent(new Event('teamspace:gitlab-settings-changed'));props.notify('GitLab 연결 설정을 저장했습니다.');
+    const saved=await patch<GitlabSettings>('/integrations/gitlab',{expectedVersion:settings.version,baseUrl:draft.baseUrl,projectIds,...(jiraRoutes.length||settings.jiraRoutes?.length?{jiraRoutes}:{}),...(draft.token?{token:draft.token}:{}),...(draft.secret?{webhookSecret:draft.secret}:{}),...(draft.signingToken?{signingToken:draft.signingToken}:{})});accept(saved);window.dispatchEvent(new Event('donefac:gitlab-settings-changed'));props.notify('GitLab 연결 설정을 저장했습니다.');
   });}
-  async function disconnect(){if(!settings||!window.confirm('GitLab 자격 증명을 삭제하고 상태 자동화를 비활성화할까요? 입력 중인 연결 설정도 초기화합니다. 기존 개발 활동 기록은 유지됩니다.'))return;await execute(async()=>{accept(await patch<GitlabSettings>('/integrations/gitlab',{expectedVersion:settings.version,token:'',webhookSecret:'',signingToken:''}));window.dispatchEvent(new Event('teamspace:gitlab-settings-changed'));props.notify('GitLab 자격 증명을 삭제했습니다.');});}
+  async function disconnect(){if(!settings||!window.confirm('GitLab 자격 증명을 삭제하고 상태 자동화를 비활성화할까요? 입력 중인 연결 설정도 초기화합니다. 기존 개발 활동 기록은 유지됩니다.'))return;await execute(async()=>{accept(await patch<GitlabSettings>('/integrations/gitlab',{expectedVersion:settings.version,token:'',webhookSecret:'',signingToken:''}));window.dispatchEvent(new Event('donefac:gitlab-settings-changed'));props.notify('GitLab 자격 증명을 삭제했습니다.');});}
   async function sync(retry?: SyncRetry) {
     if (!settings) return;
     const expectedVersion = settings.version;
@@ -579,8 +579,8 @@ function JiraRouteSettings({ repositoryIds, routes, sources, projects, onRetry, 
         const fallback = sources.loading || sources.error ? '목록 미확인' : '선택할 수 없음';
         return <div key={repositoryId} className="gitlab-jira-route" role="group" aria-label={`저장소 ${repositoryId} Jira 키 설정`}>
           <strong>저장소 {repositoryId}</strong>
-          <label className="form-label">대상 Teamspace 프로젝트
-            <select className="field" aria-label={`저장소 ${repositoryId} Teamspace 프로젝트`} data-gitlab-project-repo={repositoryId} value={projectId}
+          <label className="form-label">대상 Donefac 프로젝트
+            <select className="field" aria-label={`저장소 ${repositoryId} Donefac 프로젝트`} data-gitlab-project-repo={repositoryId} value={projectId}
               onChange={event => onChange(repositoryId, event.target.value)}>
               <option value="">현재 티켓 키만 사용</option>
               {missingProject && <option disabled value={projectId}>{projects.find(project => project.id === projectId)?.name ?? projectId} ({fallback})</option>}

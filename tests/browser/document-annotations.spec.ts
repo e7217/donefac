@@ -46,7 +46,7 @@ test('안내 상자와 상태 배지를 키보드와 도구 모음으로 편집�
     await insertCallout.getByLabel('안내 상자 제목 (선택)', { exact: true }).fill('배포 승인');
     await insertCallout.getByRole('combobox', { name: '안내 상자 유형', exact: true }).selectOption('warning');
     await insertCallout.getByRole('button', { name: '삽입', exact: true }).click();
-    const callout = editor.locator('[data-teamspace-node="callout"]');
+    const callout = editor.locator('[data-donefac-node="callout"]');
     await expect(callout).toHaveAttribute('data-callout-variant', 'warning');
     await expect(callout).toContainText('배포 승인');
     await expect(editor).toBeFocused();
@@ -110,9 +110,9 @@ test('안내 상자와 상태 배지를 키보드와 도구 모음으로 편집�
     await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
     await page.getByRole('button', { name: '이력', exact: true }).click();
     await page.locator('.docs-revision').filter({ hasText: `버전 ${saved.version}` }).click();
-    const historical = page.locator('.docs-history-preview .doc-readonly-content [data-teamspace-node="callout"]');
+    const historical = page.locator('.docs-history-preview .doc-readonly-content [data-donefac-node="callout"]');
     await expect(historical).toContainText('배포 <결정>');
-    await expect(historical.locator('[data-teamspace-node="statusBadge"]')).toHaveAttribute('data-status-tone', 'green');
+    await expect(historical.locator('[data-donefac-node="statusBadge"]')).toHaveAttribute('data-status-tone', 'green');
     await expect(historical.getByRole('button')).toHaveCount(0);
 
     const revisions = await (await request.get(`/api/documents/${source.id}/revisions`)).json() as DocRevision[];
@@ -123,8 +123,8 @@ test('안내 상자와 상태 배지를 키보드와 도구 모음으로 편집�
     await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(host.title);
     const pinned = page.getByRole('region', { name: `고정 포함 문서 ${source.title}`, exact: true });
     await pinned.getByRole('button', { name: '고정 버전 내용 보기', exact: true }).click();
-    await expect(pinned.locator('[data-teamspace-node="callout"]')).toHaveAttribute('data-callout-variant', 'tip');
-    await expect(pinned.locator('[data-teamspace-node="statusBadge"]')).toHaveText('완료 <확인>');
+    await expect(pinned.locator('[data-donefac-node="callout"]')).toHaveAttribute('data-callout-variant', 'tip');
+    await expect(pinned.locator('[data-donefac-node="statusBadge"]')).toHaveText('완료 <확인>');
     await expect(pinned.getByRole('button', { name: /설정/ })).toHaveCount(0);
   } finally {
     if (host) await archive(request, host);
@@ -159,7 +159,7 @@ test('공동 편집 문서에서 슬래시로 추가한 배지를 다른 편집�
     await dialog.getByRole('combobox', { name: '배지 색상', exact: true }).selectOption('blue');
     await dialog.getByRole('button', { name: '삽입', exact: true }).click();
     await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
-    const peerCallout = peer.locator('.docs-live-prose [data-teamspace-node="callout"]');
+    const peerCallout = peer.locator('.docs-live-prose [data-donefac-node="callout"]');
     await expect(peerCallout).toHaveAttribute('data-callout-title', '배포 확인');
     await expect(peerCallout.getByRole('button', { name: '상태 배지 설정 · 검토 대기', exact: true })).toHaveAttribute('data-status-tone', 'blue');
     await expect(peerCallout).not.toContainText('/badge');

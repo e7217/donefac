@@ -66,10 +66,10 @@ export function WorkspaceMemberEmailDialog({ user, restoreGeneration, actorId, r
         event.returnValue = '';
       }
     }
-    window.addEventListener('teamspace:navigate', navigate);
+    window.addEventListener('donefac:navigate', navigate);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', navigate);
+      window.removeEventListener('donefac:navigate', navigate);
       window.removeEventListener('beforeunload', unload);
     };
   });

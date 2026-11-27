@@ -7,10 +7,11 @@ import type {
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { CollaborationExport } from './collaboration.js';
 import { normalizeDocumentContent } from './document-content.js';
-import { isCanonicalTeamspaceIssueRelation, isTeamspaceIssueRelation } from '../shared/issue-relations.js';
+import { isCanonicalDonefacIssueRelation, isDonefacIssueRelation } from '../shared/issue-relations.js';
+import { withCurrentRelationOrigin } from '../shared/legacy-name.js';
 import { isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
-import { findTeamspaceIssueRelation, issueRelationVersionFloor, IssueRelationVersionError, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
+import { findDonefacIssueRelation, issueRelationVersionFloor, IssueRelationVersionError, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
 import type { Store } from './store.js';
 
 type ArchiveRows = {
@@ -256,14 +257,14 @@ export class TrashService {
         this.store.put('resource_links', value);
       });
     const insertRelation = this.store.db.prepare('INSERT INTO issue_relations(id,source_issue_id,target_issue_id,json) VALUES(?,?,?,?)');
-    for (const value of archive.issueRelations) resolve('issueRelations', value,
+    for (const value of archive.issueRelations.map(withCurrentRelationOrigin)) resolve('issueRelations', value,
       targets(endpoint('issue', value.sourceIssueId), endpoint('issue', value.targetIssueId)), '업무 관계', () => {
         const existing = this.store.get<IssueRelation>('issue_relations', value.id);
         if (existing) return existing.sourceIssueId === value.sourceIssueId && existing.targetIssueId === value.targetIssueId && existing.type === value.type && existing.origin === value.origin
           ? undefined : '업무 관계 ID가 충돌하여 기존 관계를 유지했습니다.';
         let restored = value;
-        if (isTeamspaceIssueRelation(value)) {
-          if (findTeamspaceIssueRelation(this.store, value)) return '업무 관계의 현재 연결을 유지했습니다.';
+        if (isDonefacIssueRelation(value)) {
+          if (findDonefacIssueRelation(this.store, value)) return '업무 관계의 현재 연결을 유지했습니다.';
           try { restored = { ...value, version: nextIssueRelationVersion(value.version, issueRelationVersionFloor(this.store)) }; }
           catch (error) { if (error instanceof IssueRelationVersionError) return error.message; throw error; }
           recordIssueRelationVersion(this.store, restored.version);
@@ -326,9 +327,11 @@ export class TrashService {
         (row.version===undefined||typeof row.version==='number'&&Number.isSafeInteger(row.version)&&row.version>0));
       const resourceLinks = collect<ResourceLink>(entry.resourceLinks, reserved.resourceLinks, '업무·문서 연결', row =>
         validString(row.issueId) && validString(row.documentId) && row[resourceType === 'issue' ? 'issueId' : 'documentId'] === entry.resourceId && validString(row.kind));
-      const issueRelations = collect<IssueRelation>(entry.issueRelations, reserved.issueRelations, '업무 관계', row =>
+      const currentRelations = Array.isArray(entry.issueRelations)
+        ? entry.issueRelations.map(row => row && typeof row === 'object' ? withCurrentRelationOrigin(row as { origin?: unknown }) : row) : entry.issueRelations;
+      const issueRelations = collect<IssueRelation>(currentRelations, reserved.issueRelations, '업무 관계', row =>
         resourceType === 'issue' && idInPair(row.sourceIssueId, row.targetIssueId) && validString(row.type) && validVersion(row.version) && validDate(row.createdAt) &&
-        (!Object.hasOwn(row, 'origin') || isCanonicalTeamspaceIssueRelation(row)));
+        (!Object.hasOwn(row, 'origin') || isCanonicalDonefacIssueRelation(row)));
       const gitlabLinks = collect<GitlabLink>(entry.gitlabLinks, reserved.gitlabLinks, 'GitLab 연결', row =>
         resourceType === 'issue' && row.issueId === entry.resourceId && isRestorableGitlabLink(row));
       const seenMilestones = new Set<string>();

@@ -15,7 +15,7 @@ import type { DocPage, DocRevision, RichContent, WebhookDelivery, WebhookEndpoin
 
 const content = (text: string): RichContent => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
 async function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-outbound-collaboration-')), service = createApp({ dataDir: dir, outboundWorker: false });
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-outbound-collaboration-')), service = createApp({ dataDir: dir, outboundWorker: false });
   service.app.post('/synthetic-outbound', (_request, response) => response.status(204).end());
   const server = service.app.listen(0, '127.0.0.1'); service.attachWebSocket(server); await once(server, 'listening'); const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`, observer = new Store(dir);
   const call = async <T = unknown>(path: string, method = 'GET', body?: unknown, actor = 'user-min') => { const response = await fetch(`${base}/api${path}`, { method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actor }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, data: await response.json() as T }; };

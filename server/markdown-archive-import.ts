@@ -201,11 +201,11 @@ export class MarkdownArchiveImportService {
       });
     } catch (error) {
       try { staged?.rollback(); }
-      catch { console.error('[teamspace attachments] Markdown ZIP 첨부 복구 기록 정리가 필요합니다.'); }
+      catch { console.error('[donefac attachments] Markdown ZIP 첨부 복구 기록 정리가 필요합니다.'); }
       throw error;
     }
     try { staged?.commit(); }
-    catch { console.error('[teamspace attachments] Markdown ZIP 첨부 복구 기록 정리가 필요합니다.'); }
+    catch { console.error('[donefac attachments] Markdown ZIP 첨부 복구 기록 정리가 필요합니다.'); }
     return committed;
   }
 

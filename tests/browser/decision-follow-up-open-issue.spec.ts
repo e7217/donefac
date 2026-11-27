@@ -59,7 +59,7 @@ function nextReport(page: Page, projectId: string, query: string) {
 
 async function openReport(page: Page, setup: Awaited<ReturnType<typeof fixture>>) {
   await page.setViewportSize({ width: 360, height: 820 });
-  await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), setup.actor.id);
+  await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), setup.actor.id);
   const initial = nextReport(page, setup.project.id, setup.prefix);
   await page.goto(`/${setup.route()}`);
   expect((await json<DecisionFollowUpPage>(await initial)).total).toBe(1);

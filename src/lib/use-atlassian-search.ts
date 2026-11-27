@@ -6,7 +6,7 @@ import type { FeatureProps } from '../../shared/types';
 import { workspaceAtlassianSearchAddress, type OriginalAddressMatches } from '../../shared/workspace-search';
 import { api } from './api';
 
-export const ATLASSIAN_LINKS_CHANGED = 'teamspace:atlassian-links-changed';
+export const ATLASSIAN_LINKS_CHANGED = 'donefac:atlassian-links-changed';
 
 type RequestKey = { url: string; attempt: number };
 type Lookup = { request: RequestKey; matches: OriginalAddressMatches | null };
@@ -60,7 +60,7 @@ export function useAtlassianSearch(query: string, data: FeatureProps['data'], re
 
   useEffect(() => {
     if (!url) return;
-    const events = ['focus', ATLASSIAN_LINKS_CHANGED, 'teamspace:workspace-imported', 'teamspace:trash-changed'];
+    const events = ['focus', ATLASSIAN_LINKS_CHANGED, 'donefac:workspace-imported', 'donefac:trash-changed'];
     for (const event of events) window.addEventListener(event, retry);
     return () => { for (const event of events) window.removeEventListener(event, retry); };
   }, [url, retry]);

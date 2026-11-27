@@ -565,7 +565,7 @@ test('360px에서 같은 Jira 프로젝트의 새 업무를 기존 프로젝트�
     const initialWorkspace = await read<WorkspaceSnapshot>('/api/workspace');
     const prior = initialWorkspace.issues.find(issue => issue.projectId === projectId && issue.title === oldTitle)!;
     expect(prior).toBeTruthy();
-    const savedResponse = await request.patch(`/api/issues/${prior.id}`, { data: { expectedVersion: prior.version, title: `Teamspace에서 편집한 내용 ${id}` } });
+    const savedResponse = await request.patch(`/api/issues/${prior.id}`, { data: { expectedVersion: prior.version, title: `Donefac에서 편집한 내용 ${id}` } });
     expect(savedResponse.ok(), await savedResponse.text()).toBe(true);
     const saved = await savedResponse.json() as Issue;
 
@@ -643,7 +643,7 @@ test('360px에서 Jira 변경을 반영하고 다음 원본에서도 보존한 �
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const id = suffix(), sourceKey = `REF${id}`, targetKey = `TGT${id}`, instance = `refresh-source-${id}`;
-  const originalTitle = `이전 Jira 제목 ${id}`, localTitle = `Teamspace에서 작성한 제목 ${id}`, nextTitle = `새 Jira 제목 ${id}`;
+  const originalTitle = `이전 Jira 제목 ${id}`, localTitle = `Donefac에서 작성한 제목 ${id}`, nextTitle = `새 Jira 제목 ${id}`;
   const originalDescription = '처음 이관한 Jira 설명', nextDescription = '다시 내보낸 Jira의 설명';
   const originalIssueKey = `${sourceKey}-1`;
   const jiraExport = (summary: string, description: string, updated: string, originalEstimateSeconds: number) => Buffer.from(JSON.stringify({ issues: [{
@@ -943,7 +943,7 @@ test('360px에서 기존 Jira 사용자 정의 속성만 검토하고 팀에서 
   const id = suffix(), sourceKey = `JCF${id}`, targetKey = `TCF${id}`, instance = `jira-custom-fields-${id}`;
   const originalTitle = '처음 이관한 Jira 제목', updatedTitle = '새 내보내기의 Jira 제목';
   const remainingLabel = '남은 검토 건수', noteLabel = '검토 조건', referenceLabel = '기존 참고 사항';
-  const localNote = 'Teamspace에서 편집한 조건', sourceNote = 'Jira 원본에서 변경한 조건';
+  const localNote = 'Donefac에서 편집한 조건', sourceNote = 'Jira 원본에서 변경한 조건';
   const issueSourceKey = `${sourceKey}-1`;
   const exportJira = (next: boolean) => Buffer.from(JSON.stringify({
     names: { customfield_100: next ? '새 원본의 남은 검토 건수' : remainingLabel, customfield_101: noteLabel, customfield_102: referenceLabel },
@@ -1053,7 +1053,7 @@ test('360px에서 별도 Jira REST 페이지로 기존 업무에 새 댓글과 �
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const id = suffix(), sourceKey = `JHR${id}`, targetKey = `THR${id}`, instance = `jira-history-${id}`;
-  const teamTitle = `팀에서 편집한 업무 ${id}`, teamComment = 'Teamspace에서 남긴 댓글', teamWorklog = 'Teamspace에서 남긴 작업 시간';
+  const teamTitle = `팀에서 편집한 업무 ${id}`, teamComment = 'Donefac에서 남긴 댓글', teamWorklog = 'Donefac에서 남긴 작업 시간';
   const originalComment = '처음 이관한 원본 댓글', newComment = '새로 내보낸 원본 댓글', rejectedComment = '같은 원본 ID로 변경한 댓글';
   const originalAuthor = { name: `history-worker-${id}`, displayName: `원본 작성자 ${id}` };
   const sourceUrl = 'https://jira.example.test/company/rest/api/3/issue/200';
@@ -1305,7 +1305,7 @@ test('360px에서 기존 Confluence 공간의 새 문서를 추가하고 편집�
   const id = suffix(), instance = `append-confluence-${id}`, spaceKey = `CF${id}`, space = `Confluence 원본 공간 ${id}`;
   const targetKey = `WIK${id}`, targetName = `기존 지식 프로젝트 ${id}`;
   const originalParentTitle = `원본 상위 문서 ${id}`, localParentTitle = `팀에서 편집한 상위 문서 ${id}`;
-  const localParentBody = 'Teamspace에서만 편집한 상위 문서 본문', childTitle = `새 하위 페이지 ${id}`;
+  const localParentBody = 'Donefac에서만 편집한 상위 문서 본문', childTitle = `새 하위 페이지 ${id}`;
   const date = '<property name="creationDate">2020-01-02T00:00:00Z</property>';
   const pageRow = (sourceId: number, title: string, body: string, parentId?: number) => `
     <object class="Page"><id name="id">${sourceId}</id><property name="title">${title}</property><property name="space" class="Space"><id name="id">42</id></property>${date}
@@ -1405,13 +1405,13 @@ test('360px에서 기존 Confluence 공간의 새 문서를 추가하고 편집�
   }
 });
 
-test('360px에서 이관한 Confluence 제목·페이지 ID·짧은 주소로 같은 Teamspace 문서를 연다', async ({ page, request }) => {
+test('360px에서 이관한 Confluence 제목·페이지 ID·짧은 주소로 같은 Donefac 문서를 연다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const id = suffix(), spaceKey = `CFL${id}`, spaceName = `링크 이관 공간 ${id}`;
   const origin = 'https://confluence.example.test', base = `${origin}/wiki`;
   const sourceTitle = `본문 링크가 있는 문서 ${id}`, targetTitle = `팀 절차 안내 ${id}`;
-  const targetBody = '이관 후 Teamspace에서 열리는 절차 본문';
+  const targetBody = '이관 후 Donefac에서 열리는 절차 본문';
   const titleLabel = '제목 경로로 절차 열기', idLabel = '페이지 ID로 절차 열기', missingLabel = '이관 대상이 없는 페이지';
   const tinyLabel = '짧은 주소로 절차 열기';
   const titlePath = `${base}/display/${spaceKey}/${encodeURIComponent(targetTitle).replaceAll('%20', '+')}`;
@@ -2773,7 +2773,7 @@ test('Jira 매핑·진단 검토 후 실제 이관하고 409·408·대기 중 �
     expect(firstResult.duplicate).toBe(false);
     await expect(keyInput).toBeDisabled(); const actor = await page.getByLabel('작업자 선택', { exact: true }).inputValue();
     await page.getByLabel('작업자 선택', { exact: true }).selectOption(workspace.users.find(user => user.id !== actor)!.id); await expect(page.getByLabel('작업자 선택', { exact: true })).toHaveValue(actor);
-    expect(await page.evaluate(() => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })))).toBe(false);
+    expect(await page.evaluate(() => window.dispatchEvent(new Event('donefac:navigate', { cancelable: true })))).toBe(false);
     release();
     await expectInputsPreserved(408);
 

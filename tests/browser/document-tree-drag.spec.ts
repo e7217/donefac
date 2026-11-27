@@ -33,7 +33,7 @@ async function fixture(request: APIRequestContext) {
       return saved;
     },
     async open(page: Page, document: DocPage) {
-      await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+      await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
       await page.goto(`/#/${project.id}/documents/${document.id}`);
       await expect(page.getByRole('textbox', { name: '문서 제목' })).toHaveValue(document.title);
     },

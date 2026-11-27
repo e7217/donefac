@@ -120,7 +120,7 @@ export class LegacyImportService{
   }
   remove(id:string,expected:unknown,afterRemove?:(summary:LegacyPackageSummary)=>void):void{
     this.store.transaction(()=>{const summary=this.get(id);if(!Number.isSafeInteger(expected))fail(400,'expectedVersion이 필요합니다.');if(expected!==summary.version)fail(409,'원본 분석 버전이 다릅니다. 최신 목록을 불러와 주세요.');this.store.db.prepare('DELETE FROM legacy_packages WHERE id=?').run(id);afterRemove?.(summary);});
-    try{rmSync(join(this.root,`${id}.bundle`),{force:true});syncDirectory(this.root);}catch{console.error('[teamspace legacy import] 삭제한 원본 파일 정리가 필요합니다.');}
+    try{rmSync(join(this.root,`${id}.bundle`),{force:true});syncDirectory(this.root);}catch{console.error('[donefac legacy import] 삭제한 원본 파일 정리가 필요합니다.');}
   }
   close():void{this.closed=true;this.current?.reject(new LegacyImportError(503,'원본 분석 서비스가 종료되었습니다.'));}
   registerRoutes(app:Express,hooks:Hooks):void{

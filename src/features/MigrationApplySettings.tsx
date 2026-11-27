@@ -143,8 +143,8 @@ export function MigrationApplySettings(props: MigrationApplyProps) {
   const [workspaceRevision, setWorkspaceRevision] = useState(0);
   useEffect(() => {
     const restore = () => setWorkspaceRevision(previous => previous + 1);
-    window.addEventListener('teamspace:workspace-imported', restore);
-    return () => window.removeEventListener('teamspace:workspace-imported', restore);
+    window.addEventListener('donefac:workspace-imported', restore);
+    return () => window.removeEventListener('donefac:workspace-imported', restore);
   }, []);
   return <ActorMigration key={`${props.actorId}:${workspaceRevision}`} {...props} />;
 }
@@ -208,7 +208,7 @@ function ActorMigration(props: MigrationApplyProps) {
   useEffect(() => {
     const guard = (event: Event) => { if (event.defaultPrevented) return; if (busyRef.current) { event.preventDefault(); notify('이관 요청 결과를 확인한 뒤 이동해 주세요.', 'error'); return; } if (isSettingsSectionNavigation(event)) return; if (dirtyRef.current) { if (!window.confirm('이관 매핑과 검토 중인 미리보기를 버리고 이동할까요?')) event.preventDefault(); else afterAcceptedNavigation(event, reset); } };
     const unload = (event: BeforeUnloadEvent) => { if (busyRef.current || dirtyRef.current) { event.preventDefault(); event.returnValue = ''; } };
-    window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload); return () => { window.removeEventListener('teamspace:navigate', guard); window.removeEventListener('beforeunload', unload); };
+    window.addEventListener('donefac:navigate', guard); window.addEventListener('beforeunload', unload); return () => { window.removeEventListener('donefac:navigate', guard); window.removeEventListener('beforeunload', unload); };
   }, [notify, reset]);
   async function execute(label: string, action: () => Promise<void>) { if (busyRef.current) return; busyRef.current = true; setPending(label); setError(''); setMappingNotice(''); try { await action(); } catch (cause) { if (active.current) setError(`${errorText(cause)} 입력과 기존 미리보기는 유지됩니다.`); } finally { busyRef.current = false; if (active.current) setPending(''); } }
   function change(next: MigrationConfiguration) { setConfiguration(next); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setObservedDraft(null); setError(''); setMappingNotice(''); setIdentityNotice(''); }
@@ -399,7 +399,7 @@ function ActorMigration(props: MigrationApplyProps) {
     await execute('이관 매핑 파일 준비 중…', async () => {
       const file = await post<MigrationMappingFile>('/migrations/mapping/export', { configuration });
       if (!active.current) return;
-      downloadDocument('teamspace-migration-mapping.json', JSON.stringify(file), 'application/json;charset=utf-8');
+      downloadDocument('donefac-migration-mapping.json', JSON.stringify(file), 'application/json;charset=utf-8');
       setMappingNotice('이관 매핑 JSON을 내려받았습니다.');
     });
     requestAnimationFrame(() => { if (opener.isConnected && document.activeElement === document.body) opener.focus({ preventScroll: true }); });

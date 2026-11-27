@@ -20,7 +20,7 @@ const attachments = (id: string) => `/attachments?${new URLSearchParams({ resour
 type Backup = WorkspaceSnapshot & { attachments: Attachment[]; revisions: DocRevision[] };
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-document-copy-http-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-document-copy-http-'));
   async function start() {
     const runtime = createApp({ dataDir, outboundWorker: false });
     const server = runtime.app.listen(0, '127.0.0.1');
@@ -136,7 +136,7 @@ test('document tree copy uses verified current and pinned file bodies, remaps li
   const before = await f.call<Backup>('/export');
   const uploads = () => readdirSync(join(f.dataDir, 'uploads')).sort();
   const beforeFiles = uploads();
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     db.exec("CREATE TRIGGER fail_copy_receipt BEFORE INSERT ON document_creation_requests BEGIN SELECT RAISE(ABORT, 'synthetic document copy receipt failure'); END");
     await f.call(copyPath, 500, 'POST', request);

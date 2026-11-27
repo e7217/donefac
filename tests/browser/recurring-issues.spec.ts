@@ -13,7 +13,7 @@ type RecurringFixture = { request: APIRequestContext; origin: string; advance: (
 
 const test = base.extend<{ recurring: RecurringFixture }>({
   recurring: async ({ playwright }, provide) => {
-    const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-recurring-browser-api-'));
+    const dataDir = mkdtempSync(join(tmpdir(), 'donefac-recurring-browser-api-'));
     let instant = '2026-01-04T14:59:59.999Z';
     const app = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false,
       recurringIssueIntervalMs: 25, recurringIssueClock: () => new Date(instant) });
@@ -70,7 +70,7 @@ test('360px에서 주간 반복 업무의 저장 결과를 다시 확인하고 �
   const template = await f.template('설정');
   const runnable = await f.template('생성');
   await page.setViewportSize({ width: 360, height: 820 });
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
   const submissions: unknown[] = [];
   await page.route('**/api/**', async route => {
     const source = new URL(route.request().url());

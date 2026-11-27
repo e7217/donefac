@@ -29,7 +29,7 @@ function assertHandoffConflict(preview: Pick<SchedulePreview, 'warnings' | 'team
 }
 
 async function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-schedule-row-edit-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-schedule-row-edit-'));
   async function start() {
     const service = createApp({ dataDir: dir, outboundWorker: false, deadlineReminderWorker: false });
     const server = service.app.listen(0, '127.0.0.1');
@@ -178,7 +178,7 @@ test('row edit stores both projected dates and the new dependency in one retriab
   ]);
   assert.ok(!preview.warnings.some(warning => warning.includes(`${predecessor.key} → ${successor.key}`)));
 
-  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     database.exec(`CREATE TRIGGER fail_paired_dependency BEFORE INSERT ON dependencies
       BEGIN SELECT RAISE(ABORT,'synthetic paired dependency failure'); END`);
@@ -476,7 +476,7 @@ test('a quick link can retime cross-project successors and keep the row undo sco
   assert.deepEqual(new Set(reviewed.followUpIssueIds), new Set(expected.keys()));
   assert.deepEqual(new Map(reviewed.changes.map(({ id, toStart, toEnd }) => [id, [toStart, toEnd]])), expected);
   assert.equal(reviewed.changes.find(change => change.id === downstream.id)?.projectId, receiving.id);
-  const undoScope = { 'X-Teamspace-Schedule-Undo-Scope': `issue:${predecessor.id}` };
+  const undoScope = { 'X-Donefac-Schedule-Undo-Scope': `issue:${predecessor.id}` };
   const apply = () => f.call<SchedulePasteApplyResult>(applyPath, 200, 'POST', { previewId: id }, actor, undoScope);
   await f.restart();
   const result = await apply();
@@ -871,7 +871,7 @@ test('row edit rolls back a failed dependency insert and rejects undo when its a
     dependency: { action: 'add', relatedIssue: versionOf(related), direction: 'predecessor', type: 'FF', lagDays: 0 },
   }));
   const before = await f.workspace();
-  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     database.exec(`CREATE TRIGGER fail_row_dependency BEFORE INSERT ON dependencies
       BEGIN SELECT RAISE(ABORT,'synthetic row dependency insert failure'); END`);

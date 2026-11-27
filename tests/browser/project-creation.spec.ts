@@ -7,7 +7,7 @@ test('360px에서 프로젝트를 한 번 만들고 응답과 목록 갱신이 �
   const name = `합성 새 프로젝트 ${randomUUID()}`;
   const key = `PJ${randomUUID().replaceAll('-', '').slice(0, 10)}`.toUpperCase();
   const actor = before.users[1].id;
-  await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), actor);
+  await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), actor);
   await page.setViewportSize({ width: 360, height: 800 });
   await page.goto(`/#/${before.projects[0].id}/overview`);
   await page.getByRole('button', { name: '메뉴 열기' }).click();

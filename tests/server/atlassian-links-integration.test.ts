@@ -23,7 +23,7 @@ const migratedJiraRoute = (url: string) => `${linksRoute}/resolve-migrated-jira-
 const searchRoute = (query: string) => `/search?${new URLSearchParams({ q: query })}`;
 
 function scratch(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-atlassian-integration-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-atlassian-integration-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   return directory;
 }
@@ -81,8 +81,8 @@ test('linked Jira and Confluence metadata is fetched on demand from the configur
   writeFileSync(wikiFile, wikiAuth+'\n', {mode:0o600});
   const {call,base:apiBase} = await appFixture(t, directory, {
     NODE_ENV:'test',
-    TEAMSPACE_JIRA_BASE_URL:base+'/jira', TEAMSPACE_JIRA_AUTH_FILE:jiraFile,
-    TEAMSPACE_CONFLUENCE_BASE_URL:base+'/wiki', TEAMSPACE_CONFLUENCE_AUTH_FILE:wikiFile,
+    DONEFAC_JIRA_BASE_URL:base+'/jira', DONEFAC_JIRA_AUTH_FILE:jiraFile,
+    DONEFAC_CONFLUENCE_BASE_URL:base+'/wiki', DONEFAC_CONFLUENCE_AUTH_FILE:wikiFile,
   });
   const before = await call<WorkspaceSnapshot>('/workspace');
   const jira = await call<AtlassianLink>(linksRoute,'POST',{targetType:'issue',targetId:'issue-1',product:'jira',url:base+'/jira/browse/LEG-17?focusedCommentId=9#comments'},201);

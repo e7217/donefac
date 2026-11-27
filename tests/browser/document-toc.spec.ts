@@ -73,7 +73,7 @@ test('360px 본문 목차는 같은 제목의 정확한 절을 열고 편집본�
     await expect(headingInToc(toc, firstHeading)).toBeVisible();
     await expect(headingInToc(toc, `${repeatedHeading} (1/2)`)).toBeVisible();
     await expect(headingInToc(toc, `${repeatedHeading} (2/2)`)).toBeVisible();
-    const options = editor.locator('[data-teamspace-node="documentToc"] summary');
+    const options = editor.locator('[data-donefac-node="documentToc"] summary');
     await options.click();
     await editor.getByRole('combobox', { name: '목차 배치', exact: true }).selectOption('flat');
     await expect(toc).toHaveAttribute('data-outline-layout', 'flat');
@@ -304,7 +304,7 @@ test('360px에서 제목 4~6을 편집하고 공동 편집과 고정 검토본�
 
     const enabled = await request.post(`/api/documents/${original.id}/collaboration/enable`, { headers, data: { expectedVersion: saved.version } });
     expect(enabled.ok(), await enabled.text()).toBe(true);
-    await peerContext.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), reviewer.id);
+    await peerContext.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), reviewer.id);
     const peer = await peerContext.newPage();
     await Promise.all([page.reload(), peer.goto(copied.href)]);
     const peerEditor = peer.locator('.docs-live-prose[contenteditable=true]');

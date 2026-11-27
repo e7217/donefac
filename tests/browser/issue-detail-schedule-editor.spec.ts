@@ -47,7 +47,7 @@ async function createFixture(request: APIRequestContext) {
 
 async function openBoardTicket(page: Page, anchor: Issue, related: Issue, actorId: string) {
   await page.setViewportSize({ width: 360, height: 820 });
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actorId);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actorId);
   const query = new URLSearchParams({ boardQuery: anchor.title });
   await page.goto(`/#/${anchor.projectId}/teamboard?${query}`);
   const board = page.getByRole('region', { name: '전체 프로젝트 보드', exact: true });

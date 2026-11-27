@@ -36,7 +36,7 @@ type Backup = WorkspaceSnapshot & {
 type Options = { method?: string; body?: unknown; headers?: Record<string, string> };
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-manual-gitlab-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-manual-gitlab-'));
   const calls: { method: string | undefined; path: string; credential: string | string[] | undefined }[] = [];
   const pipelineListQueries: Record<string, string>[] = [];
   const time = Date.now() - 60_000;

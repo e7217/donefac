@@ -69,7 +69,7 @@ test('360px에서 여러 행의 날짜 초안을 유지하고 공유 후행 일�
     }
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/gantt`);
     await page.getByLabel('간트 업무 검색', { exact: true }).fill(visiblePrefix);
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });

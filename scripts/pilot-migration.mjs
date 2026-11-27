@@ -15,9 +15,9 @@ import { CONFLUENCE_FINDINGS_MAX_BYTES, CONFLUENCE_FINDINGS_VERSION, combinedCon
 import { createJiraPlanCoverage } from './pilot-migration-jira-plan.mjs';
 import { backupAndRestoreRehearsal, startRehearsalPilot } from './pilot-migration-runtime.mjs';
 
-const runFormat = 'teamspace-migration-rehearsal';
-const reportFormat = 'teamspace-migration-rehearsal-report';
-const profileFormat = 'teamspace-migration-source-profile';
+const runFormat = 'donefac-migration-rehearsal';
+const reportFormat = 'donefac-migration-rehearsal-report';
+const profileFormat = 'donefac-migration-source-profile';
 const profileVersion = 2;
 const jsonLimit = 1024 * 1024;
 const packageLimit = 20;
@@ -322,7 +322,7 @@ async function loadRun(directory) {
   const direct = await embeddedRunDirectory(input);
   const root = direct ? dirname(input) : input;
   const workspace = direct ? input : join(input, 'workspace');
-  if (!(await lstat(workspace)).isDirectory() || !(await lstat(join(workspace, 'teamspace.sqlite'))).isFile()) {
+  if (!(await lstat(workspace)).isDirectory() || !(await lstat(join(workspace, 'donefac.sqlite'))).isFile()) {
     throw new Error('리허설 워크스페이스를 확인해 주세요.');
   }
   const embedded = direct ?? await embeddedRunDirectory(workspace);

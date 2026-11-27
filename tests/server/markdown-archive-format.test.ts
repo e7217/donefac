@@ -13,7 +13,7 @@ const rootPath = 'documents/first-설계.md';
 const childPath = 'documents/second-검토.md';
 const nativeFilePath = 'attachments/exact.bin';
 const nativeManifest = {
-  format: 'teamspace-document-markdown', schemaVersion: 1,
+  format: 'donefac-document-markdown', schemaVersion: 1,
   documents: [
     { id: 'child', parentId: 'root', path: childPath, title: '검토' },
     { id: 'root', parentId: null, path: rootPath, title: '설계' },
@@ -33,7 +33,7 @@ function nativeEntries(manifest: unknown = nativeManifest) {
 
 test('Markdown ZIP reader validates native ownership, hashes, diagnostic scope and parent order', async () => {
   const source = await readMarkdownArchive(archive(nativeEntries()));
-  assert.equal(source.format, 'teamspace');
+  assert.equal(source.format, 'donefac');
   assert.deepEqual(source.pages, [
     { path: rootPath, parentPath: null, title: '설계', markdown: nativeEntries()[rootPath] },
     { path: childPath, parentPath: rootPath, title: '검토', markdown: '# 검토' },
@@ -50,7 +50,7 @@ test('Markdown ZIP reader stops at broken native checksums, incomplete data, dup
   delete (missing as Record<string, string | Buffer>)[childPath];
   for (const entries of [nativeEntries(cyclic), nativeEntries(duplicate), nativeEntries(wrongOwner), missing,
     { ...nativeEntries(), [nativeFilePath]: Buffer.from([0, 255, 1, 89]) }, { ...nativeEntries(), 'extra.md': '# unlisted' },
-    { ...nativeEntries(), 'manifest.json': '{"format":"teamspace-document-markdown",' },
+    { ...nativeEntries(), 'manifest.json': '{"format":"donefac-document-markdown",' },
   ]) {
     await assert.rejects(readMarkdownArchive(archive(entries)), { status: 400 });
   }

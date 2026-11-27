@@ -45,7 +45,7 @@ function mapSourceMembers(options: MigrationOptions, targets: Readonly<Record<st
 }
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-jira-saved-views-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-jira-saved-views-'));
   const runtime = createApp({ dataDir, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   t.after(async () => {
@@ -669,7 +669,7 @@ test('Jira priority saved views match complete imported categories, preserve liv
   assert.deepEqual(await f.request(`/views?projectId=${projectId}`), [view]);
 });
 
-test('Jira priority queries accept exact Teamspace values in a native project', async t => {
+test('Jira priority queries accept exact Donefac values in a native project', async t => {
   const f = await fixture(t);
   const { id: projectId } = await f.request<Project>('/projects', 'POST', { name: 'Native priorities', key: 'LOCALPRIO' }, 201);
   const high = await f.request<Issue>('/issues', 'POST', { projectId, title: 'High local priority', priority: 'high' }, 201);

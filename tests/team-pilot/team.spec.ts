@@ -46,17 +46,17 @@ interface Peer {
 const TEAM_SIZE = 20;
 const OPEN_BATCH_SIZE = 4;
 const SYNC_TIMEOUT = 25_000;
-const SESSION_COOKIE = '__Host-teamspace-pilot';
+const SESSION_COOKIE = '__Host-donefac-pilot';
 const state = (page: Page) => page.locator('.docs-collaboration-state');
 const editor = (page: Page) => page.locator('.docs-live-prose');
 const presence = (page: Page) => page.locator('.docs-collaboration-presence');
 const marker = (round: number, peer: Peer) => `[team-edit-${round}-${peer.ordinal}]`;
 const issueReference = (page: Page, issueId: string) => editor(page)
-  .locator(`[data-teamspace-node="issueReference"][data-reference-id="${issueId}"]`)
+  .locator(`[data-donefac-node="issueReference"][data-reference-id="${issueId}"]`)
   .getByRole('button', { name: /^참조 업무 열기 / });
 
 function loadFixture(): Fixture {
-  const raw = process.env.TEAMSPACE_PILOT_TEAM_FIXTURE;
+  const raw = process.env.DONEFAC_PILOT_TEAM_FIXTURE;
   if (!raw) throw new Error('Use a team pilot command to create an isolated HTTPS fixture.');
   const fixture = JSON.parse(raw) as Fixture;
   if (!Array.isArray(fixture.actorIds) || fixture.actorIds.length !== TEAM_SIZE || new Set(fixture.actorIds).size !== TEAM_SIZE ||
@@ -72,7 +72,7 @@ function loadFixture(): Fixture {
 }
 
 async function loadAccessCode() {
-  const filename = process.env.TEAMSPACE_PILOT_TEST_ACCESS_FILE;
+  const filename = process.env.DONEFAC_PILOT_TEST_ACCESS_FILE;
   if (!filename || !isAbsolute(filename)) throw new Error('An isolated pilot access file is required.');
   const accessCode = (await readFile(filename, 'utf8').catch(() => {
     throw new Error('The isolated pilot access file could not be read.');
@@ -422,7 +422,7 @@ async function verifyGantt(context: BrowserContext, projectId: string, traffic: 
 
 test('twenty individually signed-in HTTPS browser actors collaborate, reconnect, and recover a stale draft', async ({ browser, baseURL }) => {
   const fixture = loadFixture();
-  if (!baseURL || !/^https:\/\/127\.0\.0\.1:\d+$/.test(baseURL) || baseURL !== new URL(process.env.TEAMSPACE_PILOT_TEST_URL!).origin) {
+  if (!baseURL || !/^https:\/\/127\.0\.0\.1:\d+$/.test(baseURL) || baseURL !== new URL(process.env.DONEFAC_PILOT_TEST_URL!).origin) {
     throw new Error('The isolated HTTPS pilot origin is required.');
   }
   test.setTimeout((fixture.seconds + 240) * 1000);
@@ -441,7 +441,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
       const opened = await Promise.allSettled(fixture.actorIds.slice(first, first + OPEN_BATCH_SIZE).map(async (actorId, index) => {
         const context = await browser.newContext({ baseURL, ignoreHTTPSErrors: true, viewport: { width: 1024, height: 768 } });
         contexts.push(context);
-        await context.addInitScript(value => localStorage.setItem('teamspace.actor', value), actorId);
+        await context.addInitScript(value => localStorage.setItem('donefac.actor', value), actorId);
         const page = await context.newPage();
         const peer: Peer = { actorId, ordinal: first + index + 1, context, page, connections: 0, closes: 0,
           errors: [], welcomedEpochs: [], sentUpdates: new Set(), acknowledgments: new Set() };

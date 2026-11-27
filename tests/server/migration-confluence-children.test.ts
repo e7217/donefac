@@ -84,7 +84,7 @@ test('Confluence children preserves unknown settings, excerpt modes, unresolved 
 });
 
 async function app(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-confluence-children-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-confluence-children-'));
   const service = createApp({ dataDir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {

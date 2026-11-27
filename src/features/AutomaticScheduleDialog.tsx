@@ -55,8 +55,8 @@ export function AutomaticScheduleDialog({ data, projectId, actorId, undoScope, s
       else afterAcceptedNavigation(event, onClose);
     };
     const unload = (event: BeforeUnloadEvent) => { if (busyRef.current || dirtyRef.current) { event.preventDefault(); event.returnValue = ''; } };
-    window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
-    return () => { window.removeEventListener('teamspace:navigate', guard); window.removeEventListener('beforeunload', unload); };
+    window.addEventListener('donefac:navigate', guard); window.addEventListener('beforeunload', unload);
+    return () => { window.removeEventListener('donefac:navigate', guard); window.removeEventListener('beforeunload', unload); };
   }, [discardPrompt, notify, onClose]);
 
   function close() {

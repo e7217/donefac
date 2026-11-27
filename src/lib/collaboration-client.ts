@@ -121,7 +121,7 @@ function validateLegacyPending(update: string, schemaVersion: CollaborationSchem
     return bytes;
   } finally { candidate.destroy(); }
 }
-const prefix = (actorId: string, documentId: string) => `teamspace:collaboration-pending:${actorId}:${documentId}:`;
+const prefix = (actorId: string, documentId: string) => `donefac:collaboration-pending:${actorId}:${documentId}:`;
 function pendingSnapshotKeys(actorId: string, documentId: string): string[] {
   const own = prefix(actorId, documentId);
   const keys = new Set<string>();
@@ -573,7 +573,7 @@ export class CollaborationClient {
   }
   exportPending() {
     const caches = pendingSnapshots(this.actorId, this.documentId);
-    return { format: 'teamspace-collaboration-recovery', schemaVersion: COLLABORATION_SCHEMA, documentId: this.documentId, actorId: this.actorId, epoch: this.state.epoch, update: encodeBytes(Y.encodeStateAsUpdate(this.doc)), pending: this.localSequence > this.acknowledgedSequence, caches };
+    return { format: 'donefac-collaboration-recovery', schemaVersion: COLLABORATION_SCHEMA, documentId: this.documentId, actorId: this.actorId, epoch: this.state.epoch, update: encodeBytes(Y.encodeStateAsUpdate(this.doc)), pending: this.localSequence > this.acknowledgedSequence, caches };
   }
   destroy() {
     this.persistPending(); this.disposed = true;

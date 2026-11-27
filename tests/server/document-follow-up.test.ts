@@ -38,7 +38,7 @@ const pathFor = (documentId: string) => `/documents/${documentId}/follow-up-issu
 const decisionPathFor = (documentId: string) => `/documents/${documentId}/decision-links`;
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-document-follow-up-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-document-follow-up-'));
   async function start() {
     const runtime = createApp({ dataDir: directory, outboundWorker: false });
     const server = runtime.app.listen(0, '127.0.0.1');
@@ -247,7 +247,7 @@ test('checklist work reads exact item evidence across metadata revisions and ski
   assert.ok(revisionId);
   const revision = before.find(value => value.id === revisionId);
   assert.ok(revision);
-  const db = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(directory, 'donefac.sqlite'));
   try {
     const update = db.prepare('UPDATE revisions SET json=? WHERE id=?');
     for (const mismatched of [{ ...revision, title: '다른 개정 제목' }, { ...revision, confluenceSourceVersion: 1 },
@@ -331,7 +331,7 @@ test('stable checklist IDs follow saved rewording and reorder while the pinned e
 
   const revisionId = one.link.documentSource!.revisionId;
   const pin = beforeReading.find(revision => revision.id === revisionId)!;
-  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const observer = new DatabaseSync(join(directory, 'donefac.sqlite'));
   try {
     const writeDocument = observer.prepare('UPDATE documents SET json=? WHERE id=?');
     writeDocument.run(JSON.stringify({ ...updated, content: checklistBody(checklistList(second, changed, changed)) }), updated.id);
@@ -397,7 +397,7 @@ test('anonymous checklist evidence follows only an unambiguous consecutive saved
 
   const revisions = await call<DocRevision[]>(`/documents/${original.id}/revisions`);
   const observed = revisions.find(revision => revision.version === shifted.version)!;
-  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const observer = new DatabaseSync(join(directory, 'donefac.sqlite'));
   try {
     const writeDocument = observer.prepare('UPDATE documents SET json=? WHERE id=?');
     const later = { ...updated, version: updated.version + 40 };
@@ -562,7 +562,7 @@ test('follow-up links roll back with the issue number and retry safely across do
   const document = await call<DocPage>('/documents', 'POST', { projectId, title: '합성 재시도 결정', content }, 201);
   const input = followUp(document, projectId, '한 번만 만들 합성 후속 업무');
   const before = await call<WorkspaceSnapshot>('/workspace');
-  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const observer = new DatabaseSync(join(directory, 'donefac.sqlite'));
   try {
     const nextNumber = () => observer.prepare('SELECT next_number FROM issue_sequences WHERE project_id = ?').get(projectId)?.next_number;
     const number = nextNumber();
@@ -640,7 +640,7 @@ test('sentence comment follow-ups pin the original revision and authorize its co
   const revisionsPath = `/documents/${document.id}/revisions`;
   const revisions = await call<DocRevision[]>(revisionsPath);
 
-  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const observer = new DatabaseSync(join(directory, 'donefac.sqlite'));
   try {
     const sequence = () => observer.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(projectId);
     const number = sequence();
@@ -720,7 +720,7 @@ test('sentence comment follow-ups reject forged, unrelated and damaged original 
   for (const candidate of forged) await call(path, 'POST', { ...input, sourceComment: candidate }, 404);
   await call(path, 'POST', { ...input, sourceComment: { ...sourceComment, commentId: ordinary.id } }, 400);
 
-  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const observer = new DatabaseSync(join(directory, 'donefac.sqlite'));
   try {
     const update = observer.prepare('UPDATE revisions SET json=? WHERE id=?');
     const original = revisions.find(revision => revision.id === source.revisionId);
@@ -845,7 +845,7 @@ test('a missing source snapshot is recorded in the same transaction as its decis
   const doc = await call<DocPage>('/documents', 'POST', { projectId, title: '저장본 연결 검증', content }, 201);
   const sourceSelection = { from: 1, to: doc.plainText.length + 1, text: doc.plainText };
   const input = { ...followUp(doc, projectId, '저장본과 함께 추가할 업무'), sourceSelection };
-  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const observer = new DatabaseSync(join(directory, 'donefac.sqlite'));
   try {
     // A saved body without an exact history row exercises the same insertion path as pre-checkpoint collaboration.
     observer.prepare('DELETE FROM revisions WHERE document_id=?').run(doc.id);
@@ -1056,7 +1056,7 @@ test('attaching a sentence comment to an existing issue preserves its original e
   await call(path, 'POST', input, 403, narrow);
   assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), before);
 
-  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const observer = new DatabaseSync(join(directory, 'donefac.sqlite'));
   try {
     observer.exec(`CREATE TRIGGER fail_comment_decision_link_receipt BEFORE INSERT ON document_decision_link_requests
       BEGIN SELECT RAISE(ABORT, 'synthetic comment decision link receipt failure'); END`);
@@ -1115,7 +1115,7 @@ test('failure at an existing-issue receipt rolls back its source snapshot, relat
   const path = decisionPathFor(doc.id);
   const revisionsPath = `/documents/${doc.id}/revisions`;
   const before = await call<WorkspaceSnapshot>('/workspace');
-  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const observer = new DatabaseSync(join(directory, 'donefac.sqlite'));
   try {
     // A saved collaboration version may exist before its corresponding checkpoint.
     observer.prepare('DELETE FROM revisions WHERE document_id=?').run(doc.id);

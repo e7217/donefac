@@ -72,9 +72,9 @@ export function FieldBreakdownPresets({ projectId, actorId, currentQuery, report
       void reload();
     };
     const timer = window.setTimeout(() => void reload(), 0);
-    window.addEventListener('teamspace:workspace-imported', imported);
+    window.addEventListener('donefac:workspace-imported', imported);
     return () => {
-      window.removeEventListener('teamspace:workspace-imported', imported);
+      window.removeEventListener('donefac:workspace-imported', imported);
       window.clearTimeout(timer);
       listRequest.current?.abort();
       writeRequest.current?.abort();
@@ -97,10 +97,10 @@ export function FieldBreakdownPresets({ projectId, actorId, currentQuery, report
       event.preventDefault();
       event.returnValue = '';
     };
-    window.addEventListener('teamspace:navigate', navigate);
+    window.addEventListener('donefac:navigate', navigate);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', navigate);
+      window.removeEventListener('donefac:navigate', navigate);
       window.removeEventListener('beforeunload', unload);
     };
   }, [dirty, editorOpen, notify]);

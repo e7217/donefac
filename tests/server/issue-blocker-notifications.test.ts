@@ -17,7 +17,7 @@ const event = (id: string, kind: 'issue-block-added' | 'issue-block-resolved', d
   ({ id, actor, kind, createdAt: timestamp, detail });
 
 function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-blocker-notifications-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-blocker-notifications-'));
   const store = new Store(directory);
   t.after(() => { store.db.close(); rmSync(directory, { recursive: true, force: true }); });
   new SourcePreservationService(store);
@@ -73,7 +73,7 @@ function fixture(t: TestContext) {
 function relation(source: Issue, target: Issue, changes: Partial<IssueRelation> = {}): IssueRelation {
   return {
     id: `${source.id}:${target.id}`, sourceIssueId: source.id, targetIssueId: target.id,
-    origin: 'teamspace', type: 'blocks', version: 1, createdAt: timestamp, ...changes,
+    origin: 'donefac', type: 'blocks', version: 1, createdAt: timestamp, ...changes,
   };
 }
 

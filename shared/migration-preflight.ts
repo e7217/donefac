@@ -77,7 +77,7 @@ export function buildMigrationPreflightReport(preview: MigrationPreview, package
   const configuredUsers = Object.values(configuration.users);
   const mapped = configuredUsers.filter(value => typeof value === 'string' && value.length > 0).length;
   return {
-    format: 'teamspace-migration-preflight' as const,
+    format: 'donefac-migration-preflight' as const,
     version: 1 as const,
     preview: { id, version, createdAt, expiresAt, canApply },
     mode,

@@ -18,7 +18,7 @@ const path = (project = projectId) => `/projects/${project}/issues/paste`;
 type Conflict = { details: { reason: string } };
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-issue-paste-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-issue-paste-'));
   async function start() {
     const runtime = createApp({ dataDir: directory, outboundWorker: false });
     const server = runtime.app.listen(0, '127.0.0.1');
@@ -26,7 +26,7 @@ async function fixture(t: TestContext) {
     return { runtime, server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/api` };
   }
   let service = await start();
-  const database = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(directory, 'donefac.sqlite'));
   async function stop() {
     service.server.closeAllConnections();
     try { await new Promise<void>((resolve, reject) => service.server.close(error => error ? reject(error) : resolve())); }

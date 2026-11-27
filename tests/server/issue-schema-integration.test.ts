@@ -11,7 +11,7 @@ import type { ApiKeyCreated, AutomaticSchedulePreview, CustomFieldDefinition, Is
 
 type Backup = WorkspaceSnapshot & { schemaVersion: number };
 async function fixture() {
-  const dir=mkdtempSync(join(tmpdir(),'teamspace-schema-integration-'));
+  const dir=mkdtempSync(join(tmpdir(),'donefac-schema-integration-'));
   const service=createApp({dataDir:dir});const server=service.app.listen(0,'127.0.0.1');await once(server,'listening');
   const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
   return {

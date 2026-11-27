@@ -30,7 +30,7 @@ const parentLabel = ({ id, key, title }: Issue) => ({ id, key, title });
 const planLabel = ({ id, name }: PlanningItem) => ({ id, name });
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-issue-bulk-edit-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-issue-bulk-edit-'));
   async function start() {
     const runtime = createApp({ dataDir, outboundWorker: false });
     const listener = runtime.app.listen(0, '127.0.0.1');
@@ -49,7 +49,7 @@ async function fixture(t: TestContext) {
     };
   }
   let service = await start();
-  const database = new DatabaseSync(join(dataDir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(dataDir, 'donefac.sqlite'));
   t.after(async () => {
     database.close();
     await service.close();

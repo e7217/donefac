@@ -105,10 +105,10 @@ export function ReportMeetingDraftDialog<Report extends ReportPage>({ report, in
       event.preventDefault();
       event.returnValue = '';
     }
-    window.addEventListener('teamspace:navigate', guard);
+    window.addEventListener('donefac:navigate', guard);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', guard);
+      window.removeEventListener('donefac:navigate', guard);
       window.removeEventListener('beforeunload', unload);
     };
   }, [canDiscard, dirty, notify, onClose, stage.kind]);

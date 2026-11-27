@@ -31,7 +31,7 @@ test('360px에서 간트와 티켓 상세로 다른 프로젝트의 차단 업�
 
   try {
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${sourceProject.id}/gantt?scope=team`);
     const projectFilter = page.getByRole('combobox', { name: '프로젝트 필터', exact: true });
     const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });

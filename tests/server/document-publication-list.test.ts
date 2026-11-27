@@ -34,7 +34,7 @@ const privateBody = 'RAW_DRAFT_BODY_DO_NOT_LIST';
 const privateNote = 'PRIVATE_REVIEW_NOTE_DO_NOT_LIST';
 
 async function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-publication-list-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-publication-list-'));
   const service = createApp({ dataDir: dir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   await once(server, 'listening');

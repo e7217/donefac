@@ -16,7 +16,7 @@ const search = (page: Page) => page.getByLabel('간트 업무 검색', { exact: 
 const workspaceUrl = (url: URL) => url.pathname === '/api/workspace';
 const pollUrl = (url: URL) => workspaceUrl(url) && url.searchParams.has('ganttSince');
 const fullUrl = (url: URL) => workspaceUrl(url) && !pollUrl(url);
-const revision = (response: Response) => response.headers()['x-teamspace-gantt-revision'];
+const revision = (response: Response) => response.headers()['x-donefac-gantt-revision'];
 
 async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);
@@ -66,7 +66,7 @@ async function fixture(request: APIRequestContext) {
 
 async function openChart(page: Page, hash: string, query: string, actorId: string) {
   await page.clock.install();
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actorId);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actorId);
   await page.goto(`/${hash}`);
   await expect(chart(page)).toBeVisible();
   expect(await page.evaluate(() => document.visibilityState)).toBe('visible');

@@ -16,13 +16,13 @@ const reviewOnly = /pilot:rehearsal review 명령/;
 const teamAccess = /이관 리허설에는 팀 접속 설정을 사용할 수 없습니다/;
 
 function temporary(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-rehearsal-entrypoint-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-rehearsal-entrypoint-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   return directory;
 }
 
 function assertStoreUnopened(directory: string) {
-  for (const name of ['teamspace.sqlite', '.credential-key']) assert.equal(existsSync(join(directory, name)), false);
+  for (const name of ['donefac.sqlite', '.credential-key']) assert.equal(existsSync(join(directory, name)), false);
 }
 
 test('marked data refuses ordinary API startup before opening SQLite, even for malformed markers', t => {
@@ -38,7 +38,7 @@ test('marked data refuses ordinary API startup before opening SQLite, even for m
 
   const dataDir = join(scratch, 'unmarked');
   const ordinary = createApp({ dataDir, seed: false, outboundWorker: false, deadlineReminderWorker: false, recurringIssueWorker: false });
-  try { assert.ok(existsSync(join(dataDir, 'teamspace.sqlite'))); }
+  try { assert.ok(existsSync(join(dataDir, 'donefac.sqlite'))); }
   finally { ordinary.close(); }
 });
 
@@ -49,9 +49,9 @@ test('pilot startup refuses marked data and refuses team access in rehearsal mod
     const result = spawnSync('bash', ['scripts/pilot-lock.sh', dataDir, process.execPath, '--import', 'tsx', 'server/pilot.ts'], {
       cwd: repo, encoding: 'utf8', timeout: 12_000,
       env: {
-        NODE_ENV: 'test', PATH: process.env.PATH, LANG: process.env.LANG, TEAMSPACE_PILOT_PORT: '0',
-        TEAMSPACE_PILOT_ORIGIN: 'https://example.invalid', TEAMSPACE_PILOT_ACCESS_FILE: join(dataDir, 'absent-key'),
-        ...(rehearsal ? { TEAMSPACE_PILOT_MIGRATION_REHEARSAL: '1' } : {}),
+        NODE_ENV: 'test', PATH: process.env.PATH, LANG: process.env.LANG, DONEFAC_PILOT_PORT: '0',
+        DONEFAC_PILOT_ORIGIN: 'https://example.invalid', DONEFAC_PILOT_ACCESS_FILE: join(dataDir, 'absent-key'),
+        ...(rehearsal ? { DONEFAC_PILOT_MIGRATION_REHEARSAL: '1' } : {}),
       },
     });
     assert.ifError(result.error);
@@ -79,7 +79,7 @@ test('isolated app startup forces demo data and scheduled work off for a rehears
     assert.equal(deadline.mock.callCount(), 0);
     assert.equal(recurring.mock.callCount(), 0);
   } finally { service.close(); }
-  const store = new DatabaseSync(join(dataDir, 'teamspace.sqlite'), { readOnly: true });
+  const store = new DatabaseSync(join(dataDir, 'donefac.sqlite'), { readOnly: true });
   try { assert.equal(store.prepare('SELECT count(*) AS count FROM projects').get()?.count, 0); }
   finally { store.close(); }
 });

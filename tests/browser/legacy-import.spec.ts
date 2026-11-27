@@ -109,9 +109,9 @@ test('파일·분석 설정은 오류와 다중 탐색 거절에서 보존되고
   await expect(settings.getByRole('alert')).toContainText('선택한 파일과 입력은 유지됩니다'); await expect(instance).toHaveValue(f.instanceKey);
   expect(await file.evaluate(value => (value as HTMLInputElement).files?.[0]?.name)).toBe('invalid.xml');
   page.once('dialog', value => value.accept());
-  expect(await page.evaluate(() => { const laterGuard = (event: Event) => event.preventDefault(); window.addEventListener('teamspace:navigate', laterGuard); try { return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })); } finally { window.removeEventListener('teamspace:navigate', laterGuard); } })).toBe(false);
+  expect(await page.evaluate(() => { const laterGuard = (event: Event) => event.preventDefault(); window.addEventListener('donefac:navigate', laterGuard); try { return window.dispatchEvent(new Event('donefac:navigate', { cancelable: true })); } finally { window.removeEventListener('donefac:navigate', laterGuard); } })).toBe(false);
   await expect(instance).toHaveValue(f.instanceKey); expect(await file.evaluate(value => (value as HTMLInputElement).files?.length)).toBe(1);
-  page.once('dialog', value => value.accept()); expect(await page.evaluate(() => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })))).toBe(true);
+  page.once('dialog', value => value.accept()); expect(await page.evaluate(() => window.dispatchEvent(new Event('donefac:navigate', { cancelable: true })))).toBe(true);
   await expect(instance).toHaveValue(''); expect(await file.evaluate(value => (value as HTMLInputElement).files?.length)).toBe(0);
   await instance.fill(f.instanceKey); await file.setInputFiles({ name: f.filename, mimeType: 'text/csv', buffer: csv([['Issue key', 'Summary'], ['OLD-1', '합성 대기 업무']]) });
   let release = () => {}; const gate = new Promise<void>(resolve => { release = resolve; });
@@ -119,7 +119,7 @@ test('파일·분석 설정은 오류와 다중 탐색 거절에서 보존되고
   await page.route('**/api/legacy-import/packages?*', async route => { if (route.request().method() !== 'POST') return route.continue(); const response = await route.fetch(); reportHeld(); await gate; await route.fulfill({ response }); });
   try {
     await settings.getByRole('button', { name: '원본 분석 시작', exact: true }).click(); await held;
-    await expect(instance).toBeDisabled(); expect(await page.evaluate(() => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })))).toBe(false);
+    await expect(instance).toBeDisabled(); expect(await page.evaluate(() => window.dispatchEvent(new Event('donefac:navigate', { cancelable: true })))).toBe(false);
     const actor = page.getByLabel('작업자 선택', { exact: true }), previous = await actor.inputValue();
     await actor.selectOption(f.workspace.users.find(value => value.id !== previous)!.id); await expect(actor).toHaveValue(previous);
     release(); await expect(settings.locator('.legacy-package-item').filter({ hasText: f.filename })).toBeVisible();

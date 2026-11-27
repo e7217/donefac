@@ -21,7 +21,7 @@ const layout = (weights: number[], border: boolean, ...content: RichContent[]): 
 });
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-document-column-layout-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-document-column-layout-'));
   const app = createApp({ dataDir: directory, outboundWorker: false });
   const server = app.app.listen(0, '127.0.0.1');
   t.after(async () => {

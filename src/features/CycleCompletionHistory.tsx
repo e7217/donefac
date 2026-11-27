@@ -47,8 +47,8 @@ export function CycleCompletionHistory(props: HistoryProps) {
   const [expanded, setExpanded] = useState(false);
   useEffect(() => {
     const close = () => setExpanded(false);
-    window.addEventListener('teamspace:workspace-imported', close);
-    return () => window.removeEventListener('teamspace:workspace-imported', close);
+    window.addEventListener('donefac:workspace-imported', close);
+    return () => window.removeEventListener('donefac:workspace-imported', close);
   }, []);
 
   return <section className="cycle-history" aria-labelledby={headingId}>

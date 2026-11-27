@@ -24,7 +24,7 @@ test('읽지 않을 알림을 보관하고 받은 알림으로 되돌릴 수 있
     expect(notification).toBeDefined();
     const label = notification.targetLabel;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), recipient.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), recipient.id);
     await page.goto(`/#/${project.id}/issues`);
     const trigger = page.getByRole('button', { name: '알림', exact: true });
     const popup = page.getByRole('dialog', { name: '팀 알림', exact: true });
@@ -79,7 +79,7 @@ test('팀 알림에서 새 업무를 열고 미저장 문서의 이동을 취소
   try {
     const docRoute = `/#/${project.id}/documents/${doc.id}`;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), recipient.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), recipient.id);
     await page.goto(docRoute);
     const selected = page.getByLabel('작업자 선택', { exact: true });
     await expect(selected).toHaveValue(recipient.id);

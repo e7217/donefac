@@ -162,7 +162,7 @@ export function Issues(props: FeatureProps & {
   const projectViews = loadedViews?.projectId === projectId && loadedViews.snapshot === data.savedViews ? loadedViews.values : workspaceViews;
   const selectedView = savedViewId ? projectViews.find(value => value.id === savedViewId) : undefined;
   const unavailableView = Boolean(savedViewId && !selectedView);
-  const layoutKey = !actorId || isAll(projectId) ? null : `teamspace:project-issue-layout:${JSON.stringify([actorId, projectId, data.restoreGeneration ?? null])}`;
+  const layoutKey = !actorId || isAll(projectId) ? null : `donefac:project-issue-layout:${JSON.stringify([actorId, projectId, data.restoreGeneration ?? null])}`;
   const [appliedRouteView, setAppliedRouteView] = useState<{ projectId: string; layoutKey: string | null; id: string | null; definition?: string }>();
   const [issueLayout, setIssueLayout] = useState(defaultLayout);
   const { layout: view, boardGrouping, showEmptyAssignees } = issueLayout;
@@ -281,7 +281,7 @@ export function Issues(props: FeatureProps & {
   const selectedCapacity = capacitySelection?.projectId === projectId ? capacities.get(capacitySelection.statusId) : undefined;
   const issueTypes = isAll(projectId) ? [...new Map(data.projects.flatMap(project => projectIssueTypes(data, project.id, { includeArchived: true })).map(item => [item.id, item])).values()] : projectIssueTypes(data, projectId, { includeArchived: true });
   function beginCreate(status: IssueStatus, opener: HTMLButtonElement, assigneeId?: string | null) {
-    if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
+    if (!window.dispatchEvent(new Event('donefac:navigate', { cancelable: true }))) return;
     setCreation({ status, assigneeId, opener });
   }
   function closeCreation() {
@@ -292,7 +292,7 @@ export function Issues(props: FeatureProps & {
     });
   }
   function beginPaste() {
-    if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
+    if (!window.dispatchEvent(new Event('donefac:navigate', { cancelable: true }))) return;
     setPasteScope(currentPasteScope);
   }
   const activeFilters = selectedStatuses.length > 0 || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter || planning || gitlab || priorities || labels || reporter);
@@ -361,7 +361,7 @@ export function Issues(props: FeatureProps & {
     } catch { /* The current view still works without browser storage. */ }
   }
   function clearFilters() {
-    if (!window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
+    if (!window.dispatchEvent(new Event('donefac:navigate', {cancelable:true}))) return;
     setQuery(''); setStatus('all'); setAssignee('all'); setType('all');
     setProjectFilters(previous => {
       const next = new Map(previous);
@@ -392,7 +392,7 @@ export function Issues(props: FeatureProps & {
   function toggleBulkEdit() {
     if (bulk.active) { closeBulkEdit(); return; }
     if (drag.current) return;
-    if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
+    if (!window.dispatchEvent(new Event('donefac:navigate', { cancelable: true }))) return;
     setOrderEditProject(null);
     bulk.open();
     if (view === 'board') requestAnimationFrame(() => {
@@ -426,7 +426,7 @@ export function Issues(props: FeatureProps & {
 
   function openStatusEdit(issue: Issue, current: WorkflowStatus, choices: WorkflowStatus[], opener: HTMLButtonElement) {
     if (!choices.length || pendingMutation.current || statusChooserOpen.current || drag.current) return;
-    if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
+    if (!window.dispatchEvent(new Event('donefac:navigate', { cancelable: true }))) return;
     statusChooserOpen.current = true;
     setStatusEdit({ issue, current, choices, workflowVersion: projectWorkflow(data, issue.projectId).version, opener });
   }
@@ -654,7 +654,7 @@ export function Issues(props: FeatureProps & {
     const rows = selectionOnly ? issues.filter(issue => bulk.selectedIds.has(issue.id)) : issues;
     if (!rows.length) return;
     const projectKey = data.projects.find(project => project.id === projectId)?.key ?? 'all';
-    downloadText(`teamspace-issues-${projectKey}${selectionOnly ? '-selected' : ''}.csv`, formatIssueCsv(data, rows), 'text/csv;charset=utf-8');
+    downloadText(`donefac-issues-${projectKey}${selectionOnly ? '-selected' : ''}.csv`, formatIssueCsv(data, rows), 'text/csv;charset=utf-8');
   }
 
   return <div className="issues-feature" onFocusCapture={event => {

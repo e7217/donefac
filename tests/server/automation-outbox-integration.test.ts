@@ -12,7 +12,7 @@ import { Store } from '../../server/store.js';
 import type { AutomationPreview, AutomationRule, AutomationRun, GitlabIssueRefreshResult, GitlabLink, GitlabSettings, GitlabSyncResult, GitlabWebhookStatus, Issue, IssueAutomationRunPage, ProjectWorkflow, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(){
-  const dir=mkdtempSync(join(tmpdir(),'teamspace-automation-outbox-')),service=createApp({dataDir:dir,outboundWorker:false});
+  const dir=mkdtempSync(join(tmpdir(),'donefac-automation-outbox-')),service=createApp({dataDir:dir,outboundWorker:false});
   const server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as {port:number}).port}`;
   const observer=new Store(dir);
   async function call<T=any>(path:string,method='GET',body?:unknown,headers:Record<string,string>={}){const response=await fetch(`${base}/api${path}`,{method,headers:{'Content-Type':'application/json',...headers},...(body===undefined?{}:{body:JSON.stringify(body)})});return{status:response.status,data:await response.json() as T};}
@@ -844,7 +844,7 @@ test('API keys cannot configure automation or destinations and outbound events r
 });
 
 test('Store change listeners join implicit writes and preserve separate async mutation contexts',async()=>{
-  const dir=mkdtempSync(join(tmpdir(),'teamspace-store-observer-')),store=new Store(dir);try{
+  const dir=mkdtempSync(join(tmpdir(),'donefac-store-observer-')),store=new Store(dir);try{
     store.put('activities',{id:'seed'});const stop=store.onChange(change=>{store.put('settings_shadow',{id:'shadow',context:change.context});throw new Error('reject event enqueue');},['activities']);store.db.exec('CREATE TABLE settings_shadow(id TEXT PRIMARY KEY,json TEXT NOT NULL)');
     assert.throws(()=>store.withMutationContext({actorId:'first',origin:'user'},()=>store.put('activities',{id:'seed',value:2})),/reject event/);assert.deepEqual(store.get('activities','seed'),{id:'seed'});assert.equal(store.all('settings_shadow').length,0);stop();
     const contexts:string[]=[];store.onChange(change=>{contexts.push(change.context.actorId!);},['activities']);

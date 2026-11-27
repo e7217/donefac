@@ -11,10 +11,10 @@ import type { ApiKeyCreated, Issue, IssueKeyMatch, LegacyPackageSummary, Migrati
   Project, SchedulePasteApplyResult, SchedulePastePreview, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function open(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-issue-aliases-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-issue-aliases-'));
   const runtime = createApp({ dataDir: directory, outboundWorker: false, recurringIssueWorker: false, deadlineReminderWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
-  const database = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(directory, 'donefac.sqlite'));
   t.after(async () => {
     await new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); });
     database.close();
@@ -121,7 +121,7 @@ test('migrated Jira keys resolve through proved aliases without hiding colliding
 
   const before = await f.conditionalSnapshot();
   assert.equal(before.status, 200);
-  const revision = before.headers.get('X-Teamspace-Board-Revision');
+  const revision = before.headers.get('X-Donefac-Board-Revision');
   assert.ok(revision);
   await before.body?.cancel();
   assert.equal((await f.conditionalSnapshot(revision)).status, 204);
@@ -136,7 +136,7 @@ test('migrated Jira keys resolve through proved aliases without hiding colliding
   assert.equal(deactivated.changes, 1);
   const refreshed = await f.conditionalSnapshot(revision);
   assert.equal(refreshed.status, 200);
-  assert.notEqual(refreshed.headers.get('X-Teamspace-Board-Revision'), revision);
+  assert.notEqual(refreshed.headers.get('X-Donefac-Board-Revision'), revision);
   const refreshedSnapshot = await refreshed.json() as WorkspaceSnapshot;
   assert.equal(refreshedSnapshot.issueAliases?.[first.id], undefined);
   assert.deepEqual(refreshedSnapshot.issueAliases?.[second.id], [alias]);

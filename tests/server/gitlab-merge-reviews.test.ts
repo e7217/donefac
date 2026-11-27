@@ -52,7 +52,7 @@ function diffFile(path: string, overrides: Record<string, unknown> = {}) {
 
 async function fixture(t: TestContext) {
   const calls: { method?: string; url: URL; credential?: string | string[] }[] = [];
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-gitlab-merge-reviews-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-gitlab-merge-reviews-'));
   let baseUrl = '';
   const repoUrl = () => `${baseUrl}/team/app`;
   const mrUrl = () => `${repoUrl()}/-/merge_requests/${mergeRequestIid}`;

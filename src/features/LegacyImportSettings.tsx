@@ -104,8 +104,8 @@ function ActorLegacyImportSettings({ actorId, notify, onPackageInventoryChange, 
       }
     };
     const unload = (event: BeforeUnloadEvent) => { if (busy.current || dirty.current || batchDraft.current) { event.preventDefault(); event.returnValue = ''; } };
-    window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', unload);
-    return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', unload); };
+    window.addEventListener('donefac:navigate', navigate); window.addEventListener('beforeunload', unload);
+    return () => { window.removeEventListener('donefac:navigate', navigate); window.removeEventListener('beforeunload', unload); };
   }, [notify, resetDraft]);
   function clearRecord() { recordDetailSequence.current++; setSelectedRecord(null); setRecordDetailError(''); setRecordDetailLoading(false); }
   function choosePackage(id: string) { if (id === selectedId) return; setSelectedId(id); setDetail(null); setRecordPage(null); setDiagnosticPage(null); clearRecord(); setRecordOffset(0); setDiagnosticOffset(0); setFileOffset(0); setDetailError(''); setRecordError(''); setDiagnosticError(''); setKind(''); setQuery(''); setAppliedQuery(''); setSeverity(''); }

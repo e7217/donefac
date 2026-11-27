@@ -19,7 +19,7 @@ const bulkPath = `/projects/${projectId}/issues/bulk`;
 const review = (workflow: ProjectWorkflow) => workflow.statuses.find(status => status.id === 'review')!;
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-status-deadline-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-status-deadline-'));
   const runtime = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false, recurringIssueWorker: false });
   const listener = runtime.app.listen(0, '127.0.0.1');
   await once(listener, 'listening');

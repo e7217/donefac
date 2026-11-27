@@ -56,7 +56,7 @@ test('미저장 업무는 닫기와 다른 업무 이동을 취소할 수 있고
     await expect(panel.getByLabel('제목', { exact: true })).toHaveValue('보존되어야 하는 미저장 제목');
 
     page.once('dialog', dialog => dialog.dismiss());
-    expect(await page.evaluate(() => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })))).toBe(false);
+    expect(await page.evaluate(() => window.dispatchEvent(new Event('donefac:navigate', { cancelable: true })))).toBe(false);
     await expect(panel.getByLabel('제목', { exact: true })).toHaveValue('보존되어야 하는 미저장 제목');
 
     const childButton = panel.locator('.issue-related-row').filter({ hasText: child.title });
@@ -102,7 +102,7 @@ test('저장 응답을 기다리는 동안 입력과 탐색을 잠그고 응답 
     await expect(panel.getByLabel('설명', { exact: true })).toBeDisabled();
     await expect(panel.getByLabel('상태', { exact: true })).toBeDisabled();
     await expect(panel.getByRole('button', { name: '업무 상세 닫기', exact: true })).toBeDisabled();
-    expect(await page.evaluate(() => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })))).toBe(false);
+    expect(await page.evaluate(() => window.dispatchEvent(new Event('donefac:navigate', { cancelable: true })))).toBe(false);
     await page.keyboard.press('Escape');
     await expect(panel).toBeVisible();
     await expect(title).toHaveValue('저장 요청에 담긴 제목');

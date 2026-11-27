@@ -14,10 +14,10 @@ import type {
 } from '../../shared/types.js';
 
 async function workspace(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-jira-hierarchy-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-jira-hierarchy-'));
   const runtime = createApp({ dataDir: directory, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
-  const db = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(directory, 'donefac.sqlite'));
   db.exec('PRAGMA busy_timeout=5000');
   t.after(async () => {
     server.closeAllConnections();
@@ -233,7 +233,7 @@ test('Jira Server REST Epic Link imports the hierarchy and refreshes it without 
     issue(12, 'Story with a parent to clear', 2, { parent: { id: '100', key: 'ORIGINAL-1' } }),
   ]);
   const first = await f.preview({ ...initial.defaultConfiguration, projects: initial.defaultConfiguration.projects.map(mapping => ({
-    ...mapping, key: 'EPICBRIDGE', name: 'Same Teamspace project',
+    ...mapping, key: 'EPICBRIDGE', name: 'Same Donefac project',
   })) });
   assert.equal(first.canApply, true, JSON.stringify(first.notices));
   const [projectId] = (await f.apply(first)).import.projectIds;

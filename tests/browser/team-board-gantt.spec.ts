@@ -83,7 +83,7 @@ test('360px 팀 보드의 GitLab 검토 범위를 간트에서 열고 여러 프
     const projectScope = { ...teamScope, ganttProject: second.id };
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/${boardScope.path}`);
     await boardSearch.fill(query);
     await project.selectOption(second.id);
@@ -122,7 +122,7 @@ test('360px 팀 보드의 GitLab 검토 범위를 간트에서 열고 여러 프
     const [download] = await Promise.all([
       page.waitForEvent('download'), button(page, '일정 편집용 TSV 내려받기').click(),
     ]);
-    expect(download.suggestedFilename()).toBe('teamspace-schedule-all.tsv');
+    expect(download.suggestedFilename()).toBe('donefac-schedule-all.tsv');
     const sheet = await readFile(await download.path(), 'utf8');
     expect(sheet.trimEnd().split(/\r?\n/).slice(1).map(line => line.split('\t')[0]).sort()).toEqual([west.key, east.key].sort());
 

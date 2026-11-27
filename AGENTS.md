@@ -1,4 +1,4 @@
-# Teamspace 개발 규칙
+# Donefac 개발 규칙
 
 ## 제품 목표
 

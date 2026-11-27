@@ -11,13 +11,13 @@ import { createApp } from '../../server/app.js';
 import type { Issue, Project, WorkspaceSnapshot } from '../../shared/types.js';
 
 test('project creation commits one project, issue sequence and actor activity across retry and restart, and fences stale restores', async t => {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-project-create-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-project-create-'));
   function start() {
     const runtime = createApp({ dataDir: directory, outboundWorker: false });
     return { runtime, server: runtime.app.listen(0, '127.0.0.1') };
   }
   let service = start();
-  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const observer = new DatabaseSync(join(directory, 'donefac.sqlite'));
   async function stop() {
     service.server.closeAllConnections();
     await new Promise<void>((resolve, reject) => service.server.close(error => error ? reject(error) : resolve()));

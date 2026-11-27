@@ -22,7 +22,7 @@ const previewMacro = (filename: string, id?: string, owner?: string) => `<ac:str
   '</ac:parameter></ac:structured-macro>';
 
 test('a real Confluence ZIP keeps exact file-preview download bytes and rejects conflicting owner and name evidence', async t => {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-confluence-file-preview-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-confluence-file-preview-'));
   const runtime = createApp({ dataDir: directory, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   t.after(async () => {

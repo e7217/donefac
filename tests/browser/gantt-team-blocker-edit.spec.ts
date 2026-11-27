@@ -61,7 +61,7 @@ test('360px 팀 간트에서 두 프로젝트의 날짜와 차단 관계를 적�
     const sourceEnd = '2026-11-23', targetStart = '2026-11-24', targetEnd = '2026-11-27', unrelatedEnd = '2026-11-30';
     const route = `#/${first.id}/gantt?${new URLSearchParams({ scope: 'team', ganttQ: prefix })}`;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/${route}`);
     const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
     await expect(search).toHaveValue(prefix);
@@ -154,7 +154,7 @@ test('360px 팀 간트에서 두 프로젝트의 날짜와 차단 관계를 적�
     const retry = dialog.getByRole('button', { name: '적용 결과 다시 확인', exact: true });
     await expect(retry).toBeEnabled();
     await expect(retry).toBeFocused();
-    expect(committed?.relation).toMatchObject({ sourceIssueId: source.id, targetIssueId: target.id, type: 'blocks', origin: 'teamspace' });
+    expect(committed?.relation).toMatchObject({ sourceIssueId: source.id, targetIssueId: target.id, type: 'blocks', origin: 'donefac' });
     expect(committed?.updated).toHaveLength(2);
     const appliedIssues = [
       { ...source, endDate: sourceEnd, version: source.version + 1 },
@@ -272,7 +272,7 @@ test('360px 차단 관계 검토에서 저장값과 간트 입력을 날짜별�
     }));
     const route = `#/${first.id}/gantt?${new URLSearchParams({ scope: 'team', ganttQ: prefix })}`;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/${route}`);
 
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });
@@ -418,7 +418,7 @@ test('팀 간트에서 선택한 차단 관계를 날짜 초안으로 검토하�
     const before = await stored();
     const route = `#/${first.id}/gantt?${new URLSearchParams({ scope: 'team', ganttQ: prefix })}`;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/${route}`);
 
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });

@@ -39,7 +39,7 @@ test('360px에서 요청자와 상태를 팀 보기에 저장해 목록·보드�
     const matching = [byDefault, explicit];
     const nonmatching = [teammateIssue, inProgress, unassigned, foreign];
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), reporter.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), reporter.id);
     await page.setViewportSize({ width: 360, height: 820 });
     const path = `/#/${project.id}/issues`;
     await page.goto(path);

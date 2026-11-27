@@ -19,7 +19,7 @@ const issuePath = ({ id }: Issue) => `/issues/${id}`;
 const previewPath = (issue: Issue) => `${issuePath(issue)}/schedule-save-preview`;
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-issue-schedule-save-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-issue-schedule-save-'));
   const runtime = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false });
   const listener = runtime.app.listen(0, '127.0.0.1');
   await once(listener, 'listening');
@@ -107,7 +107,7 @@ test('ticket schedule preview sees linked work and ordinary save commits dates, 
   await f.call(400, issuePath(selected), 'PATCH', { ...body, title: '' });
   assert.deepEqual(await f.workspace(), before);
 
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     db.exec(`CREATE TRIGGER fail_reviewed_ticket_save BEFORE UPDATE OF json ON issues
       WHEN json_extract(NEW.json,'$.title')='일정 검토 후 저장 에러'
@@ -148,7 +148,7 @@ test('ticket save replays the current result without a second write, and fences 
   const input = { expectedVersion: ticket.version, requestId: randomUUID(), expectedRestoreGeneration: before.restoreGeneration,
     schedulePreviewId: review.previewId, ...changes, title: '검토한 업무를 저장' };
   const path = issuePath(ticket);
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     db.exec(`CREATE TRIGGER fail_ticket_save_receipt BEFORE INSERT ON issue_save_requests
       BEGIN SELECT RAISE(ABORT,'synthetic ticket save receipt failure'); END`);

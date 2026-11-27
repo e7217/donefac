@@ -14,7 +14,7 @@ const reviewPath = `${settingsPath}/project-webhook-review`;
 const historyPath = `${settingsPath}/project-webhook-history`;
 const receiverPath = `${settingsPath}/webhook`;
 const statusPath = `${settingsPath}/webhook-status`;
-const publicOrigin = 'https://teamspace-webhook-history.test';
+const publicOrigin = 'https://donefac-webhook-history.test';
 const receiverUrl = `${publicOrigin}${receiverPath}`;
 const gitlabMount = '/forge/tools';
 const repositoryId = 42;
@@ -45,7 +45,7 @@ async function readJson<T>(response: Pick<APIResponse, 'status' | 'text' | 'json
 type HistoryFixture = { origin: string; request: APIRequestContext };
 const test = base.extend<{ fixture: HistoryFixture }>({
   fixture: async ({ playwright }, provide) => {
-    const directory = await mkdtemp(join(tmpdir(), 'teamspace-webhook-history-browser-'));
+    const directory = await mkdtemp(join(tmpdir(), 'donefac-webhook-history-browser-'));
     const runtime = createApp({ dataDir: directory, outboundWorker: false, deadlineReminderWorker: false,
       recurringIssueWorker: false, gitlabWebhookPublicOrigin: publicOrigin });
     const server = createServer(runtime.app);
@@ -67,7 +67,7 @@ const test = base.extend<{ fixture: HistoryFixture }>({
 
 test.use({ viewport: { width: 360, height: 820 } });
 
-test('360px에서 GitLab의 전송 실패와 Teamspace 인증 수신을 대조하고 오래된 전송 응답을 버린다', async ({ fixture, page }) => {
+test('360px에서 GitLab의 전송 실패와 Donefac 인증 수신을 대조하고 오래된 전송 응답을 버린다', async ({ fixture, page }) => {
   test.setTimeout(70_000);
   const readToken = 'synthetic-history-read-token';
   const managerToken = 'synthetic-history-management-token';
@@ -155,7 +155,7 @@ test('360px에서 GitLab의 전송 실패와 Teamspace 인증 수신을 대조�
     const receiptsBefore = await readJson<GitlabWebhookStatus>(await request.get(statusPath));
     const latest = receiptsBefore.repositories.find(item => item.repositoryId === repositoryId)?.lastDelivery;
     expect(latest).toMatchObject({ event: 'push', authentication: 'secret-token', linked: 0 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.route('**/api/**', async route => {
       const destination = new URL(route.request().url());
       if (destination.pathname === historyPath) {
@@ -216,7 +216,7 @@ test('360px에서 GitLab의 전송 실패와 Teamspace 인증 수신을 대조�
       [600, { status: 'unavailable' }], [598, { status: 'matched', delivery: accepted }],
     ]);
     await expect(history.getByText('확인할 수 있는 전송만 표시합니다.', { exact: true })).toBeVisible();
-    await expect(history.getByRole('heading', { name: 'Teamspace 인증 수신', exact: true })).toBeVisible();
+    await expect(history.getByRole('heading', { name: 'Donefac 인증 수신', exact: true })).toBeVisible();
     await expect(history).toContainText('이 저장소의 마지막 인증 수신 · Push · Secret Token');
     await expect(history).not.toContainText('HTTP 503');
     for (const privateValue of [managerToken, webhookSecret, privateHeader, privatePayload, privateResponse, '?route=legacy',

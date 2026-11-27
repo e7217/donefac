@@ -15,7 +15,7 @@ export type DecisionLinkAttempt = {
   confirmedIssueKey?: string;
 };
 
-const key = (actorId: string, id: string, generation: string) => `teamspace:document-decision-link:${JSON.stringify([actorId, id, generation])}`;
+const key = (actorId: string, id: string, generation: string) => `donefac:document-decision-link:${JSON.stringify([actorId, id, generation])}`;
 
 function validSelection(selection: DocumentSourceSelection | undefined) {
   return Boolean(selection && Number.isSafeInteger(selection.from) && Number.isSafeInteger(selection.to) &&

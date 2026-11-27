@@ -15,7 +15,7 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify'> & {
 };
 
 const ZIP_TYPE = 'application/zip';
-const DEFAULT_FILENAME = 'teamspace-documents.zip';
+const DEFAULT_FILENAME = 'donefac-documents.zip';
 
 function downloadFilename(disposition: string | null) {
   const encoded = disposition?.match(/(?:^|;)\s*filename\*=UTF-8'[^']*'([^;]+)/iu)?.[1];

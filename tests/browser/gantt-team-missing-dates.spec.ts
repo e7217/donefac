@@ -56,7 +56,7 @@ test('360px 전체 프로젝트 간트에서 담당자의 미정 일정을 찾�
     const offQuery = await createIssue(second, `검색 제외 ${randomUUID()}`, owner.id);
     const stored = async (id: string) => (await workspace(request)).issues.find(issue => issue.id === id);
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), owner.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), owner.id);
     await page.setViewportSize({ width: 360, height: 820 });
     page.on('request', sent => {
       const path = new URL(sent.url()).pathname;

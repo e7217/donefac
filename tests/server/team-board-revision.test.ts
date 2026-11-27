@@ -10,11 +10,11 @@ import { createApp } from '../../server/app.js';
 import type { Dependency, DocPage, GitlabLink, Issue, IssueOrderMoveResult, IssueRelation, IssueTimeReservationEntry, Milestone, PlanningItem, Project, ProjectIssueOrder, ProjectIssueSchema, ProjectWorkflow, ProjectWorkloadCapacity, ResourceLink, SavedView, ScheduleBaseline, TeamScheduleBlocker, TeamWorkloadCapacity, User, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
-const header = 'X-Teamspace-Board-Revision';
-const ganttHeader = 'X-Teamspace-Gantt-Revision';
+const header = 'X-Donefac-Board-Revision';
+const ganttHeader = 'X-Donefac-Gantt-Revision';
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-workspace-board-revision-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-workspace-board-revision-'));
   async function start() {
     const runtime = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false });
     const server = runtime.app.listen(0, '127.0.0.1');
@@ -31,7 +31,7 @@ async function fixture(t: TestContext) {
     };
   }
   let active = await start();
-  const db = new DatabaseSync(join(dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(dataDir, 'donefac.sqlite'));
   t.after(async () => {
     db.close();
     try { await active.close(); }

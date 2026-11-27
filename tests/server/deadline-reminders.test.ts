@@ -12,7 +12,7 @@ const initialTime = '2026-11-21T14:59:59.000Z';
 const preferences = { daysBefore: 1, onDueDate: true, overdue: true, expectedVersion: null };
 
 function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-deadline-reminders-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-deadline-reminders-'));
   const store = new Store(dir);
   t.after(() => {
     store.db.close();

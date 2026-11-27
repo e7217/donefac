@@ -10,8 +10,8 @@ type NavigationPreservation = {
 
 export function dispatchWorkspaceNavigation(detail?: NavigationPreservation) {
   const event = detail
-    ? new CustomEvent('teamspace:navigate', { cancelable: true, detail })
-    : new Event('teamspace:navigate', { cancelable: true });
+    ? new CustomEvent('donefac:navigate', { cancelable: true, detail })
+    : new Event('donefac:navigate', { cancelable: true });
   return window.dispatchEvent(event);
 }
 

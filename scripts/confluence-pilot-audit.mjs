@@ -104,7 +104,7 @@ function createReader({ base, authorization }, signal) {
 async function writeFindings(path, value, signal) {
   let stagingDirectory;
   try {
-    stagingDirectory = await mkdtemp(join(dirname(path), '.teamspace-confluence-findings-'));
+    stagingDirectory = await mkdtemp(join(dirname(path), '.donefac-confluence-findings-'));
     const stagedFile = join(stagingDirectory, 'findings.json');
     await writeFile(stagedFile, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: 'wx', flush: true, signal });
     signal.throwIfAborted();

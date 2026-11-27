@@ -38,7 +38,7 @@ import { jiraEnglishDate, sourceTimestamp } from './migration-source-time.js';
 import { confluenceIdentityEmailEvidence, jiraIdentityEmailEvidence } from './migration-identity-email.js';
 import { hasRestrictedJiraServiceDeskComment, isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey, jiraServiceDeskAttachmentNames, jiraStatusHistoryOwnerAliases, jiraStatusTransitions } from './migration-jira-history.js';
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType, type JiraIssueRelationSource } from './migration-jira-relations.js';
-import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
+import { isDonefacIssueRelation } from '../shared/issue-relations.js';
 import { migrationOptionId as optionId } from './migration-option-id.js';
 import type { JiraMigrationCommentReview, JiraMigrationWorklogReview, LegacySource, MigrationAuthorExpectation, MigrationAuthorKind, MigrationAuthorStatus, MigrationJiraObservedTransition, MigrationJiraObservedWorkflow, MigrationJiraWorkflow, MigrationJiraWorkflowStatus, MigrationPreview, MigrationPreviewProject, MigrationPreviewProjectSource } from '../shared/types.js';
 
@@ -3051,7 +3051,7 @@ class Planner{
       }
       this.result.preview.counts.newConfluenceAttachmentVersions++;
       if (series.known.some(file => file.hasLocalVersions)) this.notice('CONFLUENCE_ATTACHMENT_LOCAL_HEAD_RETAINED',
-        'Teamspace에서 따로 추가한 최신 파일을 유지하고 새 원본 버전은 첨부 이력에 보관합니다.', 'info', item.entry);
+        'Donefac에서 따로 추가한 최신 파일을 유지하고 새 원본 버전은 첨부 이력에 보관합니다.', 'info', item.entry);
     }
   }
 
@@ -4321,7 +4321,7 @@ class Planner{
     const stored = new Set(context.active.filter(relation => relation.origin === undefined)
       .map(relation => JSON.stringify([relation.sourceIssueId, relation.targetIssueId, relation.type])));
     const liveImported = new Set(context.active.map(relation => relation.id));
-    const native = new Set(context.active.filter(isTeamspaceIssueRelation)
+    const native = new Set(context.active.filter(isDonefacIssueRelation)
       .map(relation => JSON.stringify([relation.sourceIssueId, relation.targetIssueId, relation.type])));
     const knownIds = new Set<string>();
     const knownPairs = new Map<string, { link: JiraIssueRelationSource; active: boolean }[]>();

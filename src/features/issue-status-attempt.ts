@@ -13,8 +13,8 @@ export type StatusChangeAttempt = {
 type Phase = 'awaiting' | 'confirmed';
 export type SavedStatusChangeAttempt = StatusChangeAttempt & { phase: Phase };
 
-export const statusChangeAttemptEvent = 'teamspace:status-change-attempt';
-const key = (actorId: string, generation: string) => `teamspace:status-change:${JSON.stringify([actorId, generation])}`;
+export const statusChangeAttemptEvent = 'donefac:status-change-attempt';
+const key = (actorId: string, generation: string) => `donefac:status-change:${JSON.stringify([actorId, generation])}`;
 
 export function statusChangeAttemptSnapshot(actorId: string, generation: string) {
   if (!actorId || !generation) return '[]';

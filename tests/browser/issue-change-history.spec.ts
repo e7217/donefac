@@ -33,7 +33,7 @@ test('360px에서 필드의 변경 전후를 더 읽고 티켓 편집 초안을 
 
     const historyRequests: string[] = [];
     page.on('request', sent => { if (new URL(sent.url()).pathname === historyPath) historyRequests.push(sent.url()); });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
     const ticket = page.getByRole('dialog', { name: title, exact: true });
     const priority = ticket.getByRole('combobox', { name: '우선순위', exact: true });
@@ -63,7 +63,7 @@ test('360px에서 필드의 변경 전후를 더 읽고 티켓 편집 초안을 
     await expect(newest).toContainText('높음');
     await expect(newest).toContainText(peer.name);
     await expect(newest.locator('time')).toHaveAttribute('datetime', changed.updatedAt);
-    await expect(ticket.getByRole('region', { name: 'Teamspace 변경 이력', exact: true })).toBeVisible();
+    await expect(ticket.getByRole('region', { name: 'Donefac 변경 이력', exact: true })).toBeVisible();
     expect(historyRequests).toHaveLength(1);
     await expect(history).not.toContainText(savedDescription);
     await history.getByRole('button', { name: '이전 변경 더 보기', exact: true }).click();

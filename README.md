@@ -1,6 +1,6 @@
-# Teamspace
+# Donefac
 
-Teamspace는 Plane 방식의 티켓·보드·사이클과 Docmost 방식의 문서 공간·공동 편집에 간트와 GitLab 활동을 연결하는 독립적인 웹 애플리케이션입니다. Jira·Confluence에서 팀이 해 오던 업무와 문서 관리를 자체 기능으로 지원합니다.
+Donefac은 Plane 방식의 티켓·보드·사이클과 Docmost 방식의 문서 공간·공동 편집에 간트와 GitLab 활동을 연결하는 독립적인 웹 애플리케이션입니다. Jira·Confluence에서 팀이 해 오던 업무와 문서 관리를 자체 기능으로 지원합니다.
 
 초기 대상은 20명 이하 한 팀입니다. 복잡한 보안·SSO·기업용 계정 관리는 현재 범위에 포함하지 않습니다. 기존 운영 도구의 데이터는 자동으로 가져오거나 변경하지 않습니다.
 
@@ -9,7 +9,7 @@ Teamspace는 Plane 방식의 티켓·보드·사이클과 Docmost 방식의 문�
 Node.js 24 이상이 필요합니다.
 
 ```bash
-cd /home/sfa/teamspace
+cd /home/sfa/donefac
 npm ci
 npm run dev
 ```
@@ -22,7 +22,7 @@ npm run dev
 
 ## 팀 파일럿 실행
 
-Linux에서 `npm run build:pilot`로 파일럿 번들을 만들고, 절대 데이터 경로를 `TEAMSPACE_DATA_DIR`로 지정해 `npm run start:pilot`을 실행합니다. 웹·API·공동 편집은 기본 `127.0.0.1:5190`의 같은 주소를 사용합니다. 기존 HTTPS 프록시와 공용 접속 키 파일을 지정하면 같은 팀 주소에서 접속할 수 있습니다.
+Linux에서 `npm run build:pilot`로 파일럿 번들을 만들고, 절대 데이터 경로를 `DONEFAC_DATA_DIR`로 지정해 `npm run start:pilot`을 실행합니다. 웹·API·공동 편집은 기본 `127.0.0.1:5190`의 같은 주소를 사용합니다. 기존 HTTPS 프록시와 공용 접속 키 파일을 지정하면 같은 팀 주소에서 접속할 수 있습니다.
 
 `npm run test:pilot:team-native`는 빈 워크스페이스에서 합성 팀원 20명의 동시 사용과 복원을 검증합니다. `npm run test:pilot:team`은 합성 Jira·Confluence 이관 자료로 동시 사용을 재현합니다. `npm run test:pilot`은 기본 브라우저 흐름과 전체 데이터 복원을, `npm run test:pilot:access`는 HTTPS 팀 접속을 검사합니다. [파일럿 실행과 복원](docs/PILOT.md)
 
@@ -171,19 +171,19 @@ Jira·Confluence 내보내기 파일은 `npm run pilot:rehearsal`로 별도 워�
 
 ## Jira 필터를 공유 보기로 옮기기
 
-옮겨온 프로젝트의 **업무 → Jira 필터 옮기기**에서 Jira의 고급 검색식을 붙여넣고 **조건 미리보기**를 누릅니다. Teamspace 프로젝트와 현재 상태·유형·팀원·우선순위·라벨 조건, 일치하는 업무를 확인하고 목록 또는 보드 보기로 저장합니다. 저장한 보기는 간트, 문서의 업무 목록과 프로젝트 보고서에서도 열 수 있습니다.
+옮겨온 프로젝트의 **업무 → Jira 필터 옮기기**에서 Jira의 고급 검색식을 붙여넣고 **조건 미리보기**를 누릅니다. Donefac 프로젝트와 현재 상태·유형·팀원·우선순위·라벨 조건, 일치하는 업무를 확인하고 목록 또는 보드 보기로 저장합니다. 저장한 보기는 간트, 문서의 업무 목록과 프로젝트 보고서에서도 열 수 있습니다.
 
-원본 프로젝트와 이관 매핑을 확인할 수 있으면 `assignee = old_login`, `status = "In Review"` 같은 기존 조건을 그대로 붙여넣을 수 있습니다. 현재 Teamspace에서 이름을 바꾼 뒤에도 미리보기에는 연결된 팀원·상태·업무 유형의 현재 이름이 표시됩니다. 원본이나 현재 값에 충돌이 있으면 저장 전에 해당 조건을 검토합니다.
+원본 프로젝트와 이관 매핑을 확인할 수 있으면 `assignee = old_login`, `status = "In Review"` 같은 기존 조건을 그대로 붙여넣을 수 있습니다. 현재 Donefac에서 이름을 바꾼 뒤에도 미리보기에는 연결된 팀원·상태·업무 유형의 현재 이름이 표시됩니다. 원본이나 현재 값에 충돌이 있으면 저장 전에 해당 조건을 검토합니다.
 
 `status IN ("Open", "In Review")`처럼 여러 상태에 해당하는 조건도 옮길 수 있습니다. `(status = Open OR status = "In Review")`처럼 `OR`로 이어진 상태 조건도 같은 방식으로 미리봅니다. [Atlassian JQL 연산자 안내](https://confluence.atlassian.com/jiracoreserver/advanced-searching-operators-reference-939937721.html)
 
-`priority = High`나 `priority IN (11, "Blocker")`는 이관 기록에서 확인한 원본 이름과 ID를 사용합니다. `Highest`와 `Blocker`가 둘 다 **긴급**으로 이관됐다면 그 두 값을 함께 고르는 조건을 옮길 수 있습니다. 미리보기에서 현재 티켓의 우선순위까지 대조합니다. 저장한 보기는 이후에도 현재 Teamspace 우선순위로 조회합니다. [Atlassian JQL 우선순위](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Priority)
+`priority = High`나 `priority IN (11, "Blocker")`는 이관 기록에서 확인한 원본 이름과 ID를 사용합니다. `Highest`와 `Blocker`가 둘 다 **긴급**으로 이관됐다면 그 두 값을 함께 고르는 조건을 옮길 수 있습니다. 미리보기에서 현재 티켓의 우선순위까지 대조합니다. 저장한 보기는 이후에도 현재 Donefac 우선순위로 조회합니다. [Atlassian JQL 우선순위](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Priority)
 
 `component = "Firmware"`나 `component IN (7111, 7112)`는 이관 기록으로 확인한 원본 이름과 ID를 사용합니다. 두 컴포넌트를 모두 고르려면 `component = 7111 AND component = 7112`를 사용합니다. 미리보기에는 현재 선택지 이름이 표시되며, 공유 보기와 복원한 Confluence 업무 목록은 현재 티켓의 **Jira 컴포넌트** 값으로 조회합니다. [Atlassian JQL 컴포넌트](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Component)
 
 `due >= "2026-11-01" AND due < "2026-12-01"`은 목표 마감일이 11월 안에 있는 업무를 고릅니다. 저장하면 목록·보드·간트와 문서 업무 목록에서 같은 조회 조건을 사용합니다. [Atlassian JQL 마감일](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html#Advancedsearching-fieldsreference-Due)
 
-`ORDER BY due ASC, updated DESC`를 추가하면 목표 마감일과 수정일 정렬을 검토하고 공유 보기에 저장할 수 있습니다. 원본이 `Rank ASC`나 지원 범위 밖의 정렬을 지정한 경우 **프로젝트 정렬 사용**을 확인해 현재 Teamspace 업무 순서로 저장합니다. [Jira 필터 변환](docs/API.md#jira-필터를-공유-보기로-옮기기) · [Atlassian JQL 필드 안내](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html)
+`ORDER BY due ASC, updated DESC`를 추가하면 목표 마감일과 수정일 정렬을 검토하고 공유 보기에 저장할 수 있습니다. 원본이 `Rank ASC`나 지원 범위 밖의 정렬을 지정한 경우 **프로젝트 정렬 사용**을 확인해 현재 Donefac 업무 순서로 저장합니다. [Jira 필터 변환](docs/API.md#jira-필터를-공유-보기로-옮기기) · [Atlassian JQL 필드 안내](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html)
 
 ### Confluence 문서의 Jira 목록 복원
 
@@ -311,11 +311,11 @@ Jira 이관 원본에서 연결 대상과 방향을 확인한 차단 업무에�
 
 ## GitLab 프로젝트 웹훅 설정
 
-팀 접속 HTTPS 주소를 갖춘 파일럿의 **개발 · GitLab → GitLab 프로젝트 웹훅 설정**에서 저장소를 골라 점검합니다. 저장된 GitLab 주소와 Teamspace 수신 주소가 표시됩니다. 같은 경로에 기존 웹훅이 있으면 이벤트 종류, SSL 검증, 브랜치 필터와 전송 상태를 확인할 수 있습니다.
+팀 접속 HTTPS 주소를 갖춘 파일럿의 **개발 · GitLab → GitLab 프로젝트 웹훅 설정**에서 저장소를 골라 점검합니다. 저장된 GitLab 주소와 Donefac 수신 주소가 표시됩니다. 같은 경로에 기존 웹훅이 있으면 이벤트 종류, SSL 검증, 브랜치 필터와 전송 상태를 확인할 수 있습니다.
 
-수신 주소에 웹훅이 없다면 GitLab에서 해당 저장소의 Maintainer 또는 Owner 권한으로 발급한 `api` 토큰과 Teamspace에 저장한 웹훅 인증 값을 입력한 뒤 **GitLab에 웹훅 등록**을 누릅니다. Push·Merge Request·Pipeline·Deployment 이벤트와 SSL 검증을 켭니다. 배포 이벤트가 꺼져 있는 기존 웹훅은 GitLab 설정에서 **Deployment events**를 켭니다. 응답이 끊기면 **다시 점검**으로 목록을 확인합니다. 실제 인증 수신은 아래 **GitLab 웹훅 수신 확인**에서 볼 수 있습니다. [Teamspace API](docs/API.md#gitlab-프로젝트-웹훅-점검과-등록) · [GitLab 프로젝트 웹훅 API](https://docs.gitlab.com/api/project_webhooks/)
+수신 주소에 웹훅이 없다면 GitLab에서 해당 저장소의 Maintainer 또는 Owner 권한으로 발급한 `api` 토큰과 Donefac에 저장한 웹훅 인증 값을 입력한 뒤 **GitLab에 웹훅 등록**을 누릅니다. Push·Merge Request·Pipeline·Deployment 이벤트와 SSL 검증을 켭니다. 배포 이벤트가 꺼져 있는 기존 웹훅은 GitLab 설정에서 **Deployment events**를 켭니다. 응답이 끊기면 **다시 점검**으로 목록을 확인합니다. 실제 인증 수신은 아래 **GitLab 웹훅 수신 확인**에서 볼 수 있습니다. [Donefac API](docs/API.md#gitlab-프로젝트-웹훅-점검과-등록) · [GitLab 프로젝트 웹훅 API](https://docs.gitlab.com/api/project_webhooks/)
 
-**최근 전송 확인**에서 각 GitLab 전송의 HTTP 응답과 **같은 메시지 인증 수신**을 함께 확인합니다. 일치한 경우 Teamspace 수신 시각과 인증 방식을 표시합니다. 같은 메시지를 재전송하면 각 시도의 HTTP 상태와 함께 동일한 수신 기록이 표시될 수 있습니다. [파일럿 수신 확인 절차](docs/PILOT.md#gitlab-웹훅-수신-확인)
+**최근 전송 확인**에서 각 GitLab 전송의 HTTP 응답과 **같은 메시지 인증 수신**을 함께 확인합니다. 일치한 경우 Donefac 수신 시각과 인증 방식을 표시합니다. 같은 메시지를 재전송하면 각 시도의 HTTP 상태와 함께 동일한 수신 기록이 표시될 수 있습니다. [파일럿 수신 확인 절차](docs/PILOT.md#gitlab-웹훅-수신-확인)
 
 ## GitLab 배포 확인
 
@@ -323,7 +323,7 @@ Jira 이관 원본에서 연결 대상과 방향을 확인한 차단 업무에�
 
 **개발 · GitLab → GitLab 배포 기록**에서 저장소를 선택해 배포 환경과 상태를 확인합니다. 티켓의 **연결된 GitLab 배포**에는 같은 저장소에서 티켓에 연결된 커밋이나 파이프라인의 SHA, 또는 MR의 확인된 병합·스쿼시 SHA와 일치하는 배포가 표시됩니다. 새 이벤트를 받은 뒤 **배포 새로고침**을 눌러 확인하고, **GitLab 작업 열기**에서 원래 배포 작업으로 이동합니다. 작업 주소가 없는 배포는 커밋 링크를 제공합니다. [GitLab 배포 이벤트](https://docs.gitlab.com/user/project/integrations/webhook_events/#deployment-events)
 
-**배포 이력 동기화**는 선택한 저장소의 최근 배포 50건을 읽습니다. 성공한 배포에는 GitLab이 포함됐다고 확인한 MR도 기록합니다. MR이 이미 Teamspace 티켓에 연결돼 있으면, 여러 MR을 한 번에 배포한 경우에도 해당 티켓에서 같은 배포를 확인할 수 있습니다. [GitLab 배포 API](https://docs.gitlab.com/api/deployments/#list-all-merge-requests-associated-with-a-deployment)
+**배포 이력 동기화**는 선택한 저장소의 최근 배포 50건을 읽습니다. 성공한 배포에는 GitLab이 포함됐다고 확인한 MR도 기록합니다. MR이 이미 Donefac 티켓에 연결돼 있으면, 여러 MR을 한 번에 배포한 경우에도 해당 티켓에서 같은 배포를 확인할 수 있습니다. [GitLab 배포 API](https://docs.gitlab.com/api/deployments/#list-all-merge-requests-associated-with-a-deployment)
 
 **GitLab 상태 자동화**에서 **배포 성공**을 골라 저장소와 GitLab 환경 이름, 출발·도착 상태를 설정합니다. 환경 이름은 대소문자까지 일치해야 합니다. 미리보기로 조건을 확인하고 규칙을 저장한 뒤 활성화하세요. 활성화 이후 실제로 발생한 성공 웹훅은 같은 저장소의 검증된 커밋이나 포함 MR로 연결된 업무에 적용됩니다. 배포 ID·환경·처리 결과는 설정 화면과 티켓 기록에서 확인합니다.
 
@@ -343,7 +343,7 @@ Jira 이관 원본에서 연결 대상과 방향을 확인한 차단 업무에�
 
 연결된 파이프라인에서 **CI 작업 확인**을 누르면 실패 작업과 수동 실행 대기 작업을 봅니다. 작업 단계, 확인된 실패 사유와 실패 허용 여부를 확인한 뒤 작업 이름을 눌러 GitLab에서 엽니다. [파이프라인 CI 작업 조회](docs/API.md#파이프라인-ci-작업-확인)
 
-티켓과 **개발 · GitLab**에서 **테스트 결과 확인 → 실패 테스트 확인**을 누르면 실패하거나 오류가 난 테스트 이름·스위트·클래스를 볼 수 있습니다. 스택 추적과 출력은 원래 GitLab 파이프라인의 테스트 보고서에서 확인합니다. [Teamspace 테스트 결과 조회](docs/API.md#파이프라인-테스트-결과-확인) · [GitLab 테스트 보고서](https://docs.gitlab.com/ci/testing/unit_test_reports/#view-test-results-in-pipelines)
+티켓과 **개발 · GitLab**에서 **테스트 결과 확인 → 실패 테스트 확인**을 누르면 실패하거나 오류가 난 테스트 이름·스위트·클래스를 볼 수 있습니다. 스택 추적과 출력은 원래 GitLab 파이프라인의 테스트 보고서에서 확인합니다. [Donefac 테스트 결과 조회](docs/API.md#파이프라인-테스트-결과-확인) · [GitLab 테스트 보고서](https://docs.gitlab.com/ci/testing/unit_test_reports/#view-test-results-in-pipelines)
 
 MR만 연결한 경우에는 **MR 최신 파이프라인 확인 → 테스트 결과 확인**에서 해당 실행의 결과를 읽을 수 있습니다. 실패나 오류가 표시되면 **실패 테스트 확인**을 누르세요. 조회 중 MR이나 실행이 바뀌면 **MR 최신 파이프라인 다시 확인**을 누른 뒤 테스트 결과를 여세요. [MR 최신 파이프라인 조회](docs/API.md#연결된-mr-최신-파이프라인)
 
@@ -375,9 +375,9 @@ MR만 연결된 티켓에서는 **MR 최신 파이프라인 확인 → 이 업�
 
 Jira에서 쓰던 업무 키나 프로젝트를 옮기기 전 티켓 번호를 **통합 검색**에 입력해도 현재 티켓을 찾을 수 있습니다. 결과에 현재 키, 프로젝트와 일치한 이전 키가 표시됩니다. 같은 키에 여러 후보가 나오면 프로젝트와 제목을 보고 원하는 티켓을 고릅니다. 상세 화면에서도 이전 티켓 번호를 확인할 수 있습니다.
 
-기존 Jira 업무나 Confluence 페이지의 주소를 **통합 검색**에 붙여넣으면 이관할 때 저장했거나 **기존 도구 연결**에서 추가한 연결로 현재 업무·문서를 엽니다. Confluence 페이지 ID 주소는 같은 서버·설치 경로와 페이지 ID로 찾습니다. 이관한 문서의 `/display/공간/제목` 주소는 보관된 원본 제목·공간과 페이지 ID 연결에서 찾습니다. Teamspace에서 제목을 바꾼 뒤에도 원래 주소를 검색할 수 있습니다. **전체 검색 결과**에서 프로젝트·문서 라벨 등으로 좁히고 같은 검색을 공유할 수 있습니다. [원본 주소로 업무와 문서 찾기](docs/API.md#원본-주소로-업무와-문서-찾기) · [Confluence 주소 형식](https://support.atlassian.com/confluence/kb/the-differences-between-various-url-formats-for-a-confluence-page/)
+기존 Jira 업무나 Confluence 페이지의 주소를 **통합 검색**에 붙여넣으면 이관할 때 저장했거나 **기존 도구 연결**에서 추가한 연결로 현재 업무·문서를 엽니다. Confluence 페이지 ID 주소는 같은 서버·설치 경로와 페이지 ID로 찾습니다. 이관한 문서의 `/display/공간/제목` 주소는 보관된 원본 제목·공간과 페이지 ID 연결에서 찾습니다. Donefac에서 제목을 바꾼 뒤에도 원래 주소를 검색할 수 있습니다. **전체 검색 결과**에서 프로젝트·문서 라벨 등으로 좁히고 같은 검색을 공유할 수 있습니다. [원본 주소로 업무와 문서 찾기](docs/API.md#원본-주소로-업무와-문서-찾기) · [Confluence 주소 형식](https://support.atlassian.com/confluence/kb/the-differences-between-various-url-formats-for-a-confluence-page/)
 
-이관한 Jira 댓글의 고정 주소도 **통합 검색**이나 **전체 검색 결과**에 붙여넣을 수 있습니다. **Jira 댓글 주소**로 표시된 결과를 열면 현재 티켓의 해당 댓글에 초점이 이동합니다. 열린 Teamspace 주소를 새로고침하거나 다시 열어도 같은 댓글을 찾습니다. [Jira·Confluence 원본 조회](docs/PILOT.md#jiraconfluence-원본-조회) · [Jira 댓글 링크 복사](https://support.atlassian.com/jira/kb/link-to-a-comment-missing-after-an-upgrade/)
+이관한 Jira 댓글의 고정 주소도 **통합 검색**이나 **전체 검색 결과**에 붙여넣을 수 있습니다. **Jira 댓글 주소**로 표시된 결과를 열면 현재 티켓의 해당 댓글에 초점이 이동합니다. 열린 Donefac 주소를 새로고침하거나 다시 열어도 같은 댓글을 찾습니다. [Jira·Confluence 원본 조회](docs/PILOT.md#jiraconfluence-원본-조회) · [Jira 댓글 링크 복사](https://support.atlassian.com/jira/kb/link-to-a-comment-missing-after-an-upgrade/)
 
 GitLab에서 보고 있던 MR·브랜치·커밋·파이프라인의 주소를 **통합 검색**에 붙여넣으면 이미 연결된 티켓을 찾습니다. `group/repo!91`, 정확한 브랜치 이름 또는 전체 커밋 SHA로도 찾을 수 있습니다. 결과에는 일치한 저장소와 참조가 표시되며 **전체 검색 결과**에서 현재 소속 프로젝트로 좁힐 수 있습니다. [GitLab 참조 검색](docs/API.md#gitlab-참조로-티켓-찾기)
 
@@ -447,7 +447,7 @@ GitLab에서 보고 있던 MR·브랜치·커밋·파이프라인의 주소를 *
 
 문서 화면의 **Markdown ZIP 내보내기**에서 프로젝트 전체나 팀 공통 문서를 고릅니다. 현재 문서와 하위 문서를 묶으려면 **문서 내보내기 → 문서 트리 ZIP 내보내기**를 사용합니다. 최신 저장본이나 승인·발행본을 선택해 내려받고, 압축을 푼 폴더에서 `README.md`를 열면 문서 트리를 볼 수 있습니다. `manifest.json`에서 첨부파일의 해시와 패키지 밖의 참조를 확인할 수 있습니다.
 
-Teamspace·Docmost의 Markdown ZIP이나 일반 Markdown 폴더 ZIP은 문서 화면의 **Markdown ZIP 가져오기**에서 엽니다. 대상 공간과 상위 문서를 고른 뒤 **ZIP 미리보기**에서 문서 계층, 첨부 수, 변환 안내를 확인합니다. **문서와 첨부 가져오기**를 누르면 새 초안과 첨부가 함께 저장됩니다. 패키지 안에서 확인한 문서·절 링크는 새 문서로 연결됩니다. 응답이 끊겼다면 **적용 결과 다시 확인**으로 같은 적용을 확인할 수 있습니다. [형식과 한도](docs/API.md#문서-트리-markdown-zip-가져오기)
+Donefac·Docmost의 Markdown ZIP이나 일반 Markdown 폴더 ZIP은 문서 화면의 **Markdown ZIP 가져오기**에서 엽니다. 대상 공간과 상위 문서를 고른 뒤 **ZIP 미리보기**에서 문서 계층, 첨부 수, 변환 안내를 확인합니다. **문서와 첨부 가져오기**를 누르면 새 초안과 첨부가 함께 저장됩니다. 패키지 안에서 확인한 문서·절 링크는 새 문서로 연결됩니다. 응답이 끊겼다면 **적용 결과 다시 확인**으로 같은 적용을 확인할 수 있습니다. [형식과 한도](docs/API.md#문서-트리-markdown-zip-가져오기)
 
 문서를 저장하거나 공동 편집 동기화가 끝나면 검토할 문장을 고르고 **선택한 본문에 댓글 남기기**를 누르세요. 문서의 댓글 패널에서 발췌와 의견을 함께 읽을 수 있습니다. 문서가 수정된 뒤에도 **원문 저장본 열기**로 댓글을 작성하던 당시 본문을 봅니다. 작성 중에 본문 버전이 바뀌면 **본문 다시 선택**을 눌러 의견을 유지한 채 새 원문을 고를 수 있습니다.
 
@@ -563,7 +563,7 @@ Teamspace·Docmost의 Markdown ZIP이나 일반 Markdown 폴더 ZIP은 문서 �
 
 ## 데이터와 연결 설정
 
-기본 데이터 디렉터리는 `data/`이며 `TEAMSPACE_DATA_DIR`로 바꿀 수 있습니다. DB, WAL, GitLab 자격 증명 암호화 키와 원본 분석 파일은 모두 Git 추적에서 제외합니다. DB를 파일 복사로 백업할 때는 API를 종료하거나 SQLite의 일관된 백업을 사용하세요. 자격 증명 복구에는 같은 디렉터리의 `.credential-key`도 필요합니다. 분석 원본은 `data/legacy-imports/`에 비공개 파일로 보관합니다. 이 폴더와 분석 DB 기록은 자체 JSON 백업에 포함되지 않으며, 자체 백업 가져오기 후에도 유지합니다. 필요 없어진 원본은 분석 카드에서 별도로 삭제하세요. 원본 패키지·이력까지 보존하려면 DB와 이 폴더도 함께 일관되게 백업해야 합니다. 원문 미리보기도 현재 신뢰하는 로컬 관리 브라우저 범위에서 접근합니다.
+기본 데이터 디렉터리는 `data/`이며 `DONEFAC_DATA_DIR`로 바꿀 수 있습니다. 제품 이름을 Teamspace에서 Donefac으로 바꾸기 전에 만든 데이터도 그대로 엽니다. 시작할 때 `teamspace.sqlite`를 `donefac.sqlite`로 옮기고, `TEAMSPACE_` 환경 변수, 이전 물리 백업·문서 ZIP·이관 매핑 파일과 브라우저에 남은 초안도 읽습니다. 파일럿 잠금 파일 이름이 `.donefac.lock`으로 바뀌었으므로 이전 버전의 파일럿과 백업 작업을 모두 멈춘 뒤 업그레이드하세요. DB, WAL, GitLab 자격 증명 암호화 키와 원본 분석 파일은 모두 Git 추적에서 제외합니다. DB를 파일 복사로 백업할 때는 API를 종료하거나 SQLite의 일관된 백업을 사용하세요. 자격 증명 복구에는 같은 디렉터리의 `.credential-key`도 필요합니다. 분석 원본은 `data/legacy-imports/`에 비공개 파일로 보관합니다. 이 폴더와 분석 DB 기록은 자체 JSON 백업에 포함되지 않으며, 자체 백업 가져오기 후에도 유지합니다. 필요 없어진 원본은 분석 카드에서 별도로 삭제하세요. 원본 패키지·이력까지 보존하려면 DB와 이 폴더도 함께 일관되게 백업해야 합니다. 원문 미리보기도 현재 신뢰하는 로컬 관리 브라우저 범위에서 접근합니다.
 
 자체 JSON 내보내기는 연결 토큰과 API 키를 제외하며, 가져오기가 성공하면 기존 API 키를 모두 회수하고 자동화 규칙은 비활성으로 복원합니다. 외부 웹훅 수신처·비밀값·전송 기록은 자체 JSON에서 제외하며 가져오기 시 초기화합니다.
 
@@ -583,7 +583,7 @@ GitLab은 화면에서 주소·숫자 프로젝트 ID·읽기 토큰을 설정�
 
 응답을 잃었거나 만든 브랜치의 연결이 보류됐을 때는 **생성 결과 다시 확인**을 사용하세요. GitLab에서 같은 이름과 검토한 커밋 SHA를 확인한 뒤 티켓에 연결합니다. 미확인 요청은 재시작 뒤에도 조회로 확인합니다. 브랜치 연결 이후의 티켓 자동 전이는 인증된 MR·파이프라인·배포 이벤트의 기존 규칙을 따릅니다. [티켓에서 GitLab 브랜치 만들기](docs/API.md#티켓에서-gitlab-브랜치-만들기)
 
-Jira 이관 후에는 개발 화면에서 저장소별로 대상 Teamspace 프로젝트와 Jira 원본을 선택하세요. 그 저장소의 활동은 선택한 프로젝트에서 현재 티켓 키와 보관한 Jira 키를 찾습니다. 같은 키가 두 티켓을 가리키면 연결을 보류하고 미리보기에 표시합니다. 연결을 저장하면 티켓과 개발 화면에서 해당 Jira 원본 키를 확인할 수 있습니다. [원본 키 연결](docs/API.md#이관한-jira-키로-연결)
+Jira 이관 후에는 개발 화면에서 저장소별로 대상 Donefac 프로젝트와 Jira 원본을 선택하세요. 그 저장소의 활동은 선택한 프로젝트에서 현재 티켓 키와 보관한 Jira 키를 찾습니다. 같은 키가 두 티켓을 가리키면 연결을 보류하고 미리보기에 표시합니다. 연결을 저장하면 티켓과 개발 화면에서 해당 Jira 원본 키를 확인할 수 있습니다. [원본 키 연결](docs/API.md#이관한-jira-키로-연결)
 
 GitLab 프로젝트의 **Push events** 웹훅을 켜고 `feature/TEAM-12-login`처럼 브랜치 이름에 티켓 번호를 넣습니다. 푸시가 도착하면 티켓의 **GitLab**에서 브랜치와 수신한 커밋을 열고 마지막으로 확인한 SHA를 볼 수 있습니다. 커밋 메시지에 티켓 번호가 없으면 브랜치 번호로 연결됩니다. 브랜치를 삭제한 뒤에도 티켓에서 브랜치 이름과 기존 커밋을 확인할 수 있습니다. [GitLab 웹훅 이벤트](https://docs.gitlab.com/user/project/integrations/webhook_events/#push-events)
 
@@ -599,9 +599,9 @@ Jira·Confluence 내보내기 파일을 이관할 때 패키지별 원본 기본
 
 미리보기의 **Jira 이력에서 확인한 전이**에서는 각 방향으로 이동한 원본 업무 수를 봅니다. 사용할 방향을 선택해 **선택한 전이를 매핑에 추가**를 누르면 기존에 직접 지정한 방향과 함께 편집할 수 있습니다. 새 미리보기에서 최종 워크플로를 확인한 뒤 적용합니다.
 
-이전에 옮긴 Jira 프로젝트의 새 내보내기 파일을 분석하고, **이관 방식 → 기존 프로젝트에 새 Jira 업무 추가**를 선택할 수 있습니다. 현재 Teamspace 프로젝트의 상태·유형·필드에 매핑한 뒤 새 업무와 이미 이관한 기록의 건수를 미리 확인합니다. 새 업무에는 다음 Teamspace 키를 부여하며, 기존 부모와 연결되면 그 업무를 이어서 참조합니다. 이미 옮긴 업무에 대한 새 원본 내용은 이관 영수증에서 읽을 수 있습니다. [추가 이관 API](docs/API.md#기존-프로젝트에-새-jira-업무-추가)
+이전에 옮긴 Jira 프로젝트의 새 내보내기 파일을 분석하고, **이관 방식 → 기존 프로젝트에 새 Jira 업무 추가**를 선택할 수 있습니다. 현재 Donefac 프로젝트의 상태·유형·필드에 매핑한 뒤 새 업무와 이미 이관한 기록의 건수를 미리 확인합니다. 새 업무에는 다음 Donefac 키를 부여하며, 기존 부모와 연결되면 그 업무를 이어서 참조합니다. 이미 옮긴 업무에 대한 새 원본 내용은 이관 영수증에서 읽을 수 있습니다. [추가 이관 API](docs/API.md#기존-프로젝트에-새-jira-업무-추가)
 
-이미 옮긴 티켓도 갱신하려면 **기존 Jira 업무 변경분 반영**을 선택하세요. 미리보기에서 반영할 원본 값과 팀의 편집을 보존할 필드를 확인합니다. Jira에서 빠진 필드는 현재 값을 사용합니다. 적용은 현재 Teamspace 워크플로와 티켓 버전을 확인합니다. [Jira 변경분 반영 API](docs/API.md#이미-이관한-jira-업무에-원본-변경분-반영)
+이미 옮긴 티켓도 갱신하려면 **기존 Jira 업무 변경분 반영**을 선택하세요. 미리보기에서 반영할 원본 값과 팀의 편집을 보존할 필드를 확인합니다. Jira에서 빠진 필드는 현재 값을 사용합니다. 적용은 현재 Donefac 워크플로와 티켓 버전을 확인합니다. [Jira 변경분 반영 API](docs/API.md#이미-이관한-jira-업무에-원본-변경분-반영)
 
 이전 Jira REST 이관에서 빠진 마감일은 티켓의 **원본 기록 → Jira 마감일 복구**에서 비교할 수 있습니다. 현재 값이 비어 있고 팀에서 마감일을 바꾸지 않은 근거가 있을 때 **복구 적용**으로 보존 원본의 날짜를 저장합니다. [보존 원본의 Jira 마감일 복구](docs/API.md#보존-원본의-jira-마감일-복구)
 
@@ -619,7 +619,7 @@ Jira·Confluence 내보내기 파일을 이관할 때 패키지별 원본 기본
 
 첫 이관과 새 문서 추가에서 원본 페이지에 연결된 공개 전역 라벨을 확인해 문서 라벨로 옮깁니다. 개인 라벨과 공개 여부를 확인하기 어려운 라벨은 분석 원본에 보존합니다. 이미 옮긴 문서의 라벨은 변경분 반영에서 검토할 수 있습니다.
 
-원본 공간의 페이지만 조회하는 **라벨별 내용** 매크로는 이관 범위를 확인한 뒤 편집 가능한 목록으로 변환합니다. 변환 뒤에는 대상 Teamspace 프로젝트의 문서와 라벨로 목록을 갱신합니다. 여러 공간의 조건이나 지원 범위를 벗어난 CQL은 이관 진단과 함께 원문으로 보존합니다. [Confluence 라벨별 내용 매크로](https://confluence.atlassian.com/doc/content-by-label-macro-145566.html)
+원본 공간의 페이지만 조회하는 **라벨별 내용** 매크로는 이관 범위를 확인한 뒤 편집 가능한 목록으로 변환합니다. 변환 뒤에는 대상 Donefac 프로젝트의 문서와 라벨로 목록을 갱신합니다. 여러 공간의 조건이나 지원 범위를 벗어난 CQL은 이관 진단과 함께 원문으로 보존합니다. [Confluence 라벨별 내용 매크로](https://confluence.atlassian.com/doc/content-by-label-macro-145566.html)
 
 **기존 Confluence 문서 변경분 반영**을 선택하면 이전에 옮긴 문서의 제목·본문·라벨·상위 문서를 비교합니다. **상위 문서** 행에서 현재 경로와 제안 위치를 확인하세요. 이전 버전에서 분석한 XML ZIP은 위치를 검토하기 전에 다시 분석합니다. 팀이 편집한 필드와 참조·첨부를 확인할 수 없는 본문은 보존합니다. 본문을 갱신하려면 공동 편집 참여자가 나간 상태에서 검토하고 적용합니다. 반영한 결과는 새 문서 이력에 저장됩니다. [Confluence 변경분 반영 API](docs/API.md#이미-이관한-confluence-문서에-원본-변경분-반영)
 
@@ -629,9 +629,9 @@ Confluence의 PDF·Word·Excel·PowerPoint 미리보기 매크로는 소유 페�
 
 **기존 Confluence 문서에 댓글과 이력 추가**를 선택하면 이전에 옮기지 않은 원본 댓글과 버전을 미리 보고 추가할 수 있습니다. 팀이 편집한 현재 문서와 댓글은 그대로 유지됩니다. 문서 이력에서 Confluence 원본 버전을 열어 비교하거나 현재 문서의 새 저장본으로 복구할 수 있습니다. [Confluence 댓글·이력 이관 API](docs/API.md#기존-confluence-문서에-댓글과-이력-추가)
 
-Confluence 패키지에 `/wiki` 같은 설치 경로를 포함한 원본 기본 주소를 입력하면, 본문의 페이지 제목 주소와 페이지 ID 주소를 이관된 Teamspace 문서에 연결합니다. 상대 주소는 원래 패키지의 주소를 기준으로 해석하며, 확인한 제목 절 링크는 대상 절로 이동합니다. 추가 이관과 변경분 반영에서는 이미 옮긴 페이지도 찾습니다. 첨부 링크는 본문이 지정한 원본 페이지를 기준으로 연결합니다. 대상을 확정하지 못하면 **이관 검토 진단 → 원본 상세 보기**에서 해당 원문과 관계를 확인할 수 있습니다. [본문 링크 이관](docs/API.md#검토한-원본-이관-적용)
+Confluence 패키지에 `/wiki` 같은 설치 경로를 포함한 원본 기본 주소를 입력하면, 본문의 페이지 제목 주소와 페이지 ID 주소를 이관된 Donefac 문서에 연결합니다. 상대 주소는 원래 패키지의 주소를 기준으로 해석하며, 확인한 제목 절 링크는 대상 절로 이동합니다. 추가 이관과 변경분 반영에서는 이미 옮긴 페이지도 찾습니다. 첨부 링크는 본문이 지정한 원본 페이지를 기준으로 연결합니다. 대상을 확정하지 못하면 **이관 검토 진단 → 원본 상세 보기**에서 해당 원문과 관계를 확인할 수 있습니다. [본문 링크 이관](docs/API.md#검토한-원본-이관-적용)
 
-Jira와 Confluence 패키지를 함께 이관하면, Jira 설명의 링크에서 주소와 대상이 확인된 Teamspace 문서나 절을 열 수 있습니다. 브라우저 뒤로 가기로 티켓으로 돌아갑니다. 모호한 주소나 원본 댓글·버전 링크는 원래 사이트를 가리킵니다.
+Jira와 Confluence 패키지를 함께 이관하면, Jira 설명의 링크에서 주소와 대상이 확인된 Donefac 문서나 절을 열 수 있습니다. 브라우저 뒤로 가기로 티켓으로 돌아갑니다. 모호한 주소나 원본 댓글·버전 링크는 원래 사이트를 가리킵니다.
 
 Confluence 체크리스트는 완료 여부를 편집할 수 있는 문서 체크리스트로 옮깁니다. 원본 담당자 표시와 기한은 체크리스트에 텍스트로 보존합니다. 이전 이관에서 문서 전체가 원문 코드 블록으로 저장됐다면, **기존 Confluence 문서 변경분 반영**에서 같은 원본 버전과 본문을 다시 검토해 복구할 수 있습니다. 팀이 수정한 본문은 보존합니다. [오프라인 이관 리허설](docs/PILOT.md#오프라인-원본-이관-리허설)
 
@@ -643,7 +643,7 @@ npm run typecheck
 npm run build
 ```
 
-`npm run test:browser`는 소스 사본·임시 데이터·별도 웹/API 서버를 준비하고 종료 후 정리합니다. 기본 검사 포트는 웹 5179·API 5189이며, 개발 데이터는 사용하지 않습니다. Chromium이 없는 환경에서는 `npx playwright install chromium`으로 준비하거나 `CHROMIUM_PATH`를 지정합니다. 이미 실행한 검사 전용 서버를 사용하려면 `TEAMSPACE_TEST_URL`을 지정합니다. 이 경우 해당 서버에서 검사 자료를 생성·정리하므로 운영 서버 주소를 사용하지 마세요.
+`npm run test:browser`는 소스 사본·임시 데이터·별도 웹/API 서버를 준비하고 종료 후 정리합니다. 기본 검사 포트는 웹 5179·API 5189이며, 개발 데이터는 사용하지 않습니다. Chromium이 없는 환경에서는 `npx playwright install chromium`으로 준비하거나 `CHROMIUM_PATH`를 지정합니다. 이미 실행한 검사 전용 서버를 사용하려면 `DONEFAC_TEST_URL`을 지정합니다. 이 경우 해당 서버에서 검사 자료를 생성·정리하므로 운영 서버 주소를 사용하지 마세요.
 
 서버 검사는 임시 데이터 디렉터리와 로컬 모의 GitLab을 사용합니다. 실제 기존 서비스를 변경하지 않습니다. API 계약과 첫 구현의 제한은 [서버 문서](server/README.md)에 정리되어 있습니다.
 

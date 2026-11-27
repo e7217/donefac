@@ -17,7 +17,7 @@ const sourceInstance = 'synthetic-jira-releases';
 const sourceProjectId = '4200';
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-jira-releases-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-jira-releases-'));
   const service = createApp({ dataDir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {
@@ -214,7 +214,7 @@ test('a Jira migration rolls back new release plans when an issue write fails', 
   const { defaultConfiguration } = await f.options(pkg);
   const plan = await f.preview(defaultConfiguration);
   assert.ok(plan.canApply, JSON.stringify(plan.notices));
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     db.exec(`CREATE TRIGGER reject_jira_issue BEFORE INSERT ON issues
       WHEN json_extract(NEW.json,'$.title')='한 버전 업무'

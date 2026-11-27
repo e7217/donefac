@@ -179,7 +179,7 @@ test('공동 편집 중 찾기 위치가 다른 작업자의 변경을 따라가
   const f = await fixture(request);
   const contexts = await Promise.all(f.users.slice(0, 2).map(async user => {
     const context = await browser.newContext({ baseURL, viewport });
-    await context.addInitScript(id => localStorage.setItem('teamspace.actor', id), user.id);
+    await context.addInitScript(id => localStorage.setItem('donefac.actor', id), user.id);
     return context;
   }));
   try {

@@ -12,7 +12,7 @@ import { Store } from '../../server/store.js';
 import { AttachmentFiles } from '../../server/attachments.js';
 
 async function fixture(dataDir?:string,seed=true){
-  const dir=dataDir||mkdtempSync(join(tmpdir(),'teamspace-test-'));
+  const dir=dataDir||mkdtempSync(join(tmpdir(),'donefac-test-'));
   const service=createApp({dataDir:dir,seed});
   const server=service.app.listen(0,'127.0.0.1');await once(server,'listening');
   const base=`http://127.0.0.1:${(server.address() as any).port}`;
@@ -184,6 +184,6 @@ test('GitLab configured-only sync, encrypted write-only credentials, authenticat
   assert.equal((await f.request('/integrations/gitlab/webhook','POST',payload,headers)).data.linked,1);
   assert.equal((await f.request('/integrations/gitlab/webhook','POST',payload,headers)).data.duplicate,true);
   assert.ok(!JSON.stringify((await f.request('/export')).data).includes('mock-private-token'));
-  const db=readFileSync(join(f.dir,'teamspace.sqlite'));assert.ok(!db.includes(Buffer.from('mock-private-token')));assert.equal(statSync(join(f.dir,'.credential-key')).mode&0o777,0o600);
+  const db=readFileSync(join(f.dir,'donefac.sqlite'));assert.ok(!db.includes(Buffer.from('mock-private-token')));assert.equal(statSync(join(f.dir,'.credential-key')).mode&0o777,0o600);
  }finally{await new Promise<void>(r=>mock.close(()=>r()));await f.close();f.remove();}
 });

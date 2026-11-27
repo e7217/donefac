@@ -169,8 +169,8 @@ test('offline Markdown connects only local document, revision and attachment tar
 });
 
 test('offline Markdown rewrites normal absolute clipboard links only on the trusted browser origin', () => {
-  const browserOrigin = 'https://teamspace.example.test:7443';
-  const otherOrigin = 'https://teamspace.example.test:8443';
+  const browserOrigin = 'https://donefac.example.test:7443';
+  const otherOrigin = 'https://donefac.example.test:8443';
   const attachment = '37a1a6f4-2222-47c8-9092-9f58cca86cb2';
   const section = '/#/space/documents/other?section=install-01';
   const download = `/api/attachment-versions/${attachment}/download`;
@@ -184,7 +184,7 @@ test('offline Markdown rewrites normal absolute clipboard links only on the trus
     paragraph(link('다른 서버의 파일', otherOrigin + download)),
     { type: 'image', attrs: { src: otherOrigin + inline, alt: '외부 사진' } },
     paragraph(link('동일 서버의 업무 API', browserOrigin + '/api/workspace')),
-    paragraph(link('자격 증명 포함 링크', `https://user@teamspace.example.test:7443${section}`)),
+    paragraph(link('자격 증명 포함 링크', `https://user@donefac.example.test:7443${section}`)),
   ], {
     browserOrigin,
     document(id, target) {
@@ -200,7 +200,7 @@ test('offline Markdown rewrites normal absolute clipboard links only on the trus
   assert.match(result.markdown, /\[복사한 절 링크\]\(다른%20문서\.md#install-01\)/u);
   assert.match(result.markdown, /\[복사한 첨부 주소\]\(\.\.\/attachments\/results\.png\)/u);
   assert.match(result.markdown, /!\[로컬 사진\]\(\.\.\/attachments\/results\.png\)/u);
-  assert.doesNotMatch(result.markdown, /teamspace\.example\.test|\/api\/workspace/u);
+  assert.doesNotMatch(result.markdown, /donefac\.example\.test|\/api\/workspace/u);
   assert.deepEqual(attachmentCalls, [`attachment-version:${attachment}`, `inline-image:${attachment}`]);
   assert.deepEqual(result.diagnostics.map(row => row.code), [
     'external_link', 'external_link', 'external_image', 'external_link', 'external_link',

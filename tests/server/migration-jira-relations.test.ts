@@ -39,7 +39,7 @@ function sourceIssue(id: string, links: ReturnType<typeof link>[] = [], sourcePr
 }
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-jira-relation-refresh-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-jira-relation-refresh-'));
   const runtime = createApp({ dataDir, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   t.after(async () => {
@@ -172,7 +172,7 @@ test('receipt audit distinguishes a retired Jira endpoint from loss or corruptio
   await f.call(`/trash/${trash.trashEntryId}/restore`, 'POST', {});
   assert.deepEqual(await audit(), clean);
 
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     const inverse = { ...relation, sourceIssueId: blocked.id, targetIssueId: blocker.id };
     db.prepare('UPDATE issue_relations SET source_issue_id=?,target_issue_id=?,json=? WHERE id=?')
@@ -367,7 +367,7 @@ test('Jira relation-only follow-up links separately migrated projects using exac
   assert.equal(noChanges.counts.skippedJiraRelations, 2);
   assert.deepEqual(await f.relations(a), [imported]);
 
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     assert.equal(db.prepare('DELETE FROM issue_relations WHERE id=?').run(imported.id).changes, 1);
   } finally { db.close(); }
@@ -594,7 +594,7 @@ test('a selected Jira blocker schedules across calendars and respects other prov
 
   const proof = (await f.backup()).sourceRecords.find(row => row.jiraRelationId === unselected.id);
   assert.ok(proof);
-  const database = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     assert.equal(database.prepare('DELETE FROM source_records WHERE id=?').run(proof.id).changes, 1);
   } finally { database.close(); }
@@ -658,7 +658,7 @@ test('a handoff batch retimes selected Jira roots and rechecks each selected sou
   assert.deepEqual(stale.blocking, []);
   const proof = (await f.backup()).sourceRecords.find(row => row.jiraRelationId === selected[1].id);
   assert.ok(proof);
-  const database = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     assert.equal(database.prepare('DELETE FROM source_records WHERE id=?').run(proof.id).changes, 1);
   } finally { database.close(); }
@@ -748,7 +748,7 @@ test('project blocker batch can combine Jira proven direction with native blocke
   });
   assert.ok(teamStale.previewId, JSON.stringify(teamStale.errors));
   assert.deepEqual(teamStale.dependencyChanges, stale.dependencyChanges?.map(row => ({ ...row, projectId: source.projectId })));
-  const database = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     assert.equal(database.prepare('DELETE FROM source_records WHERE id=?').run(proof.id).changes, 1);
   } finally { database.close(); }
@@ -1064,7 +1064,7 @@ test('Jira follow-up skips existing equivalences and foreign endpoints, and a re
   const restored = (await f.relations(a)).find(row => row.id === imported.id);
   assert.ok(restored);
   assert.deepEqual([restored.sourceIssueId, restored.targetIssueId, restored.type], [b.id, a.id, 'Blocks']);
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     assert.equal(db.prepare('DELETE FROM issue_relations WHERE id=?').run(imported.id).changes, 1);
   } finally { db.close(); }
@@ -1114,7 +1114,7 @@ test('Jira relation review detects a concurrent native link and rolls back links
   const review = await f.preview(append);
   assert.equal(review.canApply, true, JSON.stringify(review.notices));
   const beforeCommit = await f.backup();
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     db.exec(`CREATE TRIGGER synthetic_jira_relation_audit_failure BEFORE INSERT ON activities
       WHEN json_extract(NEW.json,'$.action')='Jira 원본 변경분 반영' AND json_extract(NEW.json,'$.resourceType')='source-import'

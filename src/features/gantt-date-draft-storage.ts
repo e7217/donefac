@@ -16,7 +16,7 @@ export type GanttIssueDateDrafts = {
   acceptSaved: (draft: StoredGanttDateDraft, saved: Issue, options?: { replaceDraft: true }) => void;
 };
 
-export const GANTT_DATE_DRAFT_PREFIX = 'teamspace:gantt-date-drafts:';
+export const GANTT_DATE_DRAFT_PREFIX = 'donefac:gantt-date-drafts:';
 const schemaVersion = 1;
 
 export function ganttDateDraftKey(actorId: string, projectScope: string | null, restoreGeneration: string | undefined): string {

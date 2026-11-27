@@ -12,7 +12,7 @@ import type { DocPage, DocRevision, WorkspaceSnapshot } from '../../shared/types
 const content = (text: string) => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-document-revision-restore-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-document-revision-restore-'));
   const runtime = createApp({ dataDir, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   t.after(async () => {

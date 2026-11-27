@@ -39,7 +39,7 @@ type Creation = { cycle: PlanningItem | null; opener: HTMLButtonElement };
 type StatusEdit = IssueStatusEdit & { opener: HTMLButtonElement };
 const BACKLOG = 'backlog';
 const CYCLE_OPTION_PREFIX = 'cycle:';
-const DRAG_TYPE = 'application/x-teamspace-cycle-board';
+const DRAG_TYPE = 'application/x-donefac-cycle-board';
 const cycleIdOf = (issue: Issue) => issue.cycleId ?? null;
 const cycleRef = (cycle: PlanningItem): NonNullable<CycleRef> => ({ id: cycle.id, expectedVersion: cycle.version });
 const nameOf = (issue: Issue) => `${issue.key} · ${issue.title}`;
@@ -141,10 +141,10 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
         event.returnValue = '';
       }
     };
-    window.addEventListener('teamspace:navigate', guard);
+    window.addEventListener('donefac:navigate', guard);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', guard);
+      window.removeEventListener('donefac:navigate', guard);
       window.removeEventListener('beforeunload', unload);
     };
   }, [notify]);
@@ -232,7 +232,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
 
   function openStatusEdit(issue: Issue, current: WorkflowStatus, choices: WorkflowStatus[], opener: HTMLButtonElement) {
     if (!canEditStatus || !choices.length || request.current || dragSource.current ||
-        !window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
+        !window.dispatchEvent(new Event('donefac:navigate', { cancelable: true }))) return;
     statusFocus.current = null;
     setStatusEdit({ issue, current, choices, workflowVersion: workflow.version, opener });
   }

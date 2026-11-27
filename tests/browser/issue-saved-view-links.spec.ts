@@ -107,7 +107,7 @@ test('360px에서 문서로 이동한 뒤 개인 담당자별 보드를 복원�
     const savedPicker = page.getByLabel('저장된 업무 보기', { exact: true });
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(base);
     await expect(list).toBeVisible();
     await pickBoard.click();

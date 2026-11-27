@@ -25,7 +25,7 @@ const pair = (issue: Issue, document: DocPage) => ({ issueId: issue.id, document
 const paragraph = (text: string): RichContent => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-resource-links-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-resource-links-'));
   const runtime = createApp({ dataDir: directory, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -436,7 +436,7 @@ function draftReportUrl(document: DocPage) {
   const href = [...documentNodes(document.content)].flatMap(node => node.marks ?? [])
     .find(mark => mark.type === 'link' && String(mark.attrs?.href).includes('/reports/decision-follow-ups'))?.attrs?.href;
   assert.equal(typeof href, 'string');
-  return new URL(String(href).slice(1), 'http://teamspace.test');
+  return new URL(String(href).slice(1), 'http://donefac.test');
 }
 
 test('decision follow-up timing filters use missing plan dates independently of deadlines and respect project scopes before paging', async t => {
@@ -563,7 +563,7 @@ test('project decision meeting draft preserves reviewed original excerpts and at
   const unavailable = await f.call<DraftConflict>(draftPath, 422, 'POST', { ...body, destinationProjectId: 'missing-draft-project' });
   assert.equal(unavailable.details?.reason, 'destination_unavailable');
 
-  const database = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.directory, 'donefac.sqlite'));
   try {
     const counts = () => ['documents', 'revisions', 'resource_links', 'activities', 'document_creation_requests']
       .map(table => database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count);
@@ -637,7 +637,7 @@ test('team decision meeting draft captures the reviewed offset and preserves val
   const secondLink = await f.cite(second, secondDocument, available);
   const thirdLink = await f.cite(third, thirdDocument, broken);
 
-  const database = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.directory, 'donefac.sqlite'));
   try {
     database.prepare("UPDATE resource_links SET json=json_set(json,'$.documentSource.text',?) WHERE id=?")
       .run(corrupted, thirdLink.id);

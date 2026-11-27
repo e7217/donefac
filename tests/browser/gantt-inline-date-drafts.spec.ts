@@ -57,7 +57,7 @@ function scheduleWrites(page: Page) {
 
 async function openChart(page: Page, project: Project, actorId: string, prefix: string, scope: '' | '?scope=team') {
   await page.setViewportSize({ width: 360, height: 820 });
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actorId);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actorId);
   await page.goto(`/#/${project.id}/gantt${scope}`);
   await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(prefix);
   const chart = page.getByRole('region', { name: '간트 차트', exact: true });

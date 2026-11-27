@@ -44,7 +44,7 @@ test('360px에서 저장된 업무를 복제하고 원본 초안, 편집한 날�
   const path = `/api/issues/${original.id}/clone`;
 
   try {
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
     await page.goto(`/#/${project.id}/issues?issue=${original.id}`);
     const originalPanel = page.getByRole('dialog', { name: original.title, exact: true });
     const sourceDescription = originalPanel.getByRole('textbox', { name: '설명', exact: true });

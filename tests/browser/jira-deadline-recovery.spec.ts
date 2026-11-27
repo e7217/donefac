@@ -78,7 +78,7 @@ test('Jira 원본 기록에서 검증한 마감일을 복구하고 응답 유실
     expect((await readReview(cleared)).review).toMatchObject({ status: 'local-change', currentDueDate: null });
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${projectId}/issues?issue=${candidate.id}`);
     const panel = page.getByRole('dialog', { name: candidate.title, exact: true });
     const title = panel.getByRole('textbox', { name: '제목', exact: true });

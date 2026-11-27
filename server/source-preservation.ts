@@ -2,7 +2,7 @@ import type { Express, Request } from 'express';
 import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, STATUS, type Attachment, type AttachmentVersion, type Comment, type DocPage, type DocRevision, type Issue, type IssueRelation, type JiraMigrationCustomFieldHashes, type LegacyRecord, type LegacyRecordKind, type LegacySource, type MigrationAppendConfiguration, type MigrationConfiguration, type MigrationJiraWorkflow, type MigrationJiraWorkflowStatus, type MigrationNotice, type Project, type SourceImport, type SourceImportIntegrity, type SourceImportIntegrityPackage, type SourceRecordArchive, type SourceRecordPage, type SourceRecordSummary, type TeamScheduleBlocker, type User } from '../shared/types.js';
 import { MIGRATION_AUTHOR_DISPOSITIONS, MIGRATION_AUTHOR_KINDS } from '../shared/types.js';
 import type { SourceImportResourceLink } from '../shared/types.js';
-import { isCanonicalTeamspaceIssueRelation } from '../shared/issue-relations.js';
+import { isCanonicalDonefacIssueRelation } from '../shared/issue-relations.js';
 import { addRecord, emptyDataset, LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { PreparedMigration } from './migration-contracts.js';
@@ -15,6 +15,7 @@ import { jiraIssueRelationSource, jiraRelationEndpoints, type JiraIssueRelationS
 import { measureIncomingArchive, SourceArchiveMeasurer, type SourceArchiveMeasurement } from './source-archive-integrity.js';
 import { issueProjectAt, readIssueProjectHistory, type IssueProjectHistory } from './issue-project-history.js';
 import type { Store } from './store.js';
+import { LEGACY_PRODUCT_ID, withCurrentRelationOrigin } from '../shared/legacy-name.js';
 
 export class SourcePreservationError extends Error { constructor(public status: number, message: string, public details?: unknown) { super(message); } }
 export interface SourcePreservationData { imports: SourceImport[]; records: SourceRecordArchive[]; versions: AttachmentVersion[]; relations: IssueRelation[] }
@@ -596,10 +597,13 @@ export class SourcePreservationService {
       CREATE TABLE IF NOT EXISTS issue_relations(id TEXT PRIMARY KEY,source_issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,target_issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS issue_relations_source ON issue_relations(source_issue_id);
       CREATE INDEX IF NOT EXISTS issue_relations_target ON issue_relations(target_issue_id);
-      CREATE UNIQUE INDEX IF NOT EXISTS issue_relations_teamspace_pair
-        ON issue_relations(source_issue_id,target_issue_id,json_extract(json,'$.type')) WHERE json_extract(json,'$.origin')='teamspace';
+      CREATE UNIQUE INDEX IF NOT EXISTS issue_relations_donefac_pair
+        ON issue_relations(source_issue_id,target_issue_id,json_extract(json,'$.type')) WHERE json_extract(json,'$.origin')='donefac';
       CREATE TABLE IF NOT EXISTS source_bindings(product TEXT NOT NULL,source_instance TEXT NOT NULL,kind TEXT NOT NULL,source_alias TEXT NOT NULL,target_type TEXT NOT NULL,target_id TEXT NOT NULL,import_id TEXT NOT NULL REFERENCES source_imports(id) ON DELETE CASCADE,PRIMARY KEY(product,source_instance,kind,source_alias));
       CREATE INDEX IF NOT EXISTS source_bindings_target ON source_bindings(target_type,target_id,product,kind);`);
+    // Relations created before the product rename carry the legacy origin; move them under the current one.
+    store.db.exec(`DROP INDEX IF EXISTS issue_relations_${LEGACY_PRODUCT_ID}_pair;`);
+    store.db.prepare(`UPDATE issue_relations SET json=json_set(json,'$.origin','donefac') WHERE json_extract(json,'$.origin')=?`).run(LEGACY_PRODUCT_ID);
     store.db.function('is_restricted_jira_status_history', { deterministic: true }, json => {
       const archive = JSON.parse(String(json)) as SourceRecordArchive;
       return Number(isRestrictedJiraStatusHistory(archive.record));
@@ -978,7 +982,7 @@ export class SourcePreservationService {
     this.validateJiraChildren(imports, records, attachments, byVersion, appliedJiraChildren);
     const issues = new Map(context.issues.map(value => [value.id, value]));
     const relations = list(input.relations, '업무 관계').map((raw): IssueRelation => {
-      const value = object(raw, '업무 관계');
+      const value = withCurrentRelationOrigin(object(raw, '업무 관계'));
       const sourceIssueId = string(value.sourceIssueId, '관계 원본 업무', 200);
       const targetIssueId = string(value.targetIssueId, '관계 대상 업무', 200);
       if (!issues.has(sourceIssueId) || !issues.has(targetIssueId) || sourceIssueId === targetIssueId) {
@@ -987,8 +991,8 @@ export class SourcePreservationService {
       const relation = { id: string(value.id, '업무 관계 ID', 200), sourceIssueId, targetIssueId,
         type: string(value.type, '업무 관계 종류', 300), version: positive(value.version), createdAt: timestamp(value.createdAt) };
       if (!Object.hasOwn(value, 'origin')) return relation;
-      if (!isCanonicalTeamspaceIssueRelation(value)) fail(400, 'Teamspace 업무 관계의 출처·유형·방향·버전을 확인해 주세요.');
-      return { ...relation, origin: 'teamspace' };
+      if (!isCanonicalDonefacIssueRelation(value)) fail(400, 'Donefac 업무 관계의 출처·유형·방향·버전을 확인해 주세요.');
+      return { ...relation, origin: 'donefac' };
     });
     const relationById = unique(relations, '업무 관계');
     const bindings = this.bindings(records);

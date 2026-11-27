@@ -56,7 +56,7 @@ test('Jira admin Label rows only enter the system field when the field ID is abs
 });
 
 test('Jira custom labels migrate through typed choices, native backup and subsequent updates', async t => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-jira-admin-labels-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-jira-admin-labels-'));
   const app = createApp({ dataDir, outboundWorker: false });
   const server = app.app.listen(0, '127.0.0.1');
   t.after(async () => {

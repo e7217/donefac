@@ -67,7 +67,7 @@ async function fixture(request: APIRequestContext, holiday = day(23)) {
 
 async function openProposal(page: Page, issue: Issue, actorId: string, team = false) {
   await page.setViewportSize({ width: 360, height: 820 });
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actorId);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actorId);
   const query = team ? `?${new URLSearchParams({ scope: 'team', ganttProject: issue.projectId })}` : '';
   await page.goto(`/#/${issue.projectId}/gantt${query}`);
   const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
@@ -330,7 +330,7 @@ test('티켓 상세에서 연결 해제와 변경 초안을 날짜 제안에 반
     const removed = await f.link(blocking, anchor, 'FS', 0);
     const updated = await f.link(revised, anchor, 'FF', 2);
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     const { detail, editor } = await openTicketScheduleEditor(page, anchor);
     const suggestion = editor.getByRole('region', { name: '선후행 연결로 날짜 제안', exact: true });
     const range = suggestion.getByLabel('제안 날짜 범위', { exact: true });

@@ -14,12 +14,12 @@ import type { DocPage, DocRevision, DocumentSiblingOrder, LegacyPackageSummary, 
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
 async function workspace(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-confluence-hierarchy-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-confluence-hierarchy-'));
   const runtime = createApp({ dataDir: directory, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   runtime.attachWebSocket(server);
   const sockets = new Set<WebSocket>();
-  const db = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(directory, 'donefac.sqlite'));
   db.exec('PRAGMA busy_timeout=5000');
   t.after(async () => {
     for (const socket of sockets) socket.terminate();

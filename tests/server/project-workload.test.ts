@@ -108,7 +108,7 @@ test('missing inputs are explicit, zero is a real estimate, and entirely out-of-
 type WorkloadBackup = WorkspaceSnapshot & { schemaVersion: number; trashEntries: {id: string; resource: Issue}[] };
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-workload-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-workload-'));
   async function open() {
     const runtime = createApp({ dataDir, outboundWorker: false });
     const server = runtime.app.listen(0, '127.0.0.1');

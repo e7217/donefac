@@ -3,7 +3,7 @@ import { documentNodes } from './document-references.js';
 import type { DocumentPublicationTarget, RichContent } from './types.js';
 
 const sectionIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/;
-const markdownImportSectionPrefix = 'teamspace-md-section-';
+const markdownImportSectionPrefix = 'donefac-md-section-';
 
 export type DocumentHashTarget = {
   id: string;

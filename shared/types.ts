@@ -463,7 +463,7 @@ export interface MigrationConfiguration {
 }
 export const MIGRATION_MAPPING_FILE_MAX_BYTES = 16 * 1024 * 1024;
 export interface MigrationMappingFile {
-  format: 'teamspace-migration-mapping';
+  format: 'donefac-migration-mapping';
   version: 1;
   packages: {
     id: string;
@@ -600,7 +600,7 @@ export interface SourceRecordArchive {
 export interface AttachmentVersion extends Attachment { attachmentId:string;versionLabel:string;sourceImportId:string|null;sourceRecordId:string|null;localRevision?:number;sourceRevision?:number }
 export type IssueRelationType = 'related' | 'blocks' | 'duplicates';
 export type IssueRelationDirection = 'outgoing' | 'incoming';
-export interface IssueRelation { id:string;sourceIssueId:string;targetIssueId:string;type:string;version:number;createdAt:string;origin?:'teamspace' }
+export interface IssueRelation { id:string;sourceIssueId:string;targetIssueId:string;type:string;version:number;createdAt:string;origin?:'donefac' }
 export interface IssueRelationView extends IssueRelation {
   verifiedBlockerDirection?: IssueRelationDirection;
 }

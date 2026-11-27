@@ -17,7 +17,7 @@ const mentionedUser = 'user-yun';
 type TransitionError = { details?: { reason?: string; currentVersion?: number; requiredFields?: string[] } };
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-issue-status-comment-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-issue-status-comment-'));
   async function start() {
     const runtime = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false, recurringIssueWorker: false });
     const listener = runtime.app.listen(0, '127.0.0.1');
@@ -286,7 +286,7 @@ test('workflow validation and a late receipt write error roll back every side ef
   const ready = await f.update(original, { description: '필수 검토 근거' });
   const attempted = { ...request, expectedVersion: ready.version };
   const before = await f.workspace();
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     db.exec(`CREATE TRIGGER fail_status_change_receipt BEFORE INSERT ON issue_status_change_requests
       BEGIN SELECT RAISE(ABORT, 'synthetic late status change receipt failure'); END`);
@@ -325,7 +325,7 @@ test('status handoff validates priority and target dates, records explicit value
   assert.equal(automaticSaved.issue.dueDate, '2026-11-23');
   assert.equal(Object.hasOwn(automaticSaved.receipt, 'dueDate'), false);
   await f.restart(() => {
-    const database = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+    const database = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
     try { database.exec('ALTER TABLE issue_status_change_requests DROP COLUMN properties_json'); }
     finally { database.close(); }
   });

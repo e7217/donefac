@@ -46,7 +46,7 @@ export function GanttTeamFollowUpChooser({ source, choices, projects, reviewedId
     onCancel={event => { event.preventDefault(); onClose(); }}>
     <h2 id={heading}>{reviewedIds ? '최신 후행 업무 선택' : '후행 업무 선택'}</h2>
     <p id={`${heading}-source`}><strong>{source.key}</strong> · {source.title}</p>
-    <p>함께 검토할 후행 업무를 선택하세요. 선행 날짜를 바꾸면 이 업무에서 이어지는 활성 Teamspace 차단 관계도 계산합니다.{choices.some(choice => choice.relation.origin === 'jira') &&
+    <p>함께 검토할 후행 업무를 선택하세요. 선행 날짜를 바꾸면 이 업무에서 이어지는 활성 Donefac 차단 관계도 계산합니다.{choices.some(choice => choice.relation.origin === 'jira') &&
       ' Jira 이관 관계는 직접 선택한 연결을 포함합니다.'}</p>
     <div className="gantt-team-follow-up-select-all">
       <span role="status">{selected.length}개 선택{choices.length > MAX_TEAM_FOLLOW_UP_RELATIONS &&

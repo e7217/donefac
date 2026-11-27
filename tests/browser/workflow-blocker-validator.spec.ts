@@ -83,7 +83,7 @@ test('워크플로 전이에서 열린 차단 업무를 해결해야 보드와 �
       headers, data: { otherIssueId: target.id, type: 'blocks', direction: 'outgoing' },
     }), 201);
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/settings?section=work`);
     const settings = page.getByRole('region', { name: '프로젝트 워크플로 설정', exact: true });
     const transitions = settings.locator('.workflow-tabs button').filter({ hasText: '허용 전이' });
@@ -217,7 +217,7 @@ test('워크플로 전이에서 열린 하위 업무를 완료한 뒤 상위 업
     const parent = await createIssue('종료할 상위 업무');
     const child = await createIssue('진행 중인 하위 업무', parent.id);
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/settings?section=work`);
     const settings = page.getByRole('region', { name: '프로젝트 워크플로 설정', exact: true });
     const transitions = settings.locator('.workflow-tabs button').filter({ hasText: '허용 전이' });

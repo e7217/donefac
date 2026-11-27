@@ -15,7 +15,7 @@ import { CalendarError, calculateWorkingDateRange, defaultCalendar, validateWork
 import { defaultWorkflow } from '../../shared/workflow-helpers.js';
 import type { AutomaticSchedulePreview, Dependency, DependencyType, Issue, IssueRelation, ScheduleChange, TeamFollowUpScheduleInput, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
 
-async function fixture(dir=mkdtempSync(join(tmpdir(),'teamspace-calendar-')),createProject=true){
+async function fixture(dir=mkdtempSync(join(tmpdir(),'donefac-calendar-')),createProject=true){
   const service=createApp({dataDir:dir}),server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as any).port}/api`;let closed=false;
   const request=async(path:string,method='GET',data?:unknown,headers:Record<string,string>={})=>{const response=await fetch(base+path,{method,headers:{'Content-Type':'application/json',...headers},...(data===undefined?{}:{body:JSON.stringify(data)})});return{status:response.status,data:await response.json() as any};};
   let projectId='';if(createProject){const response=await request('/projects','POST',{key:'CAL'+randomUUID().replaceAll('-','').slice(0,8).toUpperCase(),name:'달력·자동 일정 검증'});assert.equal(response.status,201);projectId=response.data.id;}

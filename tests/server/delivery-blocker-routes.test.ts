@@ -19,14 +19,14 @@ const draftRoute = `${route()}/meeting-draft`;
 type Conflict = { details: { reason: string } };
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-delivery-blockers-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-delivery-blockers-'));
   const app = createApp({ dataDir: directory, outboundWorker: false });
   const server = app.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = server.address();
   assert.ok(address && typeof address === 'object');
   const base = `http://127.0.0.1:${address.port}/api`;
-  const database = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(directory, 'donefac.sqlite'));
   t.after(async () => {
     server.closeAllConnections();
     try { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }

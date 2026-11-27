@@ -37,7 +37,7 @@ type Backup = WorkspaceSnapshot & {
 type RequestOptions = { method?: string; body?: unknown; actor?: string; headers?: Record<string, string> };
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-selection-comments-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-selection-comments-'));
   async function start() {
     const app = createApp({ dataDir: directory, outboundWorker: false });
     const server = app.app.listen(0, '127.0.0.1');
@@ -93,7 +93,7 @@ test('selection comments keep a canonical original, roll back failed receipts an
   } }, 409);
   assert.equal(mismatch.details.reason, 'source_selection_changed');
 
-  const sql = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  const sql = new DatabaseSync(join(f.directory, 'donefac.sqlite'));
   try {
     // An acknowledged live edit can exist without its own checkpoint revision.
     sql.prepare('DELETE FROM revisions WHERE document_id=?').run(document.id);

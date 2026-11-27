@@ -405,7 +405,7 @@ test('360px에서 Jira 우선순위 일부만 합쳐지는 조건을 막고 전�
     const migrated = rows.map(([, , title]) => issues.find(value => value.title === `${title} ${suffix}`)!);
     expect(migrated.map(issue => issue.priority)).toEqual(['urgent', 'urgent', 'high', 'medium']);
     const nativeLow = await json<Issue>(await request.post('/api/issues', {
-      data: { projectId, title: `Teamspace에서 추가한 낮은 업무 ${suffix}`, priority: 'low' },
+      data: { projectId, title: `Donefac에서 추가한 낮은 업무 ${suffix}`, priority: 'low' },
     }), 201);
     issues.push(nativeLow);
 

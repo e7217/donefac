@@ -68,7 +68,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     props.open ? 'is-open' : 'max-[680px]:-translate-x-full')} inert={props.inert}>
     <div className="mb-4 flex items-center gap-2.5 px-1">
       <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-brand text-fg-on-color"><Command size={18} aria-hidden="true"/></span>
-      <div className="min-w-0 flex-1"><strong className="block truncate text-lg font-bold tracking-tight text-fg-primary">Teamspace</strong>
+      <div className="min-w-0 flex-1"><strong className="block truncate text-lg font-bold tracking-tight text-fg-primary">Donefac</strong>
         <span className="block truncate text-2xs text-fg-tertiary">함께 만드는 팀의 작업 공간</span></div>
       <Button variant="ghost" size="icon-sm" className="hidden max-[680px]:inline-flex" onClick={props.onClose} aria-label="메뉴 닫기"><X size={18}/></Button>
     </div>

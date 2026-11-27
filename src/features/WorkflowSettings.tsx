@@ -75,8 +75,8 @@ function WorkflowEditor({ data, projectId, actorId, refresh, notify }: FeaturePr
   }, [notify, baseline]);
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => { if (dirtyRef.current || savingRef.current) { event.preventDefault(); event.returnValue = ''; } };
-    window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', beforeUnload);
-    return () => { window.removeEventListener('teamspace:navigate', guard); window.removeEventListener('beforeunload', beforeUnload); };
+    window.addEventListener('donefac:navigate', guard); window.addEventListener('beforeunload', beforeUnload);
+    return () => { window.removeEventListener('donefac:navigate', guard); window.removeEventListener('beforeunload', beforeUnload); };
   }, [guard]);
   const updateStatus = (index: number, changes: Partial<StatusDraft>) => setDraft(previous => ({ ...previous, statuses: previous.statuses.map((value, row) => row === index ? { ...value, ...changes } : value) }));
   function renameNewId(index: number, id: string) {

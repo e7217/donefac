@@ -3,7 +3,7 @@ import type { Comment, WorkspaceSnapshot } from '../../shared/types';
 
 test('a blank built pilot supports intake, Gantt planning and a linked document handoff', async ({ page, browser, baseURL, request }) => {
   test.setTimeout(90_000);
-  expect(baseURL).toBe(new URL(process.env.TEAMSPACE_PILOT_TEST_URL!).origin);
+  expect(baseURL).toBe(new URL(process.env.DONEFAC_PILOT_TEST_URL!).origin);
   expect(new URL(baseURL!).hostname).toBe('127.0.0.1');
   async function workspace(): Promise<WorkspaceSnapshot> {
     const response = await request.get('/api/workspace');
@@ -136,7 +136,7 @@ test('a blank built pilot supports intake, Gantt planning and a linked document 
 
   const second = await browser.newContext({ baseURL });
   try {
-    await second.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), reader.id);
+    await second.addInitScript(actor => localStorage.setItem('donefac.actor', actor), reader.id);
     const peer = await second.newPage();
     await peer.goto(`/#/${project.id}/documents`);
     await expect(peer.getByRole('article', { name: '저장본 읽기' })).toContainText(documentBody);

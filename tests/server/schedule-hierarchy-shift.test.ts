@@ -17,7 +17,7 @@ const dates = ({ startDate, endDate, dueDate }: Issue) => ({ startDate, endDate,
 const hierarchyShift = ({ id, version }: Issue, workingDays = true) => ({ hierarchy: { id, expectedVersion: version }, days: 1, workingDays });
 
 async function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-hierarchy-shift-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-hierarchy-shift-'));
   async function start() {
     const service = createApp({ dataDir: dir, outboundWorker: false, deadlineReminderWorker: false });
     const server = service.app.listen(0, '127.0.0.1');

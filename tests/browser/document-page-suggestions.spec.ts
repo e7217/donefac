@@ -109,7 +109,7 @@ test('공동 편집 중 다른 사용자가 수정하면 열린 제안을 닫고
   try {
     const enabled = await request.post(`/api/documents/${source.id}/collaboration/enable`, { data: { expectedVersion: source.version } });
     expect(enabled.ok(), await enabled.text()).toBe(true);
-    await context.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), users[1].id);
+    await context.addInitScript(actor => localStorage.setItem('donefac.actor', actor), users[1].id);
     const peer = await context.newPage();
     await Promise.all([open(page, source), open(peer, source)]);
     await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');

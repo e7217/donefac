@@ -7,7 +7,7 @@ import { MAX_COLLABORATION_CURSOR_BYTES, type CollaborationPeer } from '../../sh
 import { decodeBytes, encodeBytes, type CollaborationClient } from '../lib/collaboration-client';
 import { collaborationAbsolutePosition, collaborationRelativePosition } from '../lib/collaboration-order-positions';
 
-const cursorKey = new PluginKey<DecorationSet>('teamspace-remote-cursors');
+const cursorKey = new PluginKey<DecorationSet>('donefac-remote-cursors');
 const rootName = 'default';
 const cursorBase64Limit = Math.ceil(MAX_COLLABORATION_CURSOR_BYTES / 3) * 4;
 
@@ -101,7 +101,7 @@ export function publishEditorCursor(view: EditorView, client: CollaborationClien
 
 export function collaborativeCursors(client: CollaborationClient): Extension {
   return Extension.create({
-    name: 'teamspaceCollaborativeCursors',
+    name: 'donefacCollaborativeCursors',
     addProseMirrorPlugins() {
       return [new Plugin<DecorationSet>({
         key: cursorKey,

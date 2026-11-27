@@ -55,7 +55,7 @@ test('360px 티켓에서 GitLab 활동을 댓글 초안에 추가하고 멘션�
       id: 820, iid: 20, status: 'failed', sha: 'a'.repeat(40), ref: branch, url: pipelineUrl, updated_at: new Date().toISOString(),
     } });
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
     await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
     const panel = page.getByRole('dialog', { name: title, exact: true });
     const field = panel.getByRole('textbox', { name: '댓글 내용', exact: true });

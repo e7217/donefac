@@ -13,7 +13,7 @@ import browserConfig from '../playwright.config.ts';
 import { startPilotTestProxy } from './pilot-test-proxy.mjs';
 
 const repo = fileURLToPath(new URL('../', import.meta.url));
-const scratch = mkdtempSync(join(tmpdir(), 'teamspace-pilot-access-'));
+const scratch = mkdtempSync(join(tmpdir(), 'donefac-pilot-access-'));
 const dataDir = join(scratch, 'data');
 const backupDir = join(scratch, 'backup');
 const accessFile = join(scratch, 'access-key');
@@ -60,8 +60,8 @@ async function startBackend(origin) {
   backend = spawn('bash', ['scripts/pilot-lock.sh', dataDir, process.execPath, '--import', 'tsx', 'server/pilot.ts'], {
     cwd: repo, stdio: ['ignore', 'pipe', 'pipe'], env: {
       ...process.env,
-      TEAMSPACE_PILOT_PORT: '0', TEAMSPACE_PILOT_DEMO: '1', TEAMSPACE_PILOT_OUTBOUND: '0',
-      TEAMSPACE_PILOT_ORIGIN: origin, TEAMSPACE_PILOT_ACCESS_FILE: accessFile,
+      DONEFAC_PILOT_PORT: '0', DONEFAC_PILOT_DEMO: '1', DONEFAC_PILOT_OUTBOUND: '0',
+      DONEFAC_PILOT_ORIGIN: origin, DONEFAC_PILOT_ACCESS_FILE: accessFile,
     },
   });
   backendExit = once(backend, 'close');
@@ -69,7 +69,7 @@ async function startBackend(origin) {
   const ready = new Promise(resolve => {
     backend.stdout.on('data', chunk => {
       backendLogs += chunk;
-      const match = /Teamspace pilot listening on http:\/\/127\.0\.0\.1:(\d+)\s/.exec(backendLogs);
+      const match = /Donefac pilot listening on http:\/\/127\.0\.0\.1:(\d+)\s/.exec(backendLogs);
       if (match) resolve(Number(match[1]));
     });
   });
@@ -134,19 +134,19 @@ async function verifyIntegrations(session, anonymous, origin) {
   } };
   const webhookPath = `${gitlabPath}/webhook`;
   const workspace = await call(session, 'GET', '/api/workspace', 200);
-  const beforeBoard = workspace.headers()['x-teamspace-board-revision'];
-  const beforeGantt = workspace.headers()['x-teamspace-gantt-revision'];
+  const beforeBoard = workspace.headers()['x-donefac-board-revision'];
+  const beforeGantt = workspace.headers()['x-donefac-gantt-revision'];
   assert.match(beforeBoard, /^[a-f0-9]{32}$/u);
   assert.match(beforeGantt, /^[a-f0-9]{32}$/u);
   const boardCheck = `/api/workspace?teamBoardSince=${beforeBoard}`;
   const unchanged = await call(session, 'GET', boardCheck, 204);
   assert.equal(unchanged.headers()['cache-control'], 'no-store');
-  assert.equal(unchanged.headers()['x-teamspace-board-revision'], beforeBoard);
+  assert.equal(unchanged.headers()['x-donefac-board-revision'], beforeBoard);
   assert.equal((await unchanged.body()).length, 0);
-  assert.equal((await call(anonymous, 'GET', boardCheck, 401)).headers()['x-teamspace-board-revision'], undefined);
+  assert.equal((await call(anonymous, 'GET', boardCheck, 401)).headers()['x-donefac-board-revision'], undefined);
   const ganttCheck = `/api/workspace?ganttSince=${beforeGantt}`;
   await call(session, 'GET', ganttCheck, 204);
-  assert.equal((await call(anonymous, 'GET', ganttCheck, 401)).headers()['x-teamspace-gantt-revision'], undefined);
+  assert.equal((await call(anonymous, 'GET', ganttCheck, 401)).headers()['x-donefac-gantt-revision'], undefined);
   const calendarPath = '/api/projects/project-neo/calendar';
   const calendar = await (await call(session, 'GET', calendarPath, 200)).json();
   const calendarName = 'HTTPS 파일럿 작업 달력';
@@ -155,7 +155,7 @@ async function verifyIntegrations(session, anonymous, origin) {
   });
   await call(session, 'GET', boardCheck, 204);
   const changedCalendar = await call(session, 'GET', ganttCheck, 200);
-  const afterCalendar = changedCalendar.headers()['x-teamspace-gantt-revision'];
+  const afterCalendar = changedCalendar.headers()['x-donefac-gantt-revision'];
   assert.match(afterCalendar, /^[a-f0-9]{32}$/u);
   assert.notEqual(afterCalendar, beforeGantt);
   assert.equal((await changedCalendar.json()).calendars.find(item => item.projectId === 'project-neo').name, calendarName);
@@ -166,10 +166,10 @@ async function verifyIntegrations(session, anonymous, origin) {
   });
   assert.equal((await incoming.json()).linked, 1);
   const changedBoard = await call(session, 'GET', boardCheck, 200);
-  const afterBoard = changedBoard.headers()['x-teamspace-board-revision'];
+  const afterBoard = changedBoard.headers()['x-donefac-board-revision'];
   assert.match(afterBoard, /^[a-f0-9]{32}$/u);
   assert.notEqual(afterBoard, beforeBoard);
-  assert.notEqual(changedBoard.headers()['x-teamspace-gantt-revision'], afterCalendar);
+  assert.notEqual(changedBoard.headers()['x-donefac-gantt-revision'], afterCalendar);
   assert.ok((await changedBoard.json()).gitlabLinks.some(link => link.issueId === 'issue-2' &&
     link.kind === 'merge_request' && link.title === webhook.object_attributes.title));
   await call(session, 'GET', `/api/workspace?teamBoardSince=${afterBoard}`, 204);
@@ -556,7 +556,7 @@ async function verifyBrowser(origin) {
   try {
     session.setDefaultTimeout(socketTimeout);
     colleagueSession.setDefaultTimeout(socketTimeout);
-    await colleagueSession.addInitScript(() => localStorage.setItem('teamspace.actor', 'user-seo'));
+    await colleagueSession.addInitScript(() => localStorage.setItem('donefac.actor', 'user-seo'));
     const page = await session.newPage();
     const seenUrls = [];
     session.on('request', entry => seenUrls.push(entry.url()));

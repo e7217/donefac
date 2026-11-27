@@ -265,7 +265,7 @@ test('360px 공유 읽기에서 저장한 문장에 댓글을 달고 변경된 �
   const readHash = documentReadingHash(created.id, project.id);
   try {
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), reviewer.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), reviewer.id);
     const existing = await request.post('/api/comments', { headers: { 'X-Actor-Id': author.id }, data: {
       resourceType: 'document', resourceId: created.id, body: '공유 전에 남긴 일반 의견',
     } });
@@ -346,8 +346,8 @@ test('공유한 읽기 주소는 편집 연결 없이 열리고 열린 공동 �
   try {
     const enabled = await request.post(`/api/documents/${created.id}/collaboration/enable`, { data: { expectedVersion: created.version } });
     expect(enabled.ok(), await enabled.text()).toBe(true);
-    await page.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), users[0].id);
-    await peerContext.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), users[1].id);
+    await page.addInitScript(actor => localStorage.setItem('donefac.actor', actor), users[0].id);
+    await peerContext.addInitScript(actor => localStorage.setItem('donefac.actor', actor), users[1].id);
     const peer = await peerContext.newPage();
     const readHash = documentReadingHash(created.id, projectId);
     const editorHref = `/#/${projectId}/documents/${created.id}`;
@@ -409,7 +409,7 @@ test('360px 저장본에서 서식과 접힌 본문의 검색 결과를 이동�
   ]);
   try {
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), users[0].id);
+    await page.addInitScript(actor => localStorage.setItem('donefac.actor', actor), users[0].id);
     await page.goto(`/#/${projectId}/documents/${created.id}`);
     const editorParagraph = page.locator('.docs-prose').getByText('read(+)', { exact: true });
     await expect(editorParagraph).toBeVisible();
@@ -422,7 +422,7 @@ test('360px 저장본에서 서식과 접힌 본문의 검색 결과를 이동�
     const input = panel.getByRole('textbox', { name: '찾을 텍스트' });
     const result = panel.getByRole('status');
     const currentBlock = reader.locator('[data-document-reader-find-current]');
-    const exactRange = () => page.evaluate(() => [...(CSS.highlights.get('teamspace-document-reader-find-current') ?? [])][0]?.toString());
+    const exactRange = () => page.evaluate(() => [...(CSS.highlights.get('donefac-document-reader-find-current') ?? [])][0]?.toString());
     const details = reader.locator('details');
     await expect(details).toHaveCount(1);
     await details.locator('summary').press('Enter');

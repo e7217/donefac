@@ -39,7 +39,7 @@ async function open(dir: string) {
 type Fixture = Awaited<ReturnType<typeof open>>;
 
 async function withFixture(run: (app: Fixture, dir: string) => Promise<void>) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-cycle-completion-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-cycle-completion-'));
   try {
     const app = await open(dir);
     try { await run(app, dir); } finally { await app.close(); }
@@ -250,7 +250,7 @@ test('a failed cycle write rolls back earlier ticket and audit changes and the s
     const second = await issue(app, '두 번째 업무', { cycleId: source.id });
     const preview = await review(app, source, null);
     const before = await workspace(app);
-    const db = new DatabaseSync(join(dir, 'teamspace.sqlite'));
+    const db = new DatabaseSync(join(dir, 'donefac.sqlite'));
     const apply = () => app.call<CycleCompletionResult>(completion(source), 'POST', { previewId: preview.previewId });
     try {
       db.exec(`CREATE TRIGGER synthetic_cycle_commit_error BEFORE UPDATE ON planning_items
@@ -390,7 +390,7 @@ test('a failure saving the retry receipt also rolls back the cycle history and t
     await issue(app, '이월 롤백 업무', { cycleId: source.id });
     const preview = await review(app, source, null);
     const before = await workspace(app);
-    const db = new DatabaseSync(join(dir, 'teamspace.sqlite'));
+    const db = new DatabaseSync(join(dir, 'donefac.sqlite'));
     const apply = () => app.call<CycleCompletionResult>(completion(source), 'POST', { previewId: preview.previewId });
     try {
       db.exec(`CREATE TRIGGER synthetic_cycle_receipt_error BEFORE UPDATE ON cycle_completion_previews

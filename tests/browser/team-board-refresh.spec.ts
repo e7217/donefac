@@ -30,7 +30,7 @@ async function purge(request: APIRequestContext, path: string, headers: Record<s
 
 async function openBoard(page: Page, route: string, actorId: string) {
   await page.clock.install();
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actorId);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actorId);
   await page.goto(`/${route}`);
   await expect(board(page)).toBeVisible();
   expect(await page.evaluate(() => document.visibilityState)).toBe('visible');

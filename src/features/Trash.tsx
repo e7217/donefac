@@ -71,8 +71,8 @@ function TrashList({ data, projectId, actorId, refresh, openIssue, openDocument 
   }, [load]);
   useEffect(() => {
     const changed = () => { if (!actionRequest.current) void load(); };
-    window.addEventListener('teamspace:trash-changed', changed);
-    return () => window.removeEventListener('teamspace:trash-changed', changed);
+    window.addEventListener('donefac:trash-changed', changed);
+    return () => window.removeEventListener('donefac:trash-changed', changed);
   }, [load]);
   useEffect(() => () => actionRequest.current?.abort(), []);
   useEffect(() => { if (result) announcement.current?.focus(); }, [result]);
@@ -126,7 +126,7 @@ function TrashList({ data, projectId, actorId, refresh, openIssue, openDocument 
       if (request.signal.aborted) return;
       setPage(previous => previous && { ...previous, total: Math.max(0, previous.total - 1), items: previous.items.filter(item => item.id !== entry.id) });
       setResult({ entry, restored });
-      window.dispatchEvent(new Event('teamspace:trash-changed'));
+      window.dispatchEvent(new Event('donefac:trash-changed'));
       const reloading = load();
       if (restored) await refreshWorkspace(request);
       await reloading;

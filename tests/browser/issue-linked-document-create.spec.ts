@@ -43,7 +43,7 @@ test('360px 티켓에서 연결 문서 저장 응답을 잃어도 같은 요청�
     parent = await json<DocPage>(await request.post('/api/documents', {
       headers, data: { projectId: null, title: `팀 공통 설계 모음 ${suffix}` },
     }), 201);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     const query = new URLSearchParams({ boardQuery: issue.title });
     await page.goto(`/#/${project.id}/teamboard?${query}`);
     const board = page.getByRole('region', { name: '전체 프로젝트 보드', exact: true });
@@ -169,7 +169,7 @@ test('티켓에서 변경된 프로젝트 팀 템플릿을 확인하고 저장 �
         sourceDocumentId: source.id, expectedDocumentVersion: source.version },
     }), 201);
     currentTemplate = template;
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/teamboard?${new URLSearchParams({ boardQuery: issue.title })}`);
     await button(page.getByRole('region', { name: '전체 프로젝트 보드', exact: true }), `${issue.key} 업무 열기`).click({ timeout: 35_000 });
     const ticketLocation = page.url();

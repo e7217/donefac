@@ -67,7 +67,7 @@ test('360px에서 저장소 범위를 고르고 이관된 Jira 키로 미리 본
     await addressInput.fill(address);
     await page.getByLabel(/^GitLab 프로젝트 ID/).fill(String(repo));
     const routes = page.getByRole('region', { name: '저장소별 Jira 원본 키 연결', exact: true });
-    const destination = routes.getByLabel(`저장소 ${repo} Teamspace 프로젝트`, { exact: true });
+    const destination = routes.getByLabel(`저장소 ${repo} Donefac 프로젝트`, { exact: true });
     const source = routes.getByLabel(`저장소 ${repo} Jira 원본 인스턴스`, { exact: true });
     await destination.selectOption(projectId);
     await source.selectOption(instanceKey);

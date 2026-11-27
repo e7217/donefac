@@ -27,7 +27,7 @@ function expectFailure(status: number, reason: string) {
 }
 
 function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-markdown-archive-service-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-markdown-archive-service-'));
   let store = new Store(directory);
   const files = new AttachmentFiles(directory);
   const appender = new AttachmentAppend(directory);

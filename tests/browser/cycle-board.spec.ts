@@ -58,7 +58,7 @@ type Fixture = Awaited<ReturnType<typeof fixture>>;
 const rowSelector = (issue: Issue) => `[data-issue-id="${issue.id}"]`;
 
 async function openBoard(page: Page, f: Fixture, from: 'issues' | 'backlog', cycle?: PlanningItem) {
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
   await page.goto(`/#/${f.project.id}/${from}${cycle ? `/${cycle.id}` : ''}`);
   if (from === 'issues') await page.locator('.issues-feature').getByRole('button', { name: '백로그 · 사이클', exact: true }).click();
   await expect(page.getByRole('heading', { name: '백로그 · 사이클', exact: true })).toBeVisible({ timeout: 30_000 });

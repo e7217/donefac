@@ -96,7 +96,7 @@ test('전체 프로젝트 간트는 프로젝트 필터를 유지하고 각 달�
     await data.mondayOff();
     const first = await data.issue(data.first, '첫 프로젝트 업무');
     const second = await data.issue(data.second, '둘째 프로젝트 업무');
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), data.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), data.actor.id);
     await page.goto(`/#/${data.first.id}/overview`);
     await button(page.locator('aside.sidebar'), '팀 개요').click();
     await button(page.getByRole('navigation', { name: '팀 개요 화면', exact: true }), name).click();
@@ -217,7 +217,7 @@ test('360px 전체 프로젝트 간트에서 자체 달력과 같은 프로젝�
     const predecessor = await data.issue(data.second, '같은 프로젝트의 선행 후보');
     const anchor = await data.issue(data.second, '둘째 프로젝트 연결 편집', monday, end);
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), data.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), data.actor.id);
     await page.goto(`/${route(data.first)}?scope=team`);
     await narrow(page, data.prefix);
     await expect.poll(() => location(page)).toEqual({ path: route(data.first), scope: 'team', project: null, issue: null });
@@ -278,7 +278,7 @@ test('전체 프로젝트 간트는 연결마다 프로젝트 달력으로 충�
     const secondSuccessor = await data.issue(data.second, '둘째 프로젝트 후행', monday, end);
     const valid = await data.link(firstPredecessor, firstSuccessor);
     const conflict = await data.link(secondPredecessor, secondSuccessor);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), data.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), data.actor.id);
     await page.goto(`/${route(data.first)}?scope=team`);
     await narrow(page, data.prefix);
 

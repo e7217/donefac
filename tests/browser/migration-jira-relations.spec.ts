@@ -91,7 +91,7 @@ test('360px에서 기존 Jira 업무의 새 관계를 이관해 일정 연결을
     const local = await request.post(nativeEndpoint, { data: { otherIssueId: nativeNeighbor.id, type: 'related', direction: 'outgoing' } });
     expect(local.status(), await local.text()).toBe(201);
     const localRelation = await local.json() as IssueRelation;
-    expect(localRelation.origin).toBe('teamspace');
+    expect(localRelation.origin).toBe('donefac');
 
     const followUp = await upload('jira-with-link', true);
     await page.goto(`/#/${projectId}/settings?section=migration`);

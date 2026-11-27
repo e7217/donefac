@@ -23,7 +23,7 @@ const mergeRequestRead = (iid: number) => `${projectRead}/merge_requests/${iid}`
 type Backup = Pick<WorkspaceSnapshot, 'gitlabLinks'> & { schemaVersion: number; automationRules: AutomationRule[]; automationRuns: AutomationRun[] };
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-mr-target-branch-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-mr-target-branch-'));
   const runtime = createApp({ dataDir, seed: true, outboundWorker: false, deadlineReminderWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   const details = new Map<string, unknown>();

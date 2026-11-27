@@ -44,7 +44,7 @@ test('검토한 티켓 저장의 응답이 끊긴 뒤 같은 변경 결과를 �
     await read(await request.post('/api/dependencies', { data: {
       predecessorId: predecessor.id, successorId: ticket.id, type: 'FS', lagDays: 0,
     } }), 201);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/issues?issue=${ticket.id}`);
     const panel = page.getByRole('dialog', { name: new RegExp(suffix) });
     const comment = '등록하지 않은 인수인계 메모';
@@ -124,7 +124,7 @@ test('360px 티켓 일반 저장에서 숨은 선행과 프로젝트 간 차단�
       otherIssueId: anchor.id, type: 'blocks', direction: 'outgoing',
     } }), 201);
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/teamboard?${new URLSearchParams({ boardQuery: anchor.title })}`);
     const board = page.getByRole('region', { name: '전체 프로젝트 보드', exact: true });
     const open = button(board, `${anchor.key} 업무 열기`);

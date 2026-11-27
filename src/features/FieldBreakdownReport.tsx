@@ -224,8 +224,8 @@ function ProjectFieldBreakdown(props: Props) {
       if (!window.confirm('조회하지 않은 필드 집계 조건을 버리고 이동할까요?')) event.preventDefault();
       else afterAcceptedNavigation(event, discard);
     };
-    window.addEventListener('teamspace:navigate', guard);
-    return () => window.removeEventListener('teamspace:navigate', guard);
+    window.addEventListener('donefac:navigate', guard);
+    return () => window.removeEventListener('donefac:navigate', guard);
   }, [discard]);
 
   const reloadViews = useCallback(async () => {

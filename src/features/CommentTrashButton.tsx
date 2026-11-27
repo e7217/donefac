@@ -6,7 +6,7 @@ import type { Comment, FeatureProps } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import './comment-trash.css';
 
-export const COMMENT_LIST_CHANGED = 'teamspace:comments-changed';
+export const COMMENT_LIST_CHANGED = 'donefac:comments-changed';
 
 type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   comment: Comment;
@@ -28,13 +28,13 @@ export function CommentTrashButton({ comment, actorId, notify, refresh, disabled
     try {
       await api(`/comments/${encodeURIComponent(comment.id)}`, { method: 'DELETE', headers: { 'X-Actor-Id': actorId } });
       onArchived(comment);
-      window.dispatchEvent(new Event('teamspace:trash-changed'));
+      window.dispatchEvent(new Event('donefac:trash-changed'));
       notify(`${label}을 휴지통으로 옮겼습니다.`);
       void refresh().catch(() => undefined);
     } catch (error) {
       notify(error instanceof Error ? error.message : `${label}을 휴지통으로 옮기지 못했습니다.`, 'error');
       if (error instanceof ApiError && (error.status === 404 || error.status === 409)) {
-        window.dispatchEvent(new Event('teamspace:trash-changed'));
+        window.dispatchEvent(new Event('donefac:trash-changed'));
       }
     } finally {
       busy.current = false;

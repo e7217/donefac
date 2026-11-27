@@ -34,7 +34,7 @@ const issueSummary=():RichContent=>({type:'issueSummary',attrs:{projectId:'proje
 const pinnedInclude=():RichContent=>({type:'documentRevisionInclude',attrs:{documentId:'doc-b',revisionId:'revision-test',label:'검증할 문서 버전'}});
 const document=(id:string,content=body()):DocPage=>({id,projectId:'project-test',parentId:null,title:id,content,plainText:'원본',icon:'📄',status:'draft',version:1,authorId:'user-test',createdAt:now,updatedAt:now});
 function fixture(){
-  const dir=mkdtempSync(join(tmpdir(),'teamspace-document-content-')),store=new Store(dir);store.put('users',{id:'user-test',name:'문서 담당',email:'doc@example.test',color:'#668899'});store.put('projects',{id:'project-test',key:'DOC',name:'문서',description:'',color:'#668899',createdAt:now});
+  const dir=mkdtempSync(join(tmpdir(),'donefac-document-content-')),store=new Store(dir);store.put('users',{id:'user-test',name:'문서 담당',email:'doc@example.test',color:'#668899'});store.put('projects',{id:'project-test',key:'DOC',name:'문서',description:'',color:'#668899',createdAt:now});
   for(const id of ['doc-a','doc-b','doc-c'])store.put('documents',document(id));
   const contents=new DocumentContentService(store);return{store,contents,close:()=>{store.db.close();rmSync(dir,{recursive:true,force:true});}};
 }

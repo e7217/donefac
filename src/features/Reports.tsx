@@ -167,10 +167,10 @@ function ProjectReports(props: Props) {
         event.returnValue = '';
       }
     };
-    window.addEventListener('teamspace:navigate', guard);
+    window.addEventListener('donefac:navigate', guard);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', guard);
+      window.removeEventListener('donefac:navigate', guard);
       window.removeEventListener('beforeunload', unload);
     };
   }, [notify, resetDraft]);
@@ -362,7 +362,7 @@ function ProjectReports(props: Props) {
     } else if (view === 'blockers') {
       if (!props.onChangeBlockerScope(null)) return;
     } else if ((view === 'worklogs' || next === 'worklogs') &&
-        !window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
+        !window.dispatchEvent(new Event('donefac:navigate', {cancelable:true}))) return;
     setView(next);
   }
   return (

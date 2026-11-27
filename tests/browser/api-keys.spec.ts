@@ -24,7 +24,7 @@ const test = base.extend<{ keys: KeyFixture }>({
 
 test('API 키 전체 값은 한 번만 표시되고 명시적으로 닫은 뒤 실제 자동화 접근·폐기가 동작한다', async ({ page, context, keys }) => {
   const actorId = keys.workspace.users[0].id;
-  await context.addInitScript(value => localStorage.setItem('teamspace.actor', value), actorId);
+  await context.addInitScript(value => localStorage.setItem('donefac.actor', value), actorId);
   await page.goto(`/#/${keys.workspace.projects[0].id}/settings?section=integrations`);
   await expect(page.getByRole('heading', { name: '개인 API 키', exact: true })).toBeVisible();
   await page.getByLabel('API 키 이름', { exact: true }).fill(keys.prefix);
@@ -37,7 +37,7 @@ test('API 키 전체 값은 한 번만 표시되고 명시적으로 닫은 뒤 �
   await expect(dialog.getByLabel('발급한 API 키', { exact: true })).toHaveValue(created.token);
   expect(await page.evaluate(token => [...Object.values(localStorage), ...Object.values(sessionStorage)].some(value => value.includes(token)), created.token)).toBe(false);
   page.once('dialog', value => value.dismiss());
-  expect(await page.evaluate(() => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })))).toBe(false);
+  expect(await page.evaluate(() => window.dispatchEvent(new Event('donefac:navigate', { cancelable: true })))).toBe(false);
   await expect(dialog).toBeVisible();
   page.once('dialog', value => value.dismiss());
   await dialog.getByRole('button', { name: '확인하고 닫기', exact: true }).click();
@@ -73,7 +73,7 @@ test('폐기 응답이 늦어져도 작업자를 바꾸면 이전 작업자의 �
     expect(response.status()).toBe(201); const value = await response.json() as ApiKeyCreated;
     records.push(value); keys.created.push({ id: value.key.id, actorId: actor.id });
   }
-  await context.addInitScript(value => localStorage.setItem('teamspace.actor', value), actorA.id);
+  await context.addInitScript(value => localStorage.setItem('donefac.actor', value), actorA.id);
   await page.goto(`/#/${keys.workspace.projects[0].id}/settings?section=integrations`);
   await expect(page.locator('.api-key-row').filter({ hasText: records[0].key.name })).toBeVisible();
   let releaseResponse = () => {};
@@ -108,7 +108,7 @@ test('발급과 폐기 응답을 잃어도 같은 API 키를 확인하고 새 �
   const sent: { body: string | null; actor: string }[] = [];
   let lost: ApiKeyCreated | undefined;
   let replacement: ApiKeyCreated | undefined;
-  await context.addInitScript(value => localStorage.setItem('teamspace.actor', value), actorId);
+  await context.addInitScript(value => localStorage.setItem('donefac.actor', value), actorId);
   await page.goto(`/#/${projectId}/settings?section=integrations`);
   const keyName = page.getByLabel('API 키 이름', { exact: true });
   const issue = page.getByRole('button', { name: 'API 키 발급', exact: true });

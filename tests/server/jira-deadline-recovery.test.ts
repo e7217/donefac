@@ -25,9 +25,9 @@ interface SourceIssue {
 }
 
 async function fixture(t: TestContext, rows: SourceIssue[]) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-jira-deadline-recovery-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-jira-deadline-recovery-'));
   const service = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false, recurringIssueWorker: false });
-  const database = new DatabaseSync(join(dataDir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(dataDir, 'donefac.sqlite'));
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {
     server.closeAllConnections();

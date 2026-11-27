@@ -179,13 +179,13 @@ function threadMatchesCommentSearch(root: Comment, replies: readonly Comment[], 
   return terms.every(term => text.includes(term));
 }
 
-const cacheKey = (actorId: string, id: string) => `teamspace:document-draft:${actorId}:${id}`;
-const saveCacheKey = (actorId: string, id: string) => `teamspace:document-save:${JSON.stringify([actorId, id])}`;
-const restoreCacheKey = (actorId: string, id: string) => `teamspace:document-restore:${JSON.stringify([actorId, id])}`;
-const editCopyCacheKey = (actorId: string, id: string) => `teamspace:document-edit-copy:${JSON.stringify([actorId, id])}`;
-const commentCacheKey = (actorId: string, id: string) => `teamspace:document-comment-draft:${actorId}:${id}`;
-const commentAttemptKey = (actorId: string, id: string) => `teamspace:document-comment-attempt:${JSON.stringify([actorId, id])}`;
-const selectionCommentCacheKey = (actorId: string, id: string) => `teamspace:document-selection-comment-draft:${actorId}:${id}`;
+const cacheKey = (actorId: string, id: string) => `donefac:document-draft:${actorId}:${id}`;
+const saveCacheKey = (actorId: string, id: string) => `donefac:document-save:${JSON.stringify([actorId, id])}`;
+const restoreCacheKey = (actorId: string, id: string) => `donefac:document-restore:${JSON.stringify([actorId, id])}`;
+const editCopyCacheKey = (actorId: string, id: string) => `donefac:document-edit-copy:${JSON.stringify([actorId, id])}`;
+const commentCacheKey = (actorId: string, id: string) => `donefac:document-comment-draft:${actorId}:${id}`;
+const commentAttemptKey = (actorId: string, id: string) => `donefac:document-comment-attempt:${JSON.stringify([actorId, id])}`;
+const selectionCommentCacheKey = (actorId: string, id: string) => `donefac:document-selection-comment-draft:${actorId}:${id}`;
 type CommentContext = { actorId: string; documentId: string };
 type CommentAttempt = CommentContext & { requestId: string; generation: string; content: ReturnType<typeof commentDraftPayload> };
 type DocumentEditCopyAttempt = {
@@ -1108,8 +1108,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       afterAcceptedNavigation(event, discardCommentEdit);
       if (closeCreateForm) afterAcceptedNavigation(event, closeCreateDocument);
     };
-    window.addEventListener('teamspace:navigate', guard);
-    return () => window.removeEventListener('teamspace:navigate', guard);
+    window.addEventListener('donefac:navigate', guard);
+    return () => window.removeEventListener('donefac:navigate', guard);
   }, [annotationDialog, archiveImport, closeCreateDocument, confirmCreateDocumentExit, newOpen, notify, rememberDraft, rememberComment, selectedDocumentId, isReplySending, hasReplyDraft, offlineExport,
     discardCommentEdit, hasCommentEditDraft, isCommentEditPending]);
 
@@ -1359,14 +1359,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     loadCommentList.current = loadComments;
     reload();
     window.addEventListener(COMMENT_LIST_CHANGED, reload);
-    window.addEventListener('teamspace:trash-changed', reload);
-    window.addEventListener('teamspace:workspace-imported', reload);
+    window.addEventListener('donefac:trash-changed', reload);
+    window.addEventListener('donefac:workspace-imported', reload);
     return () => {
       activeRequest?.abort();
       loadCommentList.current = null;
       window.removeEventListener(COMMENT_LIST_CHANGED, reload);
-      window.removeEventListener('teamspace:trash-changed', reload);
-      window.removeEventListener('teamspace:workspace-imported', reload);
+      window.removeEventListener('donefac:trash-changed', reload);
+      window.removeEventListener('donefac:workspace-imported', reload);
     };
   }, [documentId, actorId, commentActivation]);
 
@@ -1443,7 +1443,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   function selectDocument(id: string, showReading = reading) {
     if (id === selectedDocumentId) return true;
     if (documentAction) {
-      if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return false;
+      if (!window.dispatchEvent(new Event('donefac:navigate', { cancelable: true }))) return false;
       return onSelectDocument(id, undefined, showReading);
     }
     if (savingRef.current || isReplySending() || isCommentEditPending()) { notify('저장이 끝난 후 이동해주세요.', 'error'); return false; }
@@ -1918,7 +1918,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     savingRef.current = true; setSaving(true);
     try {
       await remove(`/documents/${captured.id}?expectedVersion=${captured.expectedVersion}`);
-      window.dispatchEvent(new Event('teamspace:trash-changed'));
+      window.dispatchEvent(new Event('donefac:trash-changed'));
       const clean = { ...captured, dirty: false }; rememberDraft(clean, capturedActor);
       rememberSaveAttempt(capturedActor, captured.id, null);
       rememberComment(emptyCommentDraft(), { actorId: capturedActor, documentId: captured.id });
@@ -2748,7 +2748,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   aria-expanded={exportOpen} onClick={() => setExportOpen(value => !value)}><ArrowDownToLine size={16} /></button>
                 {exportOpen && <div className="docs-popover docs-export-menu">
                   <button onClick={() => { downloadDocument(`${draft.title || 'document'}.md`, `# ${draft.title}\n\n${contentMarkdown(draft.content)}`, 'text/markdown;charset=utf-8'); setExportOpen(false); }}>Markdown 내보내기</button>
-                  <button onClick={() => { downloadDocument(`${draft.title || 'document'}.json`, JSON.stringify({ format: 'teamspace-document', schemaVersion: Math.max(2, documentContentSchemaVersion(draft.content)), document: { ...selectedPage, title: draft.title, content: draft.content, plainText: draft.plainText, status: draft.status, parentId: draft.parentId, labels: draft.labels.length ? draft.labels : undefined } }, null, 2), 'application/json'); setExportOpen(false); }}>문서 JSON 내보내기</button>
+                  <button onClick={() => { downloadDocument(`${draft.title || 'document'}.json`, JSON.stringify({ format: 'donefac-document', schemaVersion: Math.max(2, documentContentSchemaVersion(draft.content)), document: { ...selectedPage, title: draft.title, content: draft.content, plainText: draft.plainText, status: draft.status, parentId: draft.parentId, labels: draft.labels.length ? draft.labels : undefined } }, null, 2), 'application/json'); setExportOpen(false); }}>문서 JSON 내보내기</button>
                   <button onClick={() => openOfflineExport('subtree', exportMenuTrigger.current)}>문서 트리 ZIP 내보내기</button>
                 </div>}
               </div>

@@ -22,7 +22,7 @@ const jiraTitle = '원본 이관 일정 업무';
 const wikiTitle = '원본 이관 프로젝트 문서';
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-mapping-transfer-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-mapping-transfer-'));
   const service = createApp({ dataDir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {
@@ -123,7 +123,7 @@ test('mapping transfer only binds exact re-staged source bytes and restores sett
     excludedRecords: [`${priorJira.id}/issue:101`], jiraReleaseSelections: { [`${priorJira.id}/issue:100`]: '4301' },
   };
   const mapping = await source.call<MigrationMappingFile>(exportPath, 'POST', { configuration });
-  assert.equal(mapping.format, 'teamspace-migration-mapping');
+  assert.equal(mapping.format, 'donefac-migration-mapping');
   assert.equal(mapping.version, 1);
   assert.deepEqual(mapping.packages, [priorJira, priorWiki].map(value => ({
     id: value.id, sha256: value.sha256, product: value.source.product, instanceKey: value.source.instanceKey, format: value.source.format,

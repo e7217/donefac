@@ -115,7 +115,7 @@ function ProjectSavedViews({projectId, project, actorId, planningItems, statuses
         event.returnValue = '';
       }
     };
-    window.addEventListener('teamspace:navigate', onNavigate);
+    window.addEventListener('donefac:navigate', onNavigate);
     window.addEventListener('beforeunload', onUnload);
     if (projectId && projectId !== 'all') {
       const publish = captureViewsPublisher();
@@ -131,7 +131,7 @@ function ProjectSavedViews({projectId, project, actorId, planningItems, statuses
       mounted.current = false;
       controller.abort();
       openViewRequest.current = null;
-      window.removeEventListener('teamspace:navigate', onNavigate);
+      window.removeEventListener('donefac:navigate', onNavigate);
       window.removeEventListener('beforeunload', onUnload);
     };
   }, [projectId]);
@@ -264,12 +264,12 @@ function ProjectSavedViews({projectId, project, actorId, planningItems, statuses
     }
   };
   const reapplySelected = () => {
-    if (selected && window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) onApply(selected);
+    if (selected && window.dispatchEvent(new Event('donefac:navigate', {cancelable:true}))) onApply(selected);
   };
   const reloadConflicted = async () => {
     if (editing?.mode !== 'update') return;
     if (!window.confirm('입력한 보기 이름을 버리고 최신 보기 설정을 적용할까요?')) return;
-    const confirmation = new Event('teamspace:navigate', {cancelable:true});
+    const confirmation = new Event('donefac:navigate', {cancelable:true});
     editorReload.current = confirmation;
     const accepted = window.dispatchEvent(confirmation);
     editorReload.current = null;

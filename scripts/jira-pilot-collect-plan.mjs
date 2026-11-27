@@ -9,7 +9,7 @@ export const JIRA_COLLECT_MAX_BATCH = 500;
 export const JIRA_COLLECT_MAX_PLAN = 10_000;
 export const JIRA_COLLECTION_PLAN_MAX_BYTES = 2 * 1024 * 1024;
 
-const format = 'teamspace-jira-collection-plan';
+const format = 'donefac-jira-collection-plan';
 const version = 1;
 const sha256Pattern = /^[a-f0-9]{64}$/u;
 const invalidPlan = 'Jira 수집 계획의 형식 또는 업무 범위를 확인해 주세요.';

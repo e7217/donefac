@@ -32,12 +32,12 @@ function content(text: string): RichContent {
 }
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-document-publication-group-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-document-publication-group-'));
   const service = createApp({ dataDir, outboundWorker: false, recurringIssueWorker: false, deadlineReminderWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
-  const database = new DatabaseSync(join(dataDir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(dataDir, 'donefac.sqlite'));
   t.after(async () => {
     await new Promise<void>(resolve => server.close(() => resolve()));
     database.close();

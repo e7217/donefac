@@ -114,7 +114,7 @@ function RelationList({
   }) : [];
   const shownMatches = matches.slice(0, MATCH_LIMIT);
   const selectedIssue = issueById.get((duplicateDraft ?? draft)?.otherIssueId ?? '');
-  const originals = relations.filter(row => row.origin === 'teamspace' && row.type === 'duplicates' && row.sourceIssueId === issueId);
+  const originals = relations.filter(row => row.origin === 'donefac' && row.type === 'duplicates' && row.sourceIssueId === issueId);
   const existingOriginal = originals.length === 1 ? issueById.get(originals[0].targetIssueId) : undefined;
   const activeOffset = Math.min(offset, lastOffset(relations.length));
   const { workflows, issueSchemas } = data;
@@ -131,7 +131,7 @@ function RelationList({
     const statuses = new Map<string, string>();
     if (!highlightOpenBlockers) return statuses;
     for (const relation of relations) {
-      const incoming = relation.origin === 'teamspace' && relation.type === 'blocks' && relation.targetIssueId === issueId ||
+      const incoming = relation.origin === 'donefac' && relation.type === 'blocks' && relation.targetIssueId === issueId ||
         relation.verifiedBlockerDirection === 'incoming';
       if (!incoming) continue;
       const source = issueById.get(otherId(relation, issueId));
@@ -180,13 +180,13 @@ function RelationList({
   useEffect(() => {
     const reload = () => { if (!pendingRef.current) void load(); };
     const timer = setTimeout(reload, 0);
-    window.addEventListener('teamspace:trash-changed', reload);
-    window.addEventListener('teamspace:workspace-imported', reload);
+    window.addEventListener('donefac:trash-changed', reload);
+    window.addEventListener('donefac:workspace-imported', reload);
     return () => {
       clearTimeout(timer);
       getRequest.current?.abort();
-      window.removeEventListener('teamspace:trash-changed', reload);
-      window.removeEventListener('teamspace:workspace-imported', reload);
+      window.removeEventListener('donefac:trash-changed', reload);
+      window.removeEventListener('donefac:workspace-imported', reload);
     };
   }, [load]);
 
@@ -311,7 +311,7 @@ function RelationList({
       const row = await api<IssueRelation>(`${path}/${encodeURIComponent(attempt.relationId)}`, {
         method: 'PATCH', headers: { 'X-Actor-Id': actorId }, body: attempt.body, signal: AbortSignal.timeout(12_000),
       });
-      if (row?.id !== attempt.relationId || row.origin !== 'teamspace' ||
+      if (row?.id !== attempt.relationId || row.origin !== 'donefac' ||
           (row.sourceIssueId !== issueId && row.targetIssueId !== issueId)) throw new Error('업무 관계 수정 응답을 확인하지 못했습니다.');
       reflectRelation(row);
       closeAction();
@@ -379,7 +379,7 @@ function RelationList({
       const latestIssue = snapshot.issues.find(issue => issue.id === issueId);
       const latestOriginal = snapshot.issues.find(issue => issue.id === captured.otherIssueId);
       if (!latestIssue) throw new Error('닫을 업무의 최신 정보를 찾을 수 없습니다.');
-      const matchingRelation = rows.find(row => row.origin === 'teamspace' && row.type === 'duplicates' &&
+      const matchingRelation = rows.find(row => row.origin === 'donefac' && row.type === 'duplicates' &&
         row.sourceIssueId === issueId && row.targetIssueId === captured.otherIssueId);
       if (latestIssue.status === captured.status && latestIssue.version > captured.expectedVersion && matchingRelation) {
         duplicateClosed({ issue: latestIssue, relation: matchingRelation }, true);
@@ -525,7 +525,7 @@ function RelationList({
         const other = issueById.get(targetId);
         const scheduleMode = currentIssue && other && other.id !== issueId && currentIssue.projectId === other.projectId
           ? issueRelationScheduleMode(relation) : null;
-        const local = relation.origin === 'teamspace';
+        const local = relation.origin === 'donefac';
         const label = local ? CHOICES[choiceFor(relation, issueId)].label : relation.type;
         const labelId = `${editHeading}-${activeOffset + index}`;
         const created = new Date(relation.createdAt);

@@ -109,7 +109,7 @@ test('360px 간트에서 현재 보기와 저장된 일정을 내려받아 오�
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
     const [download] = await Promise.all([page.waitForEvent('download'), exportButton.click()]);
-    expect(download.suggestedFilename()).toBe(`teamspace-gantt-${project.key}.html`);
+    expect(download.suggestedFilename()).toBe(`donefac-gantt-${project.key}.html`);
     const file = testInfo.outputPath(download.suggestedFilename());
     await download.saveAs(file);
     await expect(inlineDate).toHaveValue(unsavedDate);

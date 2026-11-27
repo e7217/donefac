@@ -38,11 +38,11 @@ const restrictedBody = 'synthetic-private-confluence-restricted-body';
 const originalFrom = 'synthetic-source-instance';
 const attachment = Buffer.from('synthetic source attachment\0');
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
-const rehearsalState = workspace => join(workspace, '.teamspace-rehearsal');
+const rehearsalState = workspace => join(workspace, '.donefac-rehearsal');
 
 function confluenceFindings(bytes, changes = {}) {
   return {
-    format: 'teamspace-confluence-audit-findings',
+    format: 'donefac-confluence-audit-findings',
     version: 1,
     checkedAt: '2026-11-23T02:00:00.000Z',
     selection: 'explicit-pages',
@@ -189,7 +189,7 @@ async function readReport(root, answer) {
 }
 
 test('migration rehearsal startup keeps due records unchanged', { timeout: 60_000 }, async t => {
-  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-due-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'donefac-rehearsal-due-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const workspace = join(scratch, 'workspace');
   const initial = await startRehearsalPilot(workspace);
@@ -218,7 +218,7 @@ test('migration rehearsal startup keeps due records unchanged', { timeout: 60_00
   // Leave an elapsed weekly slot in the closed workspace without waiting for its schedule.
   const nextRunAt = '2020-03-02T00:00:00.000Z';
   const createdAt = '2020-03-01T00:00:00.000Z';
-  const database = new DatabaseSync(join(workspace, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(workspace, 'donefac.sqlite'));
   try {
     const result = database.prepare(`UPDATE recurring_issue_rules SET next_run_at=?,
       json=json_set(json,'$.nextRunAt',?,'$.createdAt',?,'$.updatedAt',?) WHERE id=?`)
@@ -242,10 +242,10 @@ test('migration rehearsal startup keeps due records unchanged', { timeout: 60_00
 });
 
 test('migration rehearsal binds Confluence reviews to profiled exports and checks receipts after cold restore', { timeout: 150_000 }, async t => {
-  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-e2e-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'donefac-rehearsal-e2e-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
-  const env = { ...process.env, TEAMSPACE_DATA_DIR: join(scratch, 'other-workspace'), TEAMSPACE_PILOT_ACCESS_FILE: join(scratch, 'absent-key'),
-    TEAMSPACE_PILOT_ORIGIN: 'https://rehearsal.example.invalid', TEAMSPACE_JIRA_BASE_URL: 'https://source.example.invalid' };
+  const env = { ...process.env, DONEFAC_DATA_DIR: join(scratch, 'other-workspace'), DONEFAC_PILOT_ACCESS_FILE: join(scratch, 'absent-key'),
+    DONEFAC_PILOT_ORIGIN: 'https://rehearsal.example.invalid', DONEFAC_JIRA_BASE_URL: 'https://source.example.invalid' };
   const manifest = join(scratch, 'manifest.json'), root = join(scratch, 'run'), profilePath = join(scratch, 'profile.json');
   const packages = fixturePackages({ crossLink: true });
   for (const item of packages) await writeFile(join(scratch, item.filename), item.bytes);
@@ -288,7 +288,7 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   const stage = await launch(stageArguments, env).exited;
   assert.equal(stage.code, 0, stage.stderr);
   assert.equal((await stat(root)).mode & 0o777, 0o700);
-  assert.equal(existsSync(env.TEAMSPACE_DATA_DIR), false);
+  assert.equal(existsSync(env.DONEFAC_DATA_DIR), false);
   const stateDirectory = rehearsalState(join(root, 'workspace'));
   const stagePath = join(stateDirectory, 'stage.json');
   const initial = await readFile(stagePath, 'utf8');
@@ -625,12 +625,12 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   const backupRoot = join(attempt, 'backup');
   const backupManifest = JSON.parse(await readFile(join(backupRoot, 'manifest.json'), 'utf8'));
   const backedUpFiles = new Map(backupManifest.files.map(({ path, sha256 }) => [path, sha256]));
-  assert.equal(backedUpFiles.get('.teamspace-rehearsal/stage.json'), digest(initial));
-  for (const sha of reviewDigests) assert.equal(backedUpFiles.get(`.teamspace-rehearsal/confluence-findings/${sha}.json`), sha);
+  assert.equal(backedUpFiles.get('.donefac-rehearsal/stage.json'), digest(initial));
+  for (const sha of reviewDigests) assert.equal(backedUpFiles.get(`.donefac-rehearsal/confluence-findings/${sha}.json`), sha);
   const backupState = rehearsalState(join(backupRoot, 'data'));
   const restoredWorkspacePath = join(attempt, 'restored');
   const restoredState = rehearsalState(restoredWorkspacePath);
-  assert.ok(existsSync(join(restoredWorkspacePath, 'teamspace.sqlite')));
+  assert.ok(existsSync(join(restoredWorkspacePath, 'donefac.sqlite')));
   for (const copy of [backupState, restoredState]) {
     assert.equal(await readFile(join(copy, 'stage.json'), 'utf8'), initial);
     for (const [index, sha] of reviewDigests.entries()) {
@@ -740,7 +740,7 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   const pageAlias = ['confluence', `${originalFrom}-confluence`, 'page', '200'];
   const aliasCondition = 'product=? AND source_instance=? AND kind=? AND source_alias=?';
   function changeWorkspace(action) {
-    const db = new DatabaseSync(join(workspacePath, 'teamspace.sqlite'));
+    const db = new DatabaseSync(join(workspacePath, 'donefac.sqlite'));
     try {
       db.exec('BEGIN IMMEDIATE');
       action(db);
@@ -856,9 +856,9 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
 });
 
 test('profile-bound stage discards rejected inputs and accepts an exact clean profile', { timeout: 90_000 }, async t => {
-  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-bound-stage-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'donefac-rehearsal-bound-stage-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
-  const env = { ...process.env, TEAMSPACE_DATA_DIR: join(scratch, 'unused-workspace') };
+  const env = { ...process.env, DONEFAC_DATA_DIR: join(scratch, 'unused-workspace') };
   const manifest = join(scratch, 'manifest.json');
   const root = join(scratch, 'run');
   const profilePath = join(scratch, 'profile.json');
@@ -950,7 +950,7 @@ test('profile-bound stage discards rejected inputs and accepts an exact clean pr
 });
 
 test('review rejects damaged ordinary staged packages before printing a browser address and allows a retry', { timeout: 90_000 }, async t => {
-  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-review-integrity-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'donefac-rehearsal-review-integrity-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const root = join(scratch, 'run');
   const workspace = join(root, 'workspace');
@@ -1013,7 +1013,7 @@ test('review rejects damaged ordinary staged packages before printing a browser 
   }
 
   const setAnalyzedInstance = instanceKey => {
-    const db = new DatabaseSync(join(workspace, 'teamspace.sqlite'));
+    const db = new DatabaseSync(join(workspace, 'donefac.sqlite'));
     try {
       const result = db.prepare("UPDATE legacy_packages SET json=json_set(json, '$.source.instanceKey', ?) WHERE id=?")
         .run(instanceKey, second.packageId);
@@ -1025,7 +1025,7 @@ test('review rejects damaged ordinary staged packages before printing a browser 
   finally { setAnalyzedInstance(second.instanceKey); }
 
   // Simulate a missing registry row without removing its associated analysis records.
-  const db = new DatabaseSync(join(workspace, 'teamspace.sqlite'), { enableForeignKeyConstraints: false });
+  const db = new DatabaseSync(join(workspace, 'donefac.sqlite'), { enableForeignKeyConstraints: false });
   const stored = db.prepare('SELECT * FROM legacy_packages WHERE id=?').get(second.packageId);
   assert.ok(stored);
   assert.equal(db.prepare('DELETE FROM legacy_packages WHERE id=?').run(second.packageId).changes, 1);
@@ -1056,7 +1056,7 @@ test('review rejects damaged ordinary staged packages before printing a browser 
 });
 
 test('review opens a legacy rehearsal with Confluence proof beside its workspace', { timeout: 60_000 }, async t => {
-  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-legacy-layout-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'donefac-rehearsal-legacy-layout-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const root = join(scratch, 'run');
   const manifest = join(scratch, 'manifest.json');
@@ -1094,7 +1094,7 @@ test('review opens a legacy rehearsal with Confluence proof beside its workspace
 });
 
 test('stage rejects Confluence findings that cannot identify exactly one matching space ZIP', { timeout: 90_000 }, async t => {
-  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-findings-reject-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'donefac-rehearsal-findings-reject-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const manifest = join(scratch, 'manifest.json');
   const root = join(scratch, 'run');
@@ -1136,7 +1136,7 @@ test('stage rejects Confluence findings that cannot identify exactly one matchin
 });
 
 test('stage applies the aggregate input limit before starting the workspace', { timeout: 30_000 }, async t => {
-  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-stage-cap-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'donefac-rehearsal-stage-cap-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const manifest = join(scratch, 'manifest.json');
   const root = join(scratch, 'run');

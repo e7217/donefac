@@ -76,7 +76,7 @@ test('360px 팀 간트에서 프로젝트별 차단 연결을 한 번에 적용�
     ];
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${first.id}/gantt?scope=team`);
     await expect(page.getByRole('combobox', { name: '프로젝트 필터', exact: true })).toHaveValue('');
     const opener = page.getByRole('button', { name: '차단 관계로 일정 연결', exact: true });

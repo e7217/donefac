@@ -22,7 +22,7 @@ async function json<T>(response: APIResponse | Response, status = 200): Promise<
 const legacyDeploymentTest = test.extend<{ legacyWorkspace: { origin: string; request: APIRequestContext } }>({
   legacyWorkspace: async ({ playwright }, provide) => {
     // Native backup restore replaces only this API's disposable SQLite workspace.
-    const dataDir = await mkdtemp(join(tmpdir(), 'teamspace-legacy-deployment-browser-'));
+    const dataDir = await mkdtemp(join(tmpdir(), 'donefac-legacy-deployment-browser-'));
     const service = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false, recurringIssueWorker: false });
     const server = service.app.listen(0, '127.0.0.1');
     await once(server, 'listening');

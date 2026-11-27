@@ -1,13 +1,22 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, chmodSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdirSync, chmodSync, existsSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes, createCipheriv } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Comment, MutationOrigin } from '../shared/types.js';
+import { LEGACY_PRODUCT_ID } from '../shared/legacy-name.js';
 import { assertWorkspaceCredentials, CREDENTIAL_KEY_FILE, decryptWorkspaceCredential, readWorkspaceCredentialKey } from './workspace-credentials.mjs';
 
 export interface MutationContext { actorId: string | null; origin: MutationOrigin; sourceEventId?: string | null }
 export interface StoreChange { table: string; before: unknown; after: unknown; context: MutationContext }
+
+/** Renames a database created before the product rename (with its WAL files) to the current name. */
+function adoptLegacyDatabase(dataDir: string, dbPath: string) {
+  const legacyPath = join(dataDir, `${LEGACY_PRODUCT_ID}.sqlite`);
+  if (existsSync(dbPath) || !existsSync(legacyPath)) return;
+  for (const suffix of ['-wal', '-shm']) if (existsSync(legacyPath + suffix)) renameSync(legacyPath + suffix, dbPath + suffix);
+  renameSync(legacyPath, dbPath);
+}
 
 export class Store {
   db: DatabaseSync;
@@ -24,7 +33,8 @@ export class Store {
   }
   constructor(dataDir: string) {
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-    const dbPath = join(dataDir, 'teamspace.sqlite');
+    const dbPath = join(dataDir, 'donefac.sqlite');
+    adoptLegacyDatabase(dataDir, dbPath);
     const keyPath = join(dataDir, CREDENTIAL_KEY_FILE);
     let key = readWorkspaceCredentialKey(dataDir);
     if (existsSync(dbPath)) {

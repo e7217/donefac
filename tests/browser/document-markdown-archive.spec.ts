@@ -64,7 +64,7 @@ test('360px에서 문서 ZIP을 검토하고 다른 공간에 첨부와 본문 �
       ] }),
     } }));
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${sourceProject.id}/documents/${root.id}`);
     const sourceParagraph = page.locator('.docs-prose p').filter({ hasText: original }).first();
     await expect(sourceParagraph).toBeVisible({ timeout: 35_000 });

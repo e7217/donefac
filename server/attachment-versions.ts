@@ -79,10 +79,10 @@ export class AttachmentVersionsService {
         return this.head(attachment);
       });
     } catch (error) {
-      try { staged?.rollback(); } catch { console.error('[teamspace attachments] 버전 추가 복구 기록 정리가 필요합니다.'); }
+      try { staged?.rollback(); } catch { console.error('[donefac attachments] 버전 추가 복구 기록 정리가 필요합니다.'); }
       throw error;
     }
-    try { staged?.commit(); } catch { console.error('[teamspace attachments] 버전 추가 복구 기록 정리가 필요합니다.'); }
+    try { staged?.commit(); } catch { console.error('[donefac attachments] 버전 추가 복구 기록 정리가 필요합니다.'); }
     return result;
   }
 }

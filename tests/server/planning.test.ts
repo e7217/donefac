@@ -12,7 +12,7 @@ import { PlanningService, PlanningError } from '../../server/planning.js';
 import { planningFields } from '../../shared/planning-helpers.js';
 import type { Issue, PlanningItem, PlanningKind, WorkspaceSnapshot } from '../../shared/types.js';
 
-async function fixture(dir=mkdtempSync(join(tmpdir(),'teamspace-planning-')),withSeed=true){
+async function fixture(dir=mkdtempSync(join(tmpdir(),'donefac-planning-')),withSeed=true){
   const service=createApp({dataDir:dir,seed:withSeed}),server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as any).port}/api`;let closed=false;
   const request=async(path:string,method='GET',data?:unknown)=>{const response=await fetch(base+path,{method,headers:{'Content-Type':'application/json'},...(data===undefined?{}:{body:JSON.stringify(data)})});return{status:response.status,data:await response.json() as any};};
   return{dir,request,close:async()=>{if(closed)return;closed=true;service.close();await new Promise<void>(resolve=>server.close(()=>resolve()));},remove:()=>rmSync(dir,{recursive:true,force:true})};
@@ -23,7 +23,7 @@ async function issue(f:Awaited<ReturnType<typeof fixture>>,title:string,extra:Re
 async function snapshot(f:Awaited<ReturnType<typeof fixture>>){return(await f.request('/workspace')).data as WorkspaceSnapshot;}
 
 test('startup migration preserves exact legacy names and history, bumps stale issue versions, and is idempotent on reopen',async()=>{
-  const dir=mkdtempSync(join(tmpdir(),'teamspace-old-planning-')),store=new Store(dir);seed(store);
+  const dir=mkdtempSync(join(tmpdir(),'donefac-old-planning-')),store=new Store(dir);seed(store);
   const labels=new Map([['issue-1','Sprint'],['issue-2','sprint'],['issue-3',' Sprint '],['issue-4','Sprint'],['issue-9','Sprint']]);
   for(const [id,cycle]of labels){const old=store.get<Issue>('issues',id)!;store.put('issues',{...old,cycle});}
   const original=store.all<Issue>('issues'),activities=store.all('activities');store.db.close();const f=await fixture(dir);let next:Awaited<ReturnType<typeof fixture>>|undefined;
@@ -165,7 +165,7 @@ test('current backup preserves canonical planning IDs and archived refs; legacy1
 });
 
 test('pure import preparation does not mutate input or write records; schema4 requires sound nullable IDs',()=>{
-  const dir=mkdtempSync(join(tmpdir(),'teamspace-planning-pure-')),store=new Store(dir);seed(store);const planning=new PlanningService(store);
+  const dir=mkdtempSync(join(tmpdir(),'donefac-planning-pure-')),store=new Store(dir);seed(store);const planning=new PlanningService(store);
   try{
     const projects=store.all('projects'),users=store.all('users'),issues=store.all<Issue>('issues');const original=JSON.stringify(issues);const prepared=planning.prepareImport([],projects,users,issues,{legacy:true});assert.equal(JSON.stringify(issues),original);assert.equal(planning.all().length,0);assert.ok(prepared.items.length>0);assert.ok(prepared.issues.every(value=>Object.hasOwn(value,'cycleId')&&Object.hasOwn(value,'moduleId')&&Object.hasOwn(value,'releaseId')));
     const invalid=structuredClone(prepared.issues);invalid[0].cycleId='';assert.throws(()=>planning.prepareImport(prepared.items,projects,users,invalid,{legacy:false}),PlanningError);

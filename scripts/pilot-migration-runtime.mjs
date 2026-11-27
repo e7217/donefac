@@ -65,17 +65,17 @@ export async function startRehearsalPilot(dataDir, { signal, port = 0, restricti
   const input = reviews.length ? JSON.stringify({ restrictions, reviews, ...(coverage.length ? { coverage } : {}),
     ...(editRestrictions.length ? { editRestrictions } : {}) })
     : restrictions.length ? JSON.stringify(restrictions) : undefined;
-  const reviewEnv = reviews.length ? { TEAMSPACE_PILOT_CONFLUENCE_REVIEW: 'stdin' }
-    : restrictions.length ? { TEAMSPACE_PILOT_CONFLUENCE_RESTRICTIONS: 'stdin' } : {};
+  const reviewEnv = reviews.length ? { DONEFAC_PILOT_CONFLUENCE_REVIEW: 'stdin' }
+    : restrictions.length ? { DONEFAC_PILOT_CONFLUENCE_RESTRICTIONS: 'stdin' } : {};
   const { child, exited } = launch('bash', ['scripts/pilot-lock.sh', dataDir, process.execPath, '--import', 'tsx', 'server/pilot.ts'], {
-    ...commandEnv, TEAMSPACE_PILOT_PORT: String(port), TEAMSPACE_PILOT_MIGRATION_REHEARSAL: '1',
+    ...commandEnv, DONEFAC_PILOT_PORT: String(port), DONEFAC_PILOT_MIGRATION_REHEARSAL: '1',
     ...reviewEnv,
   }, false, input);
   let startupError = '', stdout = '', stopping;
   const ready = new Promise(resolve => {
     child.stdout.on('data', chunk => {
       stdout = (stdout + chunk).slice(-2048);
-      const address = /Teamspace pilot listening on (http:\/\/127\.0\.0\.1:\d+)\s/.exec(stdout)?.[1];
+      const address = /Donefac pilot listening on (http:\/\/127\.0\.0\.1:\d+)\s/.exec(stdout)?.[1];
       if (address) resolve(new URL(address));
     });
   });

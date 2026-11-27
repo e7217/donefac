@@ -4,9 +4,10 @@ import { MIGRATION_MAPPING_FILE_MAX_BYTES, STATUS, type LegacyPackageSummary, ty
 import { LegacyImportError } from './legacy-import-model.js';
 import type { MigrationPackage } from './migration-contracts.js';
 import { parseMigrationOriginBase } from './migration-origin-links.js';
+import { currentProductFormat } from '../shared/legacy-name.js';
 import { migrationOptionId } from './migration-planner.js';
 
-const mappingFormat = 'teamspace-migration-mapping';
+const mappingFormat = 'donefac-migration-mapping';
 const sha256 = /^[a-f0-9]{64}$/u;
 const control = /[\u0000-\u001f\u007f]/u;
 const formats = { jira: ['jira-backup-xml', 'jira-search-xml', 'jira-csv', 'jira-json'], confluence: ['confluence-xml'] };
@@ -52,7 +53,7 @@ export function mappingConfigurationInput(value: unknown) {
 }
 
 export function readMappingFile(raw: unknown): MappingFileInput {
-  if (!object(raw) || Object.keys(raw).length !== 5 || raw.format !== mappingFormat || raw.version !== 1 ||
+  if (!object(raw) || Object.keys(raw).length !== 5 || currentProductFormat(raw.format) !== mappingFormat || raw.version !== 1 ||
       !Array.isArray(raw.packages) || raw.packages.length < 1 || raw.packages.length > 20 || !object(raw.mappedUsers)) return invalidMigrationMapping();
   const packages = raw.packages.map((value: unknown): MappingPackage => {
     if (!object(value) || Object.keys(value).length !== 5) return invalidMigrationMapping();

@@ -21,7 +21,7 @@ const migrationPath = (projectId: string, action: 'preview' | 'apply') => `${wor
 const bulkPath = (projectId: string, action: 'preview' | 'apply') => `/projects/${projectId}/issues/bulk-${action}`;
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-workflow-status-migration-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-workflow-status-migration-'));
   async function start() {
     const runtime = createApp({ dataDir: directory, outboundWorker: false });
     const server = runtime.app.listen(0, '127.0.0.1');
@@ -37,7 +37,7 @@ async function fixture(t: TestContext) {
     };
   }
   let service = await start();
-  const database = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(directory, 'donefac.sqlite'));
   t.after(async () => {
     database.close();
     await service.close();

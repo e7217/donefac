@@ -37,7 +37,7 @@ function operationError(error: unknown, action: Action) {
         : '저장소 ID를 확인하고 웹훅을 볼 수 있는 GitLab 토큰으로 다시 점검해 주세요.';
     }
     if (error.status === 400) return action === 'register'
-      ? 'Teamspace에 저장한 웹훅 인증 값을 확인한 뒤 다시 점검해 주세요.'
+      ? 'Donefac에 저장한 웹훅 인증 값을 확인한 뒤 다시 점검해 주세요.'
       : '저장소 웹훅을 조회할 수 있는 GitLab 토큰을 확인해 주세요.';
     if (error.status === 422) return error.message;
     if (error.status === 429) return 'GitLab 요청 한도에 도달했습니다. 잠시 뒤 다시 점검해 주세요.';
@@ -55,7 +55,7 @@ function historyError(error: unknown) {
     }
     if (error.status === 404) {
       if (error.details && typeof error.details === 'object' && 'reason' in error.details && error.details.reason === 'receiver_changed') {
-        return '현재 Teamspace 수신 주소와 일치하는 웹훅이 없습니다. 웹훅 설정을 다시 점검해 주세요.';
+        return '현재 Donefac 수신 주소와 일치하는 웹훅이 없습니다. 웹훅 설정을 다시 점검해 주세요.';
       }
       return 'GitLab 전송 이력을 읽을 수 없습니다. GitLab 17.3 이상과 저장소 조회 권한을 확인해 주세요.';
     }
@@ -66,10 +66,10 @@ function historyError(error: unknown) {
 }
 
 function deliveryHint(status: number | null) {
-  if (status === null) return 'GitLab의 전송 상세와 Teamspace 수신 주소·TLS 설정을 확인해 주세요.';
-  if (status === 401 || status === 403) return 'Teamspace 웹훅 인증 값과 프록시의 수신 경로 접근을 확인해 주세요.';
+  if (status === null) return 'GitLab의 전송 상세와 Donefac 수신 주소·TLS 설정을 확인해 주세요.';
+  if (status === 401 || status === 403) return 'Donefac 웹훅 인증 값과 프록시의 수신 경로 접근을 확인해 주세요.';
   if (status === 404 || (status >= 300 && status < 400)) return 'GitLab에 등록된 HTTPS 수신 주소와 프록시 경로를 확인해 주세요.';
-  if (status >= 500) return 'Teamspace와 프록시의 오류 기록을 확인해 주세요.';
+  if (status >= 500) return 'Donefac과 프록시의 오류 기록을 확인해 주세요.';
   return null;
 }
 
@@ -81,7 +81,7 @@ function WebhookHistory({ value }: { value: GitlabProjectWebhookHistory }) {
     {value.partial && <p className="gitlab-project-webhook-note">확인할 수 있는 전송만 표시합니다.</p>}
     {hint && <p>{hint}</p>}
     {value.attempts.length ? <>
-      <p className="gitlab-project-webhook-note">HTTP 상태는 개별 전송 시도의 응답입니다. 같은 메시지의 재전송에는 동일한 Teamspace 인증 수신 기록이 표시될 수 있습니다.</p>
+      <p className="gitlab-project-webhook-note">HTTP 상태는 개별 전송 시도의 응답입니다. 같은 메시지의 재전송에는 동일한 Donefac 인증 수신 기록이 표시될 수 있습니다.</p>
       <ol className="gitlab-project-webhook-attempts" aria-label="GitLab 최근 전송 내역" role="list">
         {value.attempts.map(attempt => {
           const messageReceipt = attempt.messageReceipt ?? { status: 'unavailable' as const };
@@ -98,7 +98,7 @@ function WebhookHistory({ value }: { value: GitlabProjectWebhookHistory }) {
             <p className="gitlab-project-webhook-message-receipt">
               <strong data-receipt-status={messageReceipt.status}>{messageReceiptLabels[messageReceipt.status]}</strong>
               {messageReceipt.status === 'matched' && <small>
-                {gitlabWebhookAuthenticationLabels[messageReceipt.delivery.authentication]} · <span className="sr-only">Teamspace 인증 수신 시각 </span>
+                {gitlabWebhookAuthenticationLabels[messageReceipt.delivery.authentication]} · <span className="sr-only">Donefac 인증 수신 시각 </span>
                 <time dateTime={messageReceipt.delivery.receivedAt}>
                   {new Date(messageReceipt.delivery.receivedAt).toLocaleString('ko-KR')}
                 </time>
@@ -110,7 +110,7 @@ function WebhookHistory({ value }: { value: GitlabProjectWebhookHistory }) {
       </ol>
     </> : <p>확인된 GitLab 전송 기록이 없습니다.</p>}
     <div className="gitlab-project-webhook-local-receipt">
-      <h4>Teamspace 인증 수신</h4>
+      <h4>Donefac 인증 수신</h4>
       {receipt ? <p>이 저장소의 마지막 인증 수신 · {gitlabWebhookEventLabels[receipt.event]} · {gitlabWebhookAuthenticationLabels[receipt.authentication]}
         {' · '}<time dateTime={receipt.receivedAt}>{new Date(receipt.receivedAt).toLocaleString('ko-KR')}</time></p>
         : <p>이 저장소의 인증 수신 기록이 없습니다.</p>}
@@ -265,7 +265,7 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
 
   return <section className="card gitlab-project-webhook" aria-labelledby={`${id}-heading`}>
     <h2 id={`${id}-heading`}>GitLab 프로젝트 웹훅 설정</h2>
-    <p>GitLab 저장소의 Settings → Webhooks에서 Teamspace 수신 주소와 이벤트를 설정할 수 있습니다.</p>
+    <p>GitLab 저장소의 Settings → Webhooks에서 Donefac 수신 주소와 이벤트를 설정할 수 있습니다.</p>
     {webhookReceiverUrl ? <>
       <div className="gitlab-project-webhook-address">
         <label>웹훅 수신 주소<input ref={receiver} className="field" readOnly value={webhookReceiverUrl} /></label>
@@ -275,8 +275,8 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
       </div>
       {copyStatus && <p className="gitlab-project-webhook-note" role="status">{copyStatus}</p>}
     </> : <p className="gitlab-project-webhook-note">
-      GitLab에서 접근할 수 있는 Teamspace 배포 주소에 수신 경로 <code>{receiverPath}</code>를 붙여 사용하세요.
-      Teamspace에 수신 주소가 설정되면 이 화면에서 점검할 수 있습니다.
+      GitLab에서 접근할 수 있는 Donefac 배포 주소에 수신 경로 <code>{receiverPath}</code>를 붙여 사용하세요.
+      Donefac에 수신 주소가 설정되면 이 화면에서 점검할 수 있습니다.
     </p>}
     <p className="gitlab-project-webhook-note">Push, Merge Request, Pipeline, Deployment events를 켜고 SSL 검증을 사용하세요.</p>
     {reviewAvailable && <>
@@ -302,7 +302,7 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
       {error && <p className="error-text" role="alert">{error.message}</p>}
       {result && <div className="gitlab-project-webhook-result">
         <p role="status">{resultMessages[result.state]}</p>
-        {result.configurationChanged && <p className="error-text">Teamspace 연결 설정이 바뀌었습니다. 최신 설정을 불러온 뒤 다시 점검해 주세요.</p>}
+        {result.configurationChanged && <p className="error-text">Donefac 연결 설정이 바뀌었습니다. 최신 설정을 불러온 뒤 다시 점검해 주세요.</p>}
         {result.hooks.length > 1 && <p>같은 수신 주소를 사용하는 웹훅이 {result.hooks.length}개 있습니다.</p>}
         {result.hooks.length > 0 && <ul className="gitlab-project-webhook-hooks" aria-label="등록된 웹훅" role="list">
           {result.hooks.map(hook => <ExistingHook key={hook.id} hook={hook}>
@@ -331,22 +331,22 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
             </button>
           </form>
           <p id={`${id}-credential`} className="gitlab-project-webhook-note">
-            Teamspace에 저장한 {credentialLabel} 값을 입력한 뒤 등록을 누르면 저장소에 웹훅을 추가합니다.
+            Donefac에 저장한 {credentialLabel} 값을 입력한 뒤 등록을 누르면 저장소에 웹훅을 추가합니다.
           </p>
         </>}
       </div>}
       {manualSetupAvailable && <section className="gitlab-project-webhook-manual" aria-labelledby={`${id}-manual`}>
         <h3 id={`${id}-manual`}>GitLab 웹훅 수동 등록</h3>
-        <p>GitLab의 저장소 {repositoryId}에서 <strong>Settings → Webhooks</strong>를 열고 위의 웹훅 수신 주소를 찾으세요. 같은 주소가 목록에 있으면 Teamspace에서 <strong>다시 점검</strong>을 누르세요.</p>
+        <p>GitLab의 저장소 {repositoryId}에서 <strong>Settings → Webhooks</strong>를 열고 위의 웹훅 수신 주소를 찾으세요. 같은 주소가 목록에 있으면 Donefac에서 <strong>다시 점검</strong>을 누르세요.</p>
         {(settings.signingTokenConfigured || settings.webhookSecretConfigured) ? <ol>
           <li>주소가 없을 때만 <strong>Add new webhook</strong>을 열고 위에서 복사한 수신 주소를 URL에 붙여 넣으세요.</li>
           <li>{settings.signingTokenConfigured ? <>
-            <strong>Signing token</strong>에 Teamspace에 저장한 값을 입력하세요. <strong>Generate signing token</strong> 버튼이 보이면 버튼을 누른 뒤 생성된 값을 Teamspace에 저장한 값으로 바꾸세요.
+            <strong>Signing token</strong>에 Donefac에 저장한 값을 입력하세요. <strong>Generate signing token</strong> 버튼이 보이면 버튼을 누른 뒤 생성된 값을 Donefac에 저장한 값으로 바꾸세요.
           </> : <>
-            <strong>Secret token</strong>에 Teamspace에 저장한 값을 입력하세요.
+            <strong>Secret token</strong>에 Donefac에 저장한 값을 입력하세요.
           </>}</li>
           <li>Push, Merge Request, Pipeline, Deployment events와 SSL 검증을 켜세요. Push는 모든 브랜치를 선택하고 기본 전송 본문을 사용하세요.</li>
-          <li>GitLab에서 웹훅을 저장한 뒤 Teamspace에서 <strong>다시 점검</strong>을 누르세요.</li>
+          <li>GitLab에서 웹훅을 저장한 뒤 Donefac에서 <strong>다시 점검</strong>을 누르세요.</li>
         </ol> : <p>GitLab 연결에서 웹훅 인증 값을 먼저 저장하고 다시 점검하세요.</p>}
       </section>}
     </>}

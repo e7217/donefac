@@ -101,7 +101,7 @@ const dateKeys = ['startDate', 'endDate', 'dueDate'] as const;
 
 function incomingTeamBlockerGuard(blockers: IncomingTeamBlocker[]): string {
   const fields = blockers.map(({ relation, source }) => [relation.id, relation.sourceIssueId, relation.targetIssueId,
-    relation.version, relation.origin ?? 'teamspace', source.projectId, source.version, source.status, source.endDate]);
+    relation.version, relation.origin ?? 'donefac', source.projectId, source.version, source.status, source.endDate]);
   return createHash('sha256').update(JSON.stringify(fields)).digest('hex');
 }
 
@@ -705,7 +705,7 @@ export class SchedulePasteService {
       const { id, sourceIssueId, targetIssueId, version, origin } = relation;
       const source = issueMap.get(sourceIssueId), target = issueMap.get(targetIssueId);
       if (!source || !target || source.projectId === target.projectId || terminal(source) || terminal(target)) continue;
-      blockers.push({ id: `team-blocker:${origin ?? 'teamspace'}:${id}`, predecessorId: sourceIssueId, successorId: targetIssueId,
+      blockers.push({ id: `team-blocker:${origin ?? 'donefac'}:${id}`, predecessorId: sourceIssueId, successorId: targetIssueId,
         ...TEAM_BLOCKER_SCHEDULE_RULE, version });
       if (projectedLinks.length + blockers.length > MAX_WORKLOAD_LEVEL_DEPENDENCIES) throw limit();
     }
@@ -863,7 +863,7 @@ export class SchedulePasteService {
       const source = activeIssue(sourceIssueId), target = activeIssue(targetIssueId);
       if (!source || !target) continue;
       const calendarVersion = review(source, target);
-      evidence.push([id, version, origin ?? 'teamspace', sourceIssueId, source.projectId, source.version, source.endDate,
+      evidence.push([id, version, origin ?? 'donefac', sourceIssueId, source.projectId, source.version, source.endDate,
         targetIssueId, target.projectId, target.version, target.startDate, calendarVersion]);
     }
     if (proposed) review(activeIssue(proposed.source.id)!, activeIssue(proposed.target.id)!);

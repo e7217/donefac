@@ -217,7 +217,7 @@ test('360px 검토함에서 프로젝트와 검색 페이지를 주소로 복원
       await transition(decoy, await state(decoy), author.id, 'request');
     }
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), reviewer.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), reviewer.id);
     await page.goto(`/#/${contextProject.id}/publication/assigned`);
     await expect(library.getByRole('tab', { name: '내 검토', exact: true })).toHaveAttribute('aria-selected', 'true');
     await submitFilters();

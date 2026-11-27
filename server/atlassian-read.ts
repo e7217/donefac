@@ -6,8 +6,8 @@ import {
 } from '../shared/atlassian-links.js';
 
 const settings = {
-  jira: { base: 'TEAMSPACE_JIRA_BASE_URL', auth: 'TEAMSPACE_JIRA_AUTH_FILE' },
-  confluence: { base: 'TEAMSPACE_CONFLUENCE_BASE_URL', auth: 'TEAMSPACE_CONFLUENCE_AUTH_FILE' },
+  jira: { base: 'DONEFAC_JIRA_BASE_URL', auth: 'DONEFAC_JIRA_AUTH_FILE' },
+  confluence: { base: 'DONEFAC_CONFLUENCE_BASE_URL', auth: 'DONEFAC_CONFLUENCE_AUTH_FILE' },
 } as const satisfies Record<AtlassianProduct, { base: string; auth: string }>;
 const MAX_AUTH_BYTES = 4096;
 const MAX_RESPONSE_BYTES = 256 * 1024;

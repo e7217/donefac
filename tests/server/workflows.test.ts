@@ -10,7 +10,7 @@ import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { ApiKeyCreated, Issue, IssueOrderMoveResult, IssueRelation, ProjectIssueOrder, ProjectWorkflow, ReportingLedgerData, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(dataDir?: string, seed = true) {
-  const dir = dataDir || mkdtempSync(join(tmpdir(), 'teamspace-workflows-'));
+  const dir = dataDir || mkdtempSync(join(tmpdir(), 'donefac-workflows-'));
   const service = createApp({ dataDir: dir, seed });
   const server = service.app.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('테스트 서버 주소 없음');

@@ -51,7 +51,7 @@ test('360px 티켓에서 GitLab 상태 자동화 차단을 확인하고 초안�
     const headers = { 'X-Gitlab-Token': secret, 'X-Gitlab-Event': 'Merge Request Hook', 'webhook-id': eventId };
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), editor.id);
+    await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), editor.id);
     await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
     const ticket = page.getByRole('dialog');
     const title = ticket.getByRole('textbox', { name: '제목', exact: true });

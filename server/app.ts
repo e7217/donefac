@@ -80,7 +80,7 @@ import type { PilotConfluenceReview } from './pilot-confluence-review.js';
 import type { MigrationConfluenceReviewCoverage } from '../shared/types.js';
 import { readJiraDeadlineRecovery } from './jira-deadline-recovery.js';
 import { SourcePreservationService, SourcePreservationError } from './source-preservation.js';
-import { findTeamspaceIssueRelation, issueRelationVersionFloor, IssueRelationVersionError, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
+import { findDonefacIssueRelation, issueRelationVersionFloor, IssueRelationVersionError, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
 import { registerSourceReconciliationRoutes } from './source-reconciliation.js';
 import { LegacyArchiveError } from './legacy-import-archive.js';
 import { ReportingLedger, ReportingLedgerError, previousIssueKeys } from './reporting-ledger.js';
@@ -125,7 +125,8 @@ import { reservationDayRange, reservationLocalDateTime } from '../shared/time-re
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { gitlabFollowUpEvidence, type GitlabFollowUpPreview } from '../shared/gitlab-follow-up.js';
-import { hasDuplicateTeamspaceIssueRelations, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, issueRelationScheduleMode } from '../shared/issue-relations.js';
+import { LEGACY_PRODUCT_ID } from '../shared/legacy-name.js';
+import { hasDuplicateDonefacIssueRelations, isRelationId, isDonefacIssueRelation, issueRelationEndpoints, issueRelationScheduleMode } from '../shared/issue-relations.js';
 import type { IssueBlockedCreationResult, IssueCloneResult, IssueCloseAsDuplicateResult } from '../shared/types.js';
 import { issueDeadline } from '../shared/my-work.js';
 import { isTerminalStatus, requiredFieldsFor, statusMeta } from '../shared/workflow-helpers.js';
@@ -233,7 +234,7 @@ export function createApp(options: {
   confluenceReviews?: readonly PilotConfluenceReview[];
   confluenceReviewCoverage?: readonly MigrationConfluenceReviewCoverage[];
 } = {}) {
-  const dataDir=options.dataDir || process.env.TEAMSPACE_DATA_DIR || resolve('data');
+  const dataDir=options.dataDir || process.env.DONEFAC_DATA_DIR || process.env[`${LEGACY_PRODUCT_ID.toUpperCase()}_DATA_DIR`] || resolve('data');
   const migrationRehearsal = options.migrationRehearsal === true;
   assertPilotRehearsalWorkspace(dataDir, migrationRehearsal);
   if (migrationRehearsal && (options.browserOrigin !== undefined || options.gitlabWebhookPublicOrigin !== undefined)) {
@@ -685,7 +686,7 @@ export function createApp(options: {
     return fail('일정 되돌리기 화면을 확인해 주세요.');
   };
   const requestedUndoScope = (req:Request):ScheduleUndoScope|undefined => {
-    const header=req.header('X-Teamspace-Schedule-Undo-Scope');
+    const header=req.header('X-Donefac-Schedule-Undo-Scope');
     if(header===undefined)return;
     if(header==='team')return {kind:'team'};
     const colon=header.indexOf(':');
@@ -716,7 +717,7 @@ export function createApp(options: {
     if(record.blocker){
       const {relation,sourceProjectId,targetProjectId}=record.blocker;
       const saved=store.get<IssueRelation>('issue_relations',relation.id);
-      if(!saved||saved.origin!=='teamspace'||saved.type!=='blocks'||saved.version!==relation.version||
+      if(!saved||saved.origin!=='donefac'||saved.type!=='blocks'||saved.version!==relation.version||
           saved.sourceIssueId!==relation.sourceIssueId||saved.targetIssueId!==relation.targetIssueId||
           store.get<Issue>('issues',relation.sourceIssueId)?.projectId!==sourceProjectId||
           store.get<Issue>('issues',relation.targetIssueId)?.projectId!==targetProjectId){
@@ -1426,7 +1427,7 @@ export function createApp(options: {
     }
     if (teamBoardSince !== undefined && ganttSince !== undefined) return fail('갱신을 확인할 보기 하나만 지정해 주세요.');
     const { boardRevision, ganttRevision, data } = workspaceRevisions.read({ teamBoardSince, ganttSince }, snapshot);
-    res.set({ 'X-Teamspace-Board-Revision': boardRevision, 'X-Teamspace-Gantt-Revision': ganttRevision, 'Cache-Control': 'no-store' });
+    res.set({ 'X-Donefac-Board-Revision': boardRevision, 'X-Donefac-Gantt-Revision': ganttRevision, 'Cache-Control': 'no-store' });
     if (data === null) return res.status(204).end();
     res.json(data);
   });
@@ -2011,7 +2012,7 @@ export function createApp(options: {
       },
       commit: (rule, issue) => store.withMutationContext({ actorId: rule.authorId, origin: 'automation' },
         () => commitIssueCreation(rule.authorId, issue, rule.name)),
-      onError: error => console.error('[teamspace recurring issues]', error instanceof Error ? error.message : error),
+      onError: error => console.error('[donefac recurring issues]', error instanceof Error ? error.message : error),
     });
   }
 
@@ -2438,10 +2439,10 @@ export function createApp(options: {
         return d;
       },issueId !== undefined ? `issue-linked-document:${issueId}` : usesTemplate ? 'document-template-draft' : undefined,verifyLink);
     } catch(error) {
-      try{staged?.rollback();}catch{console.error('[teamspace attachments] 템플릿 첨부 복구 기록 정리가 필요합니다.');}
+      try{staged?.rollback();}catch{console.error('[donefac attachments] 템플릿 첨부 복구 기록 정리가 필요합니다.');}
       throw error;
     }
-    try{staged?.commit();}catch{console.error('[teamspace attachments] 템플릿 첨부 복구 기록 정리가 필요합니다.');}
+    try{staged?.commit();}catch{console.error('[donefac attachments] 템플릿 첨부 복구 기록 정리가 필요합니다.');}
     const status = result.duplicate ? 200 : 201;
     if (issueId === undefined) return res.status(status).json(result.document);
     if (!linkedResult) throw new Error('The linked document receipt has no resource link');
@@ -2525,11 +2526,11 @@ export function createApp(options: {
       }, `document-tree-copy:${sourceId}`);
     } catch (error) {
       try { staged?.rollback(); }
-      catch { console.error('[teamspace attachments] 문서 복제 첨부 복구 기록 정리가 필요합니다.'); }
+      catch { console.error('[donefac attachments] 문서 복제 첨부 복구 기록 정리가 필요합니다.'); }
       throw error;
     }
     try { staged?.commit(); }
-    catch { console.error('[teamspace attachments] 문서 복제 첨부 복구 기록 정리가 필요합니다.'); }
+    catch { console.error('[donefac attachments] 문서 복제 첨부 복구 기록 정리가 필요합니다.'); }
     res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result.document);
   });
   app.post('/api/documents/:id/move-preview',(req,res)=>{
@@ -2960,7 +2961,7 @@ export function createApp(options: {
         { otherIssueId: created.id, type: 'blocks', direction: 'outgoing' }, relationAudit(req), relationNotification(req)).relation;
       return created;
     }, { kind: 'blocked-issue', sourceIssueId });
-    const relation = createdRelation ?? findTeamspaceIssueRelation(store, { sourceIssueId, targetIssueId: result.issue.id, type: 'blocks' }) ?? null;
+    const relation = createdRelation ?? findDonefacIssueRelation(store, { sourceIssueId, targetIssueId: result.issue.id, type: 'blocks' }) ?? null;
     const response: IssueBlockedCreationResult = { ...result, relation };
     res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(response);
   });
@@ -2993,7 +2994,7 @@ export function createApp(options: {
       return created;
     }, { kind: 'issue-clone', sourceIssueId });
     const endpoints = issueRelationEndpoints(sourceIssueId, result.issue.id, 'related', 'outgoing');
-    const relation = createdRelation ?? findTeamspaceIssueRelation(store, { ...endpoints, type: 'related' }) ?? null;
+    const relation = createdRelation ?? findDonefacIssueRelation(store, { ...endpoints, type: 'related' }) ?? null;
     const response: IssueCloneResult = { ...result, relation };
     res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(response);
   });
@@ -3412,7 +3413,7 @@ export function createApp(options: {
     res.type('application/json').send(serialized);
   });
   app.post('/api/import',(req,res)=>{
-    const data=req.body.data;if(!data||!supportsNativeBackupVersion(data.schemaVersion))fail(`지원하는 Teamspace 내보내기 파일(schemaVersion 1~${NATIVE_BACKUP_SCHEMA_VERSION})이 필요합니다.`);
+    const data=req.body.data;if(!data||!supportsNativeBackupVersion(data.schemaVersion))fail(`지원하는 Donefac 내보내기 파일(schemaVersion 1~${NATIVE_BACKUP_SCHEMA_VERSION})이 필요합니다.`);
     if(data.schemaVersion===1){if(data.attachments?.length||data.attachmentContents?.length)fail('첨부파일이 있는 데이터는 schemaVersion 2가 필요합니다.');data.attachments=[];data.attachmentContents=[];}
     const expected=[...Object.keys(tables),'comments','revisions','attachments','attachmentContents'];
     for(const key of expected){if(!Array.isArray(data[key])||data[key].length>100000)fail(`${key} 데이터가 올바르지 않습니다.`);const ids=new Set();for(const x of data[key]){if(!x||typeof x.id!=='string'||!x.id||ids.has(x.id))fail(`${key}에 잘못되거나 중복된 ID가 있습니다.`);ids.add(x.id);}}
@@ -3833,9 +3834,9 @@ export function createApp(options: {
       fail('Jira 계획 작업 시간의 비교 기준을 포함한 백업은 schemaVersion 116이 필요합니다.');
     }
     const importedIssueRelations = [...importedSources.relations, ...importedTrash.flatMap(entry => entry.issueRelations)];
-    const importedTeamspaceRelations = importedIssueRelations.filter(isTeamspaceIssueRelation);
-    if (data.schemaVersion < 51 && importedTeamspaceRelations.length) fail('직접 만든 업무 관계를 포함한 백업은 schemaVersion 51이 필요합니다.');
-    if (hasDuplicateTeamspaceIssueRelations(importedTeamspaceRelations)) fail('같은 업무 사이의 동일한 관계가 중복되었습니다.');
+    const importedDonefacRelations = importedIssueRelations.filter(isDonefacIssueRelation);
+    if (data.schemaVersion < 51 && importedDonefacRelations.length) fail('직접 만든 업무 관계를 포함한 백업은 schemaVersion 51이 필요합니다.');
+    if (hasDuplicateDonefacIssueRelations(importedDonefacRelations)) fail('같은 업무 사이의 동일한 관계가 중복되었습니다.');
     const versionById=new Map(importedSources.versions.map(version=>[version.id,version]));
     const archivedDocuments = importedTrash.filter(entry => entry.resourceType === 'document');
     if (data.schemaVersion < 58 && (importedDocuments.some(document => Object.hasOwn(document, 'labels')) ||
@@ -4086,7 +4087,7 @@ export function createApp(options: {
       collaboration.replaceImported(importedCollaboration);
       const previousIssueRelationVersion = issueRelationVersionFloor(store);
       let restoredIssueRelationVersion = previousIssueRelationVersion;
-      for (const relation of importedTeamspaceRelations) {
+      for (const relation of importedDonefacRelations) {
         relation.version = nextIssueRelationVersion(relation.version, previousIssueRelationVersion);
         restoredIssueRelationVersion = Math.max(restoredIssueRelationVersion, relation.version);
       }
@@ -4106,7 +4107,7 @@ export function createApp(options: {
       const generation=uid();store.setSetting('attachmentImportGeneration',generation);swapped=files.swapImport(staged!,generation);
     }));}catch(error){swapped?.rollback();files.cleanupStage(staged!);throw error;}
     collaboration.invalidateAll('백업 가져오기로 문서가 교체되었습니다.');
-    files.cleanupStage(staged!);try{swapped?.commit();}catch{console.error('[teamspace attachments] previous upload directory cleanup needed');}
+    files.cleanupStage(staged!);try{swapped?.commit();}catch{console.error('[donefac attachments] previous upload directory cleanup needed');}
     res.json({ok:true,counts:{projects:data.projects.length,issues:data.issues.length,documents:data.documents.length,attachments:data.attachments.length,planningItems:importedPlanning.items.length,milestones:importedArtifacts.milestones.length,baselines:importedArtifacts.baselines.length}});
   });
 
@@ -4148,18 +4149,18 @@ export function createApp(options: {
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});
-    console.error('[teamspace API]',error?.message||error);return res.status(500).json({error:'요청을 처리하지 못했습니다.'});
+    console.error('[donefac API]',error?.message||error);return res.status(500).json({error:'요청을 처리하지 못했습니다.'});
   });
   function sweepDeadlineReminders() {
     try { deadlineReminders.sweep(); }
-    catch (error) { console.error('[teamspace deadlines]', error instanceof Error ? error.message : error); }
+    catch (error) { console.error('[donefac deadlines]', error instanceof Error ? error.message : error); }
   }
   const deadlineReminderTimer = migrationRehearsal || options.deadlineReminderWorker === false ? undefined
     : setInterval(sweepDeadlineReminders, options.deadlineReminderIntervalMs ?? 60_000).unref();
   if (deadlineReminderTimer) sweepDeadlineReminders();
   function sweepRecurringIssues() {
     try { runRecurringIssues(); }
-    catch (error) { console.error('[teamspace recurring issues]', error instanceof Error ? error.message : error); }
+    catch (error) { console.error('[donefac recurring issues]', error instanceof Error ? error.message : error); }
   }
   const recurringIssueTimer = migrationRehearsal || options.recurringIssueWorker === false ? undefined
     : setInterval(sweepRecurringIssues, options.recurringIssueIntervalMs ?? 60_000).unref();

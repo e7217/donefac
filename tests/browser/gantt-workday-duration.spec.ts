@@ -70,7 +70,7 @@ async function openCalculator(within: Locator) {
 
 async function mobileGantt(page: Page, hash: string, actorId: string) {
   await page.setViewportSize({ width: 360, height: 820 });
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actorId);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actorId);
   await page.goto(`/${hash}`);
   const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
   await expect(search).toBeVisible();

@@ -2,11 +2,11 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Teamspace · 팀의 업무와 지식",
+  title: "Donefac · 팀의 업무와 지식",
   description: "프로젝트의 업무, 일정, 문서, 코드를 한곳에서 연결합니다.",
   icons: {
-    icon: "/teamspace.svg",
-    shortcut: "/teamspace.svg",
+    icon: "/donefac.svg",
+    shortcut: "/donefac.svg",
   },
 };
 

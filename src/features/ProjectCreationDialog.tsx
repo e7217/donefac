@@ -71,10 +71,10 @@ export function ProjectCreationDialog({ actorId, restoreGeneration, refresh, not
     function unload(event: BeforeUnloadEvent) {
       if (pending.current || dirty) { event.preventDefault(); event.returnValue = ''; }
     }
-    window.addEventListener('teamspace:navigate', navigate);
+    window.addEventListener('donefac:navigate', navigate);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', navigate);
+      window.removeEventListener('donefac:navigate', navigate);
       window.removeEventListener('beforeunload', unload);
     };
   });

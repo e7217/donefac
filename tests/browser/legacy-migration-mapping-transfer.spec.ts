@@ -18,7 +18,7 @@ async function json<T>(response: APIResponse | Response, status = 200): Promise<
   return JSON.parse(body) as T;
 }
 
-const file = (buffer: Buffer) => ({ name: 'teamspace-migration-mapping.json', mimeType: 'application/json', buffer });
+const file = (buffer: Buffer) => ({ name: 'donefac-migration-mapping.json', mimeType: 'application/json', buffer });
 
 async function expectViewportWidth(page: Page) {
   const { scrollWidth, clientWidth } = await page.evaluate(() => ({
@@ -78,7 +78,7 @@ test('360px에서 내보낸 이관 매핑을 다시 분석한 원본에 불러�
     await settings.getByRole('button', { name: '이관 매핑 JSON 내보내기', exact: true }).click();
     const exported = await json<MigrationMappingFile>(await exporting);
     const downloaded = await download;
-    expect(downloaded.suggestedFilename()).toBe('teamspace-migration-mapping.json');
+    expect(downloaded.suggestedFilename()).toBe('donefac-migration-mapping.json');
     const path = await downloaded.path();
     expect(path).toBeTruthy();
     const savedFile = await readFile(path!);

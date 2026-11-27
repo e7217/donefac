@@ -151,7 +151,7 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
 
   useEffect(() => {
     const changed = () => setRevision(value => value + 1);
-    const events = ['focus', 'teamspace:trash-changed', 'teamspace:workspace-imported', 'teamspace:time-reservations-changed'];
+    const events = ['focus', 'donefac:trash-changed', 'donefac:workspace-imported', 'donefac:time-reservations-changed'];
     for (const event of events) window.addEventListener(event, changed);
     return () => { for (const event of events) window.removeEventListener(event, changed); };
   }, []);

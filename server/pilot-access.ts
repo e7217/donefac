@@ -6,7 +6,7 @@ import type { Duplex } from 'node:stream';
 import express, { type RequestHandler, type Response } from 'express';
 import { renderPilotAccessPage } from './pilot-access-page.js';
 
-const sessionCookie = '__Host-teamspace-pilot';
+const sessionCookie = '__Host-donefac-pilot';
 const sessionSeconds = 12 * 60 * 60;
 const accessPath = '/pilot-access';
 const logoutPath = `${accessPath}/logout`;
@@ -22,16 +22,16 @@ export interface PilotAccess {
 function publicOrigin(value: string): URL {
   let url: URL;
   try { url = new URL(value); }
-  catch { throw new Error('TEAMSPACE_PILOT_ORIGIN에는 팀 접속 HTTPS 주소를 지정해 주세요.'); }
+  catch { throw new Error('DONEFAC_PILOT_ORIGIN에는 팀 접속 HTTPS 주소를 지정해 주세요.'); }
   if (!/^https:\/\//i.test(value) || url.protocol !== 'https:' || url.pathname !== '/' ||
       url.username || url.password || value.includes('?') || value.includes('#')) {
-    throw new Error('TEAMSPACE_PILOT_ORIGIN에는 경로와 자격 증명이 없는 HTTPS 주소를 지정해 주세요.');
+    throw new Error('DONEFAC_PILOT_ORIGIN에는 경로와 자격 증명이 없는 HTTPS 주소를 지정해 주세요.');
   }
   return url;
 }
 
 function readAccessCode(path: string): Buffer {
-  const invalid = 'TEAMSPACE_PILOT_ACCESS_FILE에는 소유자만 읽을 수 있는 일반 파일의 절대 경로와 64자리 소문자 16진수 접속 키가 필요합니다.';
+  const invalid = 'DONEFAC_PILOT_ACCESS_FILE에는 소유자만 읽을 수 있는 일반 파일의 절대 경로와 64자리 소문자 16진수 접속 키가 필요합니다.';
   if (!isAbsolute(path)) throw new Error(invalid);
   try {
     const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -78,9 +78,9 @@ function setSessionCookie(response: Response, token: string, maxAge: number) {
 }
 
 export function createPilotAccess(env: NodeJS.ProcessEnv = process.env): PilotAccess | null {
-  const { TEAMSPACE_PILOT_ORIGIN: originSetting, TEAMSPACE_PILOT_ACCESS_FILE: accessPathSetting } = env;
+  const { DONEFAC_PILOT_ORIGIN: originSetting, DONEFAC_PILOT_ACCESS_FILE: accessPathSetting } = env;
   if (originSetting === undefined && accessPathSetting === undefined) return null;
-  if (!originSetting || !accessPathSetting) throw new Error('팀 접속 모드에는 TEAMSPACE_PILOT_ORIGIN과 TEAMSPACE_PILOT_ACCESS_FILE이 함께 필요합니다.');
+  if (!originSetting || !accessPathSetting) throw new Error('팀 접속 모드에는 DONEFAC_PILOT_ORIGIN과 DONEFAC_PILOT_ACCESS_FILE이 함께 필요합니다.');
   const origin = publicOrigin(originSetting);
   const accessCode = readAccessCode(accessPathSetting);
   const sessions = new Map<string, Session>();

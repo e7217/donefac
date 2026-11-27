@@ -8,7 +8,7 @@ import { MAX_MARKDOWN_IMPORT_BYTES, previewMarkdownImport } from '../../shared/d
 const children = (value: RichContent): RichContent[] => [value, ...(value.content ?? []).flatMap(children)];
 const linkOf = (value: RichContent) => value.marks?.find(mark => mark.type === 'link')?.attrs?.href;
 
-test('Markdown headings, GFM styles, nested checklists, code, tables and breaks convert to valid Teamspace content', () => {
+test('Markdown headings, GFM styles, nested checklists, code, tables and breaks convert to valid Donefac content', () => {
   const result = previewMarkdownImport([
     '# 운영 &amp; 점검',
     '',

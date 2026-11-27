@@ -397,7 +397,7 @@ test('360px에서 사이클 완료 기록을 회고 문서로 만들고 응답 �
     const recordPath = `/api/projects/${project.id}/cycle-completion-records/${result.recordId}`;
     const path = `${recordPath}/retrospective`;
     expect((await request.post(path.replace(project.id, otherProject.id), { headers, data: {} })).status()).toBe(404);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/planning/${cycle.id}`);
     await page.getByRole('button', { name: '사이클 완료 기록', exact: true }).click();
     const record = page.getByRole('article', { name: '선택한 사이클 완료 기록', exact: true });

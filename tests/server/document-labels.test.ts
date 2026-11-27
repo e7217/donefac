@@ -14,7 +14,7 @@ import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { ApiKeyCreated, DocPage, DocRevision, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-document-labels-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-document-labels-'));
   const runtime = createApp({ dataDir, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   t.after(async () => {

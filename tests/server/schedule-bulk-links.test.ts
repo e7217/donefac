@@ -21,7 +21,7 @@ const findLink = (state: WorkspaceSnapshot, predecessor: Issue, successor: Issue
   link.predecessorId === predecessor.id && link.successorId === successor.id);
 
 async function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-bulk-links-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-bulk-links-'));
   const service = createApp({ dataDir: dir, outboundWorker: false, deadlineReminderWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -93,7 +93,7 @@ test('mixed ordered chain projects dates for new and existing links and atomical
   assert.ok(mixed.warnings.some(warning => warning.includes(`${first.key} → ${outside.key}`) && warning.includes('2026-11-26')));
   assert.deepEqual(await f.workspace(), before);
 
-  const db = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     db.exec(`CREATE TRIGGER fail_mixed_chain_link BEFORE INSERT ON dependencies
       WHEN NEW.predecessor_id='${first.id}' AND NEW.successor_id='${second.id}'
@@ -269,7 +269,7 @@ test('bulk chain follow-up keeps actual input dates fixed and guards unchanged d
   assert.ok(fresh.previewId, JSON.stringify(fresh.errors));
   assert.deepEqual(dateRows(fresh), expected);
 
-  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     database.exec(`CREATE TRIGGER fail_follow_up_chain_link BEFORE INSERT ON dependencies
       WHEN NEW.predecessor_id='${first.id}' AND NEW.successor_id='${second.id}'
@@ -544,7 +544,7 @@ test('ordered bulk chain previews only adjacent pairs and undoes its new links w
   assert.ok(proposal.warnings.some(warning => warning.includes(`${third.key} → ${fourth.key}`) && warning.includes('날짜 미정')));
   assert.deepEqual(await f.workspace(), before);
 
-  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     database.exec(`CREATE TRIGGER fail_last_chain_edge BEFORE INSERT ON dependencies
       WHEN NEW.successor_id='${fourth.id}' BEGIN SELECT RAISE(ABORT,'synthetic final chain edge failure'); END`);
@@ -666,7 +666,7 @@ test('bulk link keeps the existing rule and applies only new links once, with at
   await f.call('/schedule/row-edit/apply', 404, 'POST', { previewId: review.previewId });
   await f.call('/schedule/paste-apply', 404, 'POST', { previewId: review.previewId });
 
-  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     database.exec(`CREATE TRIGGER fail_second_bulk_link BEFORE INSERT ON dependencies
       WHEN json_extract(NEW.json,'$.type')='FS' AND EXISTS (
@@ -860,7 +860,7 @@ test('team blocker batch uses each calendar and atomically applies and undoes ne
   assert.ok(preview.warnings.some(warning => warning.includes(`${otherSource.key} → ${otherTarget.key}`) && warning.includes('2026-11-24')));
   await blockers.apply(preview.previewId, 409, 'user-seo');
 
-  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     database.exec(`CREATE TRIGGER fail_second_project_blocker BEFORE INSERT ON dependencies
       WHEN NEW.successor_id='${otherTarget.id}' BEGIN SELECT RAISE(ABORT,'synthetic second project blocker failure'); END`);

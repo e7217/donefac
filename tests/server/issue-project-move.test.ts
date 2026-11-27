@@ -13,7 +13,7 @@ import type { ApiKeyCreated, Comment, CustomFieldDefinition, CycleCompletionPrev
 type WorklogBackup = { worklogs: (WorklogEntry & { createHash: string; deletedAt: string | null })[] };
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-project-move-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-project-move-'));
   async function start() {
     const runtime = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false });
     const server = runtime.app.listen(0, '127.0.0.1');
@@ -194,7 +194,7 @@ test('moving worklogs transfers their report scope while preserving entries and 
   assert.equal(originalBackup.worklogs.length, 2);
   assert.ok(originalBackup.worklogs.find(value => value.id === deleted.id)?.deletedAt);
 
-  const database = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     database.exec(`CREATE TRIGGER reject_project_move_receipt BEFORE INSERT ON issue_project_move_receipts
       BEGIN SELECT RAISE(ABORT, 'synthetic late project move failure'); END`);

@@ -19,7 +19,7 @@ interface PastePreview {
 }
 interface Applied { undoId: string; updated: Issue[]; warnings: string[] }
 async function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-schedule-paste-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-schedule-paste-'));
   const service = createApp({ dataDir: dir, outboundWorker: false }), server = service.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
@@ -356,7 +356,7 @@ test('bulk calendar dates guard linked changes and roll back a failed write acro
 
     const review = await reviewBulkDates(f, input);
     assert.ok(review.previewId);
-    const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+    const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
     try {
       database.exec(`CREATE TRIGGER fail_bulk_dates_second BEFORE UPDATE ON issues
         WHEN json_extract(NEW.json,'$.title')='둘째 일정'
@@ -838,7 +838,7 @@ test('expired proposals cannot write dates; maintenance retains live previews an
   try {
     const target = await issue(f, '만료 및 보관 검증'), expired = await validPreview(f, target), active = await validPreview(f, target);
     assert.ok(Date.parse(expired.expiresAt!) > Date.now() + 29 * 60_000); assert.ok(Date.parse(expired.expiresAt!) <= Date.now() + 30 * 60_000);
-    const db = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+    const db = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
     try {
       const elapsed = new Date(Date.now() - 1000).toISOString();
       db.prepare("UPDATE schedule_paste_previews SET json=json_set(json,'$.removeAfter',?) WHERE id=?").run(elapsed, expired.previewId!);

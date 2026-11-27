@@ -30,7 +30,7 @@ type Backup = WorkspaceSnapshot & {
 };
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-comment-mentions-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-comment-mentions-'));
   const app = createApp({ dataDir: directory, outboundWorker: false, deadlineReminderWorker: false });
   const server = app.app.listen(0, '127.0.0.1');
   t.after(async () => {
@@ -142,7 +142,7 @@ test('ticket comment request receipts save alerts once and reject replay across 
     resourceId: issue.id, ...compose(f.user(reviewer), ' 등록 결과를 확인합니다.') };
   const post = (body: unknown, status: number, actor = writer) => f.call<Comment>('/comments', { method: 'POST', body, status, actor });
 
-  const db = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.directory, 'donefac.sqlite'));
   try {
     db.exec(`CREATE TRIGGER fail_ticket_comment_notification BEFORE INSERT ON team_notifications WHEN new.kind='issue-comment-mentioned'
       BEGIN SELECT RAISE(ABORT, 'synthetic ticket comment notification failure'); END`);
@@ -212,7 +212,7 @@ test('a pinned comment saves mention alerts with its receipt and replays after a
   const input = { requestId: randomUUID(), expectedDocumentVersion: document.version,
     sourceSelection: { from: 1, to: pinText.length + 1, text: pinText }, ...compose(f.user(reviewer), ' 이 문장을 확인해 주세요.') };
 
-  const db = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.directory, 'donefac.sqlite'));
   try {
     db.prepare('DELETE FROM revisions WHERE document_id=?').run(document.id);
     db.exec(`CREATE TRIGGER fail_synthetic_mention BEFORE INSERT ON team_notifications WHEN new.kind='document-comment-mentioned'

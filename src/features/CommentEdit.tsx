@@ -66,9 +66,9 @@ export function useCommentEditing({ actorId, resourceId, notify, refresh, onSave
   }, []);
 
   useEffect(() => {
-    window.addEventListener('teamspace:workspace-imported', discard);
+    window.addEventListener('donefac:workspace-imported', discard);
     return () => {
-      window.removeEventListener('teamspace:workspace-imported', discard);
+      window.removeEventListener('donefac:workspace-imported', discard);
       request.current?.abort();
     };
   }, [discard]);

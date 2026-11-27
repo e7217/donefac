@@ -31,7 +31,7 @@ async function fixture(request: APIRequestContext) {
 }
 
 async function openChange(page: Page, issue: Issue, author: User, mode: 'teamboard' | 'issues', unassignedOnly = false) {
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
   const query = mode === 'teamboard' ? `?${new URLSearchParams({ boardQuery: issue.title, ...(unassignedOnly && { boardMember: '' }) })}` : '';
   await page.goto(`/#/${issue.projectId}/${mode}${query}`);
   const row = page.locator(`[data-issue-id="${issue.id}"]`);

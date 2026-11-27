@@ -24,9 +24,9 @@ export function nextIssueRelationVersion(version: number, floor = 0): number {
   return next;
 }
 
-export function findTeamspaceIssueRelation(store: Store, relation: Pick<IssueRelation, 'sourceIssueId' | 'targetIssueId' | 'type'>): IssueRelation | undefined {
+export function findDonefacIssueRelation(store: Store, relation: Pick<IssueRelation, 'sourceIssueId' | 'targetIssueId' | 'type'>): IssueRelation | undefined {
   const row = store.db.prepare(`SELECT json FROM issue_relations WHERE source_issue_id=? AND target_issue_id=?
-    AND json_extract(json,'$.origin')='teamspace' AND json_extract(json,'$.type')=?`)
+    AND json_extract(json,'$.origin')='donefac' AND json_extract(json,'$.type')=?`)
     .get(relation.sourceIssueId, relation.targetIssueId, relation.type) as {json: string} | undefined;
   return row && JSON.parse(row.json) as IssueRelation;
 }

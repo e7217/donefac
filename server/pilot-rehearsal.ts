@@ -1,7 +1,7 @@
 import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const PILOT_REHEARSAL_DIRECTORY = '.teamspace-rehearsal';
+export const PILOT_REHEARSAL_DIRECTORY = '.donefac-rehearsal';
 
 export function assertPilotRehearsalWorkspace(dataDir: string, migrationRehearsal: boolean) {
   if (!migrationRehearsal && lstatSync(join(dataDir, PILOT_REHEARSAL_DIRECTORY), { throwIfNoEntry: false })) {

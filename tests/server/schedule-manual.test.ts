@@ -19,7 +19,7 @@ const shift = (issues: Issue[], workingDays = false) => ({ issueIds: issues.map(
 const chooseDate = (issue: Issue, date: string | null) => ({ id: issue.id, expectedVersion: issue.version, startDate: date, endDate: date });
 
 async function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-manual-schedule-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-manual-schedule-'));
   async function start() {
     const service = createApp({ dataDir: dir, outboundWorker: false, deadlineReminderWorker: false });
     const server = service.app.listen(0, '127.0.0.1');
@@ -104,7 +104,7 @@ test('date edits and a cross-project blocker share guarded apply, rollback, rest
   const target = await f.issue('차단 저장 중 오류를 재현할 업무', { endDate: '2026-11-26' }, targetProject.id);
   const input = { source: { id: source.id, expectedVersion: source.version, dates: { endDate: '2026-11-23' } },
     target: { id: target.id, expectedVersion: target.version, dates: { startDate: '2026-11-24' } } };
-  const scope = { 'X-Teamspace-Schedule-Undo-Scope': 'team' };
+  const scope = { 'X-Donefac-Schedule-Undo-Scope': 'team' };
   const preview = (status = 200) => f.call<ScheduleTeamBlockerPreview>('/schedule/team-blocker-edit/preview', status, 'POST', input);
   const apply = (previewId: string | null, status = 200, actorId = actor) =>
     f.call<ScheduleTeamBlockerApplyResult>('/schedule/team-blocker-edit/apply', status, 'POST', { previewId }, actorId, scope);
@@ -136,7 +136,7 @@ test('date edits and a cross-project blocker share guarded apply, rollback, rest
   assert.deepEqual(await links(), [concurrent]);
   await f.call(`/issues/${source.id}/relations/${concurrent.id}?expectedVersion=${concurrent.version}`, 200, 'DELETE', undefined, otherActor);
 
-  const db = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     db.exec(`CREATE TRIGGER reject_second_blocker_date BEFORE UPDATE OF json ON issues
       WHEN json_extract(OLD.json,'$.title')='차단 저장 중 오류를 재현할 업무'
@@ -192,7 +192,7 @@ test('a new cross-project blocker can reschedule indirect work in one guarded ap
 
   const endpoint = ({ id, version }: Issue) => ({ id, expectedVersion: version });
   const input = { source: { ...endpoint(source), dates: { endDate: '2026-11-23' } }, target: endpoint(target), rescheduleSuccessors: true };
-  const scope = { 'X-Teamspace-Schedule-Undo-Scope': 'team' };
+  const scope = { 'X-Donefac-Schedule-Undo-Scope': 'team' };
   const preview = (body: unknown, status = 200) => f.call<ScheduleTeamBlockerPreview>('/schedule/team-blocker-edit/preview', status, 'POST', body);
   const apply = (previewId: string, status = 200) => f.call<ScheduleTeamBlockerApplyResult>('/schedule/team-blocker-edit/apply', status, 'POST', { previewId }, actor, scope);
   const links = () => f.call<IssueRelation[]>(`/issues/${source.id}/relations`, 200);
@@ -523,7 +523,7 @@ test('manual team follow-up merges fixed anchors and guarded successors across p
     [shared.id, ['2026-11-30', '2026-12-01']], [downstream.id, ['2026-12-07', '2026-12-07']]]);
   assert.deepEqual(new Map(proposal.changes.map(({ id, toStart, toEnd }) => [id, [toStart, toEnd]])), expected);
   const applyToProject = (actorId = actor, status = 200) => f.call<SchedulePasteApplyResult>(applyPath, status, 'POST',
-    { previewId: proposal.previewId }, actorId, { 'X-Teamspace-Schedule-Undo-Scope': `project:${f.project.id}` });
+    { previewId: proposal.previewId }, actorId, { 'X-Donefac-Schedule-Undo-Scope': `project:${f.project.id}` });
   await applyToProject(otherActor, 409);
   await f.restart();
   const [applied, replayed] = await Promise.all([applyToProject(), applyToProject()]);
@@ -531,7 +531,7 @@ test('manual team follow-up merges fixed anchors and guarded successors across p
   assert.deepEqual(new Map(applied.updated.map(({ id, startDate, endDate }) => [id, [startDate, endDate]])), expected);
   assert.deepEqual(applied.warnings, proposal.warnings);
   const undone = await f.call<ScheduleUndoResult>('/schedule/undo', 200, 'POST', { undoId: applied.undoId }, actor,
-    { 'X-Teamspace-Schedule-Undo-Scope': `project:${f.project.id}` });
+    { 'X-Donefac-Schedule-Undo-Scope': `project:${f.project.id}` });
   assert.deepEqual(new Map(undone.updated.map(issue => [issue.id, dates(issue)])),
     new Map([first, second, shared, downstream].map(issue => [issue.id, dates(issue)])));
   assert.deepEqual(await applyToProject(), applied);

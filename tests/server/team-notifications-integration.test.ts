@@ -46,7 +46,7 @@ async function open(dataDir: string) {
 }
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-team-notifications-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-team-notifications-'));
   let runtime: Awaited<ReturnType<typeof open>> | undefined;
   t.after(async () => {
     await runtime?.close();
@@ -627,7 +627,7 @@ test('opening a physical database with the legacy notification subscription tabl
   const archived = await expectStatus(f.call<{ trashEntryId: string }>(`/documents/${doc.id}`, 'DELETE'));
 
   await f.restart(dataDir => {
-    const db = new DatabaseSync(join(dataDir, 'teamspace.sqlite'));
+    const db = new DatabaseSync(join(dataDir, 'donefac.sqlite'));
     try {
       db.exec(`
         BEGIN;
@@ -805,7 +805,7 @@ test('failed risk notification insertion rolls back relation creation and the re
   const path = `/issues/${source.id}/relations`;
   const request = { otherIssueId: target.id, type: 'blocks', direction: 'outgoing' };
   const restartWithSql = (sql: string) => f.restart(dataDir => {
-    const db = new DatabaseSync(join(dataDir, 'teamspace.sqlite'));
+    const db = new DatabaseSync(join(dataDir, 'donefac.sqlite'));
     try { db.exec(sql); } finally { db.close(); }
   });
   await restartWithSql(`

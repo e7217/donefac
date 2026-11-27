@@ -146,12 +146,12 @@ export function GanttTeamBlockers({
   useEffect(() => {
     const reload = () => { if (!saveRequest.current && !refreshRequest.current) void load(); };
     const timer = setTimeout(reload, 0);
-    window.addEventListener('teamspace:trash-changed', reload);
-    window.addEventListener('teamspace:workspace-imported', reload);
+    window.addEventListener('donefac:trash-changed', reload);
+    window.addEventListener('donefac:workspace-imported', reload);
     return () => {
       clearTimeout(timer);
-      window.removeEventListener('teamspace:trash-changed', reload);
-      window.removeEventListener('teamspace:workspace-imported', reload);
+      window.removeEventListener('donefac:trash-changed', reload);
+      window.removeEventListener('donefac:workspace-imported', reload);
     };
   }, [issues, load]);
 

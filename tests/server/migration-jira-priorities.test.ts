@@ -31,7 +31,7 @@ function adminXml(issues: [number, string, number?, string?][], updated = '2025-
 type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceRecords: SourceRecordArchive[]; sourceImports: SourceImport[] };
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-jira-priorities-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-jira-priorities-'));
   const service = createApp({ dataDir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {

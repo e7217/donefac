@@ -14,12 +14,12 @@ import type {
 } from '../../shared/types.js';
 
 async function fixture(directory?: string) {
-  const dir = directory || mkdtempSync(join(tmpdir(), 'teamspace-plan-shift-'));
+  const dir = directory || mkdtempSync(join(tmpdir(), 'donefac-plan-shift-'));
   const service = createApp({ dataDir: dir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
-  const database = new DatabaseSync(join(dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(dir, 'donefac.sqlite'));
   let closed = false;
   return {
     dir, database,

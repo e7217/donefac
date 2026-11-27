@@ -288,7 +288,7 @@ test('360px 티켓의 GitLab 상태 제안을 검토하고 초안과 워크플�
     expect(runsBefore.items).toEqual([]);
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), editor.id);
+    await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), editor.id);
     await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
     const panel = page.getByRole('dialog', { name: issue.title, exact: true });
     const gitlab = panel.getByRole('region', { name: 'GitLab', exact: true });
@@ -463,7 +463,7 @@ test('360px 티켓에서 동기화한 열린 MR로 상태를 검토하고 저장
     updatedAt = new Date().toISOString();
     const synchronized = await workspace();
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), editor.id);
+    await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), editor.id);
 
     for (const { issue, iid } of cases) {
       const issuePath = `/api/issues/${issue.id}`;
@@ -640,7 +640,7 @@ test('360px 닫힌 MR 상태 제안은 저장 전 재개를 감지하고 다시 
     calls.length = 0;
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), editor.id);
+    await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), editor.id);
     const route = `#/${project.id}/issues?issue=${ticket.id}`;
     await page.goto(`/${route}`);
     const panel = page.getByRole('dialog', { name: ticket.title, exact: true });

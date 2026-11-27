@@ -270,10 +270,10 @@ function captureArchive(services: ExportServices, query: Record<string, unknown>
   }
   const byPath = [...attachments.values()].sort((left, right) => left.metadata.path.localeCompare(right.metadata.path));
   addText('manifest.json', `${JSON.stringify({
-    format: 'teamspace-document-markdown', schemaVersion: 1, exportedAt: new Date().toISOString(), source, scope,
+    format: 'donefac-document-markdown', schemaVersion: 1, exportedAt: new Date().toISOString(), source, scope,
     documents: tree.order, attachments: byPath.map(file => file.metadata), diagnostics,
   }, null, 2)}\n`);
-  addText('README.md', `# Teamspace 문서\n\n${source === 'published' ? '최신 승인 저장본' : '서버에 저장된 최신 문서'} · ${tree.order.length}개\n\n${tree.lines.join('\n')}\n\n[내보내기 목록과 참조 진단](manifest.json)\n`);
+  addText('README.md', `# Donefac 문서\n\n${source === 'published' ? '최신 승인 저장본' : '서버에 저장된 최신 문서'} · ${tree.order.length}개\n\n${tree.lines.join('\n')}\n\n[내보내기 목록과 참조 진단](manifest.json)\n`);
   for (const { metadata, file } of byPath) {
     const unreadable = '첨부파일을 읽거나 무결성을 확인하지 못해 문서 ZIP을 만들지 못했습니다.';
     try {
@@ -316,10 +316,10 @@ export function registerDocumentExportRoutes(app: Express, services: ExportServi
       const origin = browserOrigin ?? directRequestOrigin(request);
       const entries = services.store.transaction(() => captureArchive(services, request.query, origin));
       const bytes = await zipBytes(entries);
-      const filename = encodeSegment('Teamspace 문서.zip');
+      const filename = encodeSegment('Donefac 문서.zip');
       response.set({
         'Content-Type': 'application/zip', 'Content-Length': String(bytes.length),
-        'Content-Disposition': `attachment; filename="teamspace-documents.zip"; filename*=UTF-8''${filename}`,
+        'Content-Disposition': `attachment; filename="donefac-documents.zip"; filename*=UTF-8''${filename}`,
         'X-Content-Type-Options': 'nosniff',
       }).end(bytes);
     } catch (cause) {

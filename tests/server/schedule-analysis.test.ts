@@ -147,7 +147,7 @@ test('impossible projections at the calendar boundary are isolated from feasible
 });
 
 test('HTTP schedule analysis is project-scoped, read-only and uses current saved schedules', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-schedule-analysis-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-schedule-analysis-'));
   const app = createApp({ dataDir: dir, outboundWorker: false });
   const listener = app.app.listen(0, '127.0.0.1');
   await once(listener, 'listening');

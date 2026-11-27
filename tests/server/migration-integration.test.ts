@@ -34,8 +34,8 @@ import { confluencePageFieldDigest } from '../../server/migration-planner.js';
 import { measureIncomingArchive } from '../../server/source-archive-integrity.js';
 
 async function fixture(atlassianEnv?: NodeJS.ProcessEnv) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-migration-integration-')), service = createApp({ dataDir: dir, outboundWorker: false, atlassianEnv }), server = service.app.listen(0, '127.0.0.1'); await once(server, 'listening');
-  const address = server.address(); assert.ok(address && typeof address !== 'string'); const base = `http://127.0.0.1:${address.port}/api`, db = new DatabaseSync(join(dir, 'teamspace.sqlite')); db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000');
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-migration-integration-')), service = createApp({ dataDir: dir, outboundWorker: false, atlassianEnv }), server = service.app.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string'); const base = `http://127.0.0.1:${address.port}/api`, db = new DatabaseSync(join(dir, 'donefac.sqlite')); db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000');
   async function call<T = unknown>(path: string, method = 'GET', body?: unknown, actor = 'user-seo') { const response = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actor }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, data: await response.json() as T }; }
   async function upload(bytes: Buffer, filename: string, product = 'auto', instanceKey = `synthetic-${randomUUID()}`) { const params = new URLSearchParams({ filename, product, instanceKey }); const response = await fetch(`${base}/legacy-import/packages?${params}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-seo' }, body: new Uint8Array(bytes) }); const data = await response.json() as LegacyPackageSummary; assert.equal(response.status, 201, JSON.stringify(data)); return data; }
   async function configuration(packages: LegacyPackageSummary | LegacyPackageSummary[], key = `MIG${randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase()}`) {
@@ -1230,7 +1230,7 @@ test('incremental Jira imports append only new issues to the bound project and r
   const first = initialData.issues.find(issue=>issue.key==='CONT-1')!;
   const second = initialData.issues.find(issue=>issue.key==='CONT-2')!;
   assert.ok(first && second);
-  const updated = await f.call<typeof first>(`/issues/${first.id}`,'PATCH',{expectedVersion:first.version,title:'Teamspace에서 수정한 부모'});
+  const updated = await f.call<typeof first>(`/issues/${first.id}`,'PATCH',{expectedVersion:first.version,title:'Donefac에서 수정한 부모'});
   assert.equal(updated.status,200,JSON.stringify(updated.data));
   assert.equal((await f.call(`/issues/${second.id}`,'DELETE',{expectedVersion:second.version})).status,200);
 
@@ -4209,7 +4209,7 @@ test('mixed migration creates only reviewed original Jira and Confluence links w
   const sourceOrigin = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
   const jiraBase = `${sourceOrigin}/jira-app`;
   const wikiBase = `${sourceOrigin}/services/wiki`;
-  const f = await fixture({ NODE_ENV: 'test', TEAMSPACE_JIRA_BASE_URL: jiraBase, TEAMSPACE_CONFLUENCE_BASE_URL: wikiBase });
+  const f = await fixture({ NODE_ENV: 'test', DONEFAC_JIRA_BASE_URL: jiraBase, DONEFAC_CONFLUENCE_BASE_URL: wikiBase });
   t.after(() => f.close());
 
   const headers = 'Issue id,Issue key,Project key,Summary,Created,Updated,Status,Issue Type';
@@ -4410,7 +4410,7 @@ test('separate Jira REST and Confluence ZIP imports link exact remote targets in
   const origin = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
   const jiraBase = `${origin}/jira-app`;
   const wikiBase = `${origin}/services/wiki`;
-  const env: NodeJS.ProcessEnv = { NODE_ENV: 'test', TEAMSPACE_JIRA_BASE_URL: jiraBase, TEAMSPACE_CONFLUENCE_BASE_URL: wikiBase };
+  const env: NodeJS.ProcessEnv = { NODE_ENV: 'test', DONEFAC_JIRA_BASE_URL: jiraBase, DONEFAC_CONFLUENCE_BASE_URL: wikiBase };
   const issueTitle = 'Ticket with exact remote links';
   const pageTitle = 'Exact reference page';
   const excludedTitle = 'Intentionally excluded page';
@@ -5762,7 +5762,7 @@ test('retained source verification distinguishes archival loss from deleted live
 });
 
 test('interrupted append recovery removes only uncommitted owned files and retains exact committed versions', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-migration-recovery-')), append = new AttachmentAppend(dir), file = (text: string): AppendedFile => { const bytes = Buffer.from(text); return { id: randomUUID(), bytes, size: bytes.length, sha256: hash(bytes) }; };
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-migration-recovery-')), append = new AttachmentAppend(dir), file = (text: string): AppendedFile => { const bytes = Buffer.from(text); return { id: randomUUID(), bytes, size: bytes.length, sha256: hash(bytes) }; };
   try {
     const uploads = join(dir, 'uploads'), sentinel = join(uploads, 'operator-note.txt'); writeFileSync(sentinel, 'keep unrelated file');
     const uncommitted = randomUUID(), pending = [file('partially installed'), file('still staged')]; append.stage(uncommitted, pending);

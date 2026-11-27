@@ -118,7 +118,7 @@ export function projectJiraComponents(dataset: LegacyDataset): void {
   const warn = (row: LegacyRecord) => {
     if (omittedDiagnostics++ >= 100) return;
     diagnostic(dataset, { severity: 'warning', code: 'JIRA_COMPONENT_EVIDENCE_UNRESOLVED',
-      message: 'Jira 컴포넌트의 원본 ID·이름·프로젝트 관계를 확인하지 못해 Teamspace 필드로 변환하지 않았습니다.',
+      message: 'Jira 컴포넌트의 원본 ID·이름·프로젝트 관계를 확인하지 못해 Donefac 필드로 변환하지 않았습니다.',
       recordId: row.id });
   };
   const observe = (evidence: ComponentEvidence) => {

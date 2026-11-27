@@ -21,7 +21,7 @@ const historicalTitle = '이력이 있는 업무';
 const sourceInstance = 'synthetic-jira-status-history';
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-jira-history-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-jira-history-'));
   const service = createApp({ dataDir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {
@@ -177,7 +177,7 @@ test('Jira status history verifies a REST owner after an initial key-only CSV im
   });
   assert.equal((await findings()).totalChanges, 0);
 
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     const aliased = db.prepare(`SELECT source_alias FROM source_bindings WHERE product='jira' AND source_instance=? AND kind='issue'
       ORDER BY source_alias`).all(sourceInstance).map(row => row.source_alias);
@@ -302,7 +302,7 @@ test('Jira status history reads preserved source transitions across initial migr
   await f.call(`${findingsPath}?expectedVersion=${receipt.version}&finding=excluded&expectedFingerprint=${'0'.repeat(64)}`, 'GET', undefined, 409);
 
   // Older receipts could still carry an owner link before scoped history filtering was introduced.
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     const attachLegacy = db.prepare(`UPDATE source_records SET owner_type='issue',owner_id=?,json=json_set(json_remove(json,'$.excluded'),'$.ownerType','issue','$.ownerId',?)
       WHERE import_id=? AND kind='history' AND source_id=?`);
@@ -425,7 +425,7 @@ test('Jira status history reads preserved source transitions across initial migr
 
   const attachment = appendedAudit.attachments.find(file => file.status === 'verified');
   assert.ok(attachment?.fileId);
-  const updates = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const updates = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     const oldGroup = updates.prepare('SELECT json FROM source_records WHERE id=?').get(entry.sourceRecordId);
     assert.ok(typeof oldGroup?.json === 'string');

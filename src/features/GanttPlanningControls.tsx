@@ -65,7 +65,7 @@ function ProjectPlanningControls(props: GanttPlanningControlsProps) {
   const isProject = data.projects.some((project) => project.id === projectId);
 
   function mayNavigate() {
-    return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }));
+    return window.dispatchEvent(new Event('donefac:navigate', { cancelable: true }));
   }
 
   function toggleExpanded() {

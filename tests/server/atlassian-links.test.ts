@@ -7,7 +7,7 @@ import { AtlassianLinkError, AtlassianLinksService } from '../../server/atlassia
 import { Store } from '../../server/store.js';
 
 function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-atlassian-links-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-atlassian-links-'));
   const store = new Store(directory);
   t.after(() => {
     store.db.close();

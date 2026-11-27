@@ -25,7 +25,7 @@ const filesPath = (documentId: string) => `/attachments?${new URLSearchParams({ 
 type Failure = { details: { reason: string; projectId?: string; currentVersion?: number } };
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-linked-document-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-linked-document-'));
   async function start() {
     const runtime = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false, recurringIssueWorker: false });
     const server = runtime.app.listen(0, '127.0.0.1');
@@ -219,7 +219,7 @@ test('linked team template rolls back installed files and all rows when the link
   await call(`/notifications/subscriptions/space/${documentNotificationSpaceId(projectId)}`, 'PUT', { subscribed: true }, 200, readerId);
   const input = { ...draftFor(issue, '첨부 템플릿 연결 초안'), templateId: template.id, expectedTemplateVersion: template.version };
   const path = createPath(issue.id);
-  const db = new DatabaseSync(join(dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(dataDir, 'donefac.sqlite'));
   try {
     const tables = ['documents', 'revisions', 'attachments', 'activities', 'resource_links', 'team_notifications', 'document_creation_requests'];
     const counts = () => tables.map(table => Number(db.prepare(`SELECT count(*) AS total FROM ${table}`).get()?.total));

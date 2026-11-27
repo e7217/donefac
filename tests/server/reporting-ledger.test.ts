@@ -15,7 +15,7 @@ function issue(id: string, changes: Partial<Issue> = {}): Issue {
   return { id, projectId: 'p', key: `SYN-${id}`, title: `합성 업무 ${id}`, description: '', type: '작업', status: 'todo', priority: 'medium', assigneeId: null, collaboratorIds: [], parentId: null, labels: [], startDate: null, endDate: null, dueDate: null, estimate: null, cycle: null, module: null, release: null, version: 1, createdAt: '2020-01-01T00:00:00.000Z', updatedAt: initial, completedAt: null, ...changes };
 }
 function fixture(seed = true) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-reporting-ledger-')), store = new Store(dir);
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-reporting-ledger-')), store = new Store(dir);
   const projects: Project[] = ['p', 'q'].map((id, index) => ({ id, key: `SYN${index}`, name: `합성 프로젝트 ${id}`, description: '', color: '#567899', createdAt: initial }));
   for (const project of projects) store.put('projects', project);
   store.put('users', { id: 'actor', name: '합성 작업자', email: 'actor@example.test', color: '#567899' });

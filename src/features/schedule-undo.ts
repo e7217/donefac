@@ -6,7 +6,7 @@ import { api, ApiError } from '../lib/api';
 
 const REQUEST_TIMEOUT = 20_000;
 const undoIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const undoRequestKey = (key: string) => `teamspace:schedule-undo:${key}`;
+const undoRequestKey = (key: string) => `donefac:schedule-undo:${key}`;
 
 function pendingUndoId(key: string) {
   try {
@@ -25,7 +25,7 @@ function forgetPendingUndo(key: string, id: string) {
 export function scheduleUndoHeaders(scope?: ScheduleUndoScope | null, actorId?: string): Record<string, string> {
   return {
     ...(actorId ? { 'X-Actor-Id': actorId } : {}),
-    ...(scope ? { 'X-Teamspace-Schedule-Undo-Scope': scope.kind === 'team' ? 'team' : `${scope.kind}:${encodeURIComponent(scope.id)}` } : {}),
+    ...(scope ? { 'X-Donefac-Schedule-Undo-Scope': scope.kind === 'team' ? 'team' : `${scope.kind}:${encodeURIComponent(scope.id)}` } : {}),
   };
 }
 

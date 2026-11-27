@@ -28,7 +28,7 @@ type Backup = WorkspaceSnapshot & {
 };
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-time-reservations-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-time-reservations-'));
   async function start() {
     const runtime = createApp({ dataDir: directory, outboundWorker: false });
     const server = runtime.app.listen(0, '127.0.0.1');

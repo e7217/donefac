@@ -10,7 +10,7 @@ import type { ApiKeyCreated, CustomFieldValue, Issue, IssueBulkEditPreview, Issu
 
 const allFilters = { query: '', status: 'all', assigneeId: 'all', type: 'all' };
 async function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-field-breakdown-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-field-breakdown-'));
   const service = createApp({ dataDir: dir, outboundWorker: false }), server = service.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;

@@ -15,7 +15,7 @@ const event = {
 const rowIds = (rows: TeamNotification[]) => rows.map(row => row.id);
 
 function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-notifications-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-notifications-'));
   const store = new Store(dir);
   t.after(() => {
     store.db.close();

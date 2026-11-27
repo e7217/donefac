@@ -3,14 +3,16 @@ import { MAX_MARKDOWN_ARCHIVE_BYTES, type DocumentMarkdownArchiveFormat, type Do
 import { MAX_MARKDOWN_IMPORT_BYTES } from '../shared/document-markdown-import.js';
 import { MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import { documentArchiveAttachmentFooter, documentArchiveAttachmentLink } from './document-export.js';
+import { currentProductFormat, LEGACY_PRODUCT_ID } from '../shared/legacy-name.js';
 import { LegacyArchiveError, readLegacyArchive } from './legacy-import-archive.js';
 
 const MAX_DOCUMENTS = 500;
 const MAX_ATTACHMENTS = 1500;
 const MAX_DIAGNOSTICS = 10_000;
-const teamspaceManifest = 'manifest.json';
+const donefacManifest = 'manifest.json';
 const docmostManifest = 'docmost-metadata.json';
-const teamspaceFormat = 'teamspace-document-markdown';
+const donefacFormat = 'donefac-document-markdown';
+const legacyDonefacFormat = `${LEGACY_PRODUCT_ID}-document-markdown`;
 const markdownExtension = /\.md$/iu;
 const docmostAttachmentId = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/iu;
 
@@ -90,16 +92,16 @@ function markdownNamedPath(value: unknown): value is string {
   return typeof value === 'string' && markdownExtension.test(value);
 }
 
-function readTeamspaceManifest(bytes: Buffer | undefined): Record<string, unknown> | null {
+function readDonefacManifest(bytes: Buffer | undefined): Record<string, unknown> | null {
   if (!bytes) return null;
   let value: unknown;
-  try { value = JSON.parse(utf8(bytes, teamspaceManifest)); }
+  try { value = JSON.parse(utf8(bytes, donefacManifest)); }
   catch (error) {
     // "manifest.json" by itself is also an ordinary attachment name in a Markdown archive.
-    if (bytes.includes(teamspaceFormat)) throw error instanceof LegacyArchiveError ? error : new LegacyArchiveError(400, 'Teamspace ZIP의 문서 목록을 확인해 주세요.');
+    if (bytes.includes(donefacFormat) || bytes.includes(legacyDonefacFormat)) throw error instanceof LegacyArchiveError ? error : new LegacyArchiveError(400, 'Donefac ZIP의 문서 목록을 확인해 주세요.');
     return null;
   }
-  return record(value) && value.format === teamspaceFormat ? value : null;
+  return record(value) && currentProductFormat(value.format) === donefacFormat ? value : null;
 }
 
 type Archive = Awaited<ReturnType<typeof readLegacyArchive>>;
@@ -118,20 +120,20 @@ function withoutGeneratedAttachmentFooter(markdown: string, links: AttachmentLin
   return body;
 }
 
-function teamspaceSource(archive: Archive, manifest: Record<string, unknown>): MarkdownArchiveSource {
+function donefacSource(archive: Archive, manifest: Record<string, unknown>): MarkdownArchiveSource {
   if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.documents) || !Array.isArray(manifest.attachments)) {
-    return fail('지원하는 Teamspace Markdown ZIP의 문서 목록을 확인해 주세요.');
+    return fail('지원하는 Donefac Markdown ZIP의 문서 목록을 확인해 주세요.');
   }
   limitPages(manifest.documents.length);
   limitFiles(manifest.attachments.length);
 
-  const listedPaths = new Set([teamspaceManifest, 'README.md']);
+  const listedPaths = new Set([donefacManifest, 'README.md']);
   const pathsById = new Map<string, string>();
   const rawPages: { path: string; parentId: string | null; title: string; markdown: string }[] = [];
   for (const row of manifest.documents) {
     if (!record(row) || !identifier(row.id) || pathsById.has(row.id) || !markdownNamedPath(row.path) || listedPaths.has(row.path) ||
         (row.parentId !== null && !identifier(row.parentId)) || typeof row.title !== 'string' || !row.title.trim() || row.title.length > 300) {
-      return fail('Teamspace ZIP의 문서 항목을 확인해 주세요.');
+      return fail('Donefac ZIP의 문서 항목을 확인해 주세요.');
     }
     const bytes = archive.files.get(row.path);
     if (!bytes) return fail(`${row.path}: 문서 목록에 포함된 파일을 찾을 수 없습니다.`);
@@ -155,7 +157,7 @@ function teamspaceSource(archive: Archive, manifest: Record<string, unknown>): M
     if (!record(row) || !identifier(row.id) || attachmentIds.has(row.id) || !identifier(row.attachmentId) ||
         !identifier(row.documentId) || typeof row.path !== 'string' || listedPaths.has(row.path) || typeof row.filename !== 'string' ||
         !Number.isSafeInteger(row.size) || typeof row.sha256 !== 'string' || !/^[a-f\d]{64}$/u.test(row.sha256)) {
-      return fail('Teamspace ZIP의 첨부파일 항목을 확인해 주세요.');
+      return fail('Donefac ZIP의 첨부파일 항목을 확인해 주세요.');
     }
     const bytes = archive.files.get(row.path);
     const ownerPath = pathsById.get(row.documentId);
@@ -180,7 +182,7 @@ function teamspaceSource(archive: Archive, manifest: Record<string, unknown>): M
     }
   }
   for (const path of archive.files.keys()) {
-    if (!listedPaths.has(path)) fail(`${path}: Teamspace 문서 목록에 없는 ZIP 파일입니다.`);
+    if (!listedPaths.has(path)) fail(`${path}: Donefac 문서 목록에 없는 ZIP 파일입니다.`);
   }
   for (const page of pages) {
     const groups = attachmentLinkGroups.get(page.path);
@@ -189,16 +191,16 @@ function teamspaceSource(archive: Archive, manifest: Record<string, unknown>): M
 
   const warnings: MarkdownArchiveSource['warnings'] = [];
   if (manifest.diagnostics !== undefined) {
-    if (!Array.isArray(manifest.diagnostics) || manifest.diagnostics.length > MAX_DIAGNOSTICS) return fail('Teamspace ZIP 참조 진단 수를 확인해 주세요.');
+    if (!Array.isArray(manifest.diagnostics) || manifest.diagnostics.length > MAX_DIAGNOSTICS) return fail('Donefac ZIP 참조 진단 수를 확인해 주세요.');
     for (const row of manifest.diagnostics) {
       const path = record(row) && identifier(row.documentId) ? pathsById.get(row.documentId) : undefined;
       if (!record(row) || !path || typeof row.message !== 'string' || !row.message.trim() || row.message.length > 500) {
-        return fail('Teamspace ZIP의 참조 진단을 확인해 주세요.');
+        return fail('Donefac ZIP의 참조 진단을 확인해 주세요.');
       }
       warnings.push({ path, message: row.message });
     }
   }
-  return { format: 'teamspace', pages, files, warnings };
+  return { format: 'donefac', pages, files, warnings };
 }
 
 function normalizeDocmostEntry(name: string): string {
@@ -300,10 +302,10 @@ export async function readMarkdownArchive(bytes: Buffer): Promise<MarkdownArchiv
     },
   });
   const docmost = archive.files.get(docmostManifest);
-  const teamspace = readTeamspaceManifest(archive.files.get(teamspaceManifest));
-  if (normalizedDocmostPath && (!docmost || teamspace)) return fail('ZIP 파일 경로를 확인해 주세요.');
-  if (docmost && teamspace) return fail('ZIP에 서로 다른 형식의 문서 목록이 있습니다.');
-  if (teamspace) return teamspaceSource(archive, teamspace);
+  const donefac = readDonefacManifest(archive.files.get(donefacManifest));
+  if (normalizedDocmostPath && (!docmost || donefac)) return fail('ZIP 파일 경로를 확인해 주세요.');
+  if (docmost && donefac) return fail('ZIP에 서로 다른 형식의 문서 목록이 있습니다.');
+  if (donefac) return donefacSource(archive, donefac);
   if (docmost) return docmostSource(archive, docmost);
   return genericSource(archive);
 }

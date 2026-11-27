@@ -37,7 +37,7 @@ async function source(t: TestContext, listener: RequestListener) {
 }
 
 async function fixture(t: TestContext) {
-  const directory = await mkdtemp(join(tmpdir(), 'teamspace-gitlab-search-'));
+  const directory = await mkdtemp(join(tmpdir(), 'donefac-gitlab-search-'));
   const runtime = createApp({ dataDir: directory, outboundWorker: false });
   const server = createServer(runtime.app);
   t.after(async () => {

@@ -24,7 +24,7 @@ type Failure = { details: { reason: string } };
 type Backup = { schemaVersion: number; issueTemplates?: IssueTemplate[] };
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-issue-template-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-issue-template-'));
   const service = createApp({ dataDir: directory, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {

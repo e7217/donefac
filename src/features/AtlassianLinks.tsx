@@ -20,8 +20,8 @@ export function AtlassianLinks(props: Props) {
   const [workspaceRevision, reload] = useState(0);
   useEffect(() => {
     const imported = () => reload(value => value + 1);
-    window.addEventListener('teamspace:workspace-imported', imported);
-    return () => window.removeEventListener('teamspace:workspace-imported', imported);
+    window.addEventListener('donefac:workspace-imported', imported);
+    return () => window.removeEventListener('donefac:workspace-imported', imported);
   }, []);
 
   if (!props.actorId) return null;

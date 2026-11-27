@@ -49,7 +49,7 @@ test('프로젝트 설정에 저장한 업무 템플릿을 새 업무에 적용�
         id: fieldId, name: fieldName, kind: 'text', issueTypes: ['버그'], description: '', required: false, archived: false, options: [],
       }],
     } }));
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/settings?section=work`);
     await expect(page.getByRole('heading', { name: '업무 템플릿', exact: true })).toBeVisible({ timeout: 25_000 });
     await page.getByRole('button', { name: '새 템플릿', exact: true }).click();
@@ -128,7 +128,7 @@ test('기존 업무를 업무 템플릿으로 저장할 때 원본의 담당자�
     const issue = await json<Issue>(await request.post('/api/issues', { data: {
       projectId: project.id, title: `${prefix} 원본`, description: '원본 설명', priority: 'low', assigneeId: assignee.id, startDate: '2026-11-23',
     } }), 201);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/settings?section=work`);
     await page.getByRole('button', { name: '기존 업무에서 만들기', exact: true }).click();
     await page.getByLabel('템플릿 이름', { exact: true }).fill(name);

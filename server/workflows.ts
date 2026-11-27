@@ -4,7 +4,7 @@ import { MAX_WORKING_DURATION_DAYS } from '../shared/calendar.js';
 import { defaultWorkflow, MAX_WORKFLOW_WIP_LIMIT, STATUS_CATEGORY_LABELS } from '../shared/workflow-helpers.js';
 import { BASE_REQUIRED_FIELD_LABELS, defaultIssueSchema, fieldApplies, hasCustomValue, requiredFieldLabels } from '../shared/issue-schema.js';
 import { visibilityFieldsWithMissingStatuses, type IssueSchemaService } from './issue-schema.js';
-import { directTeamspaceBlockers, type IssueRelationsService } from './issue-relations.js';
+import { directDonefacBlockers, type IssueRelationsService } from './issue-relations.js';
 import type { Store } from './store.js';
 
 export class WorkflowError extends Error {
@@ -190,7 +190,7 @@ export class WorkflowService {
     for (const child of stored) if (!projected?.byId.has(child.id) && !terminal.has(child.status)) return child;
   }
   private hasOpenBlockers(issueId: string, targetWorkflow: ProjectWorkflow): boolean {
-    const blockers = this.issueRelations?.directBlockers([issueId]) ?? directTeamspaceBlockers(this.store, [issueId]);
+    const blockers = this.issueRelations?.directBlockers([issueId]) ?? directDonefacBlockers(this.store, [issueId]);
     if (!blockers.length) return false;
     const sources = this.store.db.prepare(`SELECT source.project_id AS projectId, json_extract(source.json, '$.status') AS status
       FROM json_each(?) AS verified JOIN issues AS source ON source.id=verified.value`)

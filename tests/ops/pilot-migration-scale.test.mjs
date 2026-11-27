@@ -163,7 +163,7 @@ async function checkAttachments(pilot, receipt, archives) {
 
 test('mixed Jira and Confluence migration at team backlog scale survives a physical restore', { timeout: 300_000 }, async t => {
   const started = performance.now();
-  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-migration-scale-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'donefac-migration-scale-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const root = join(scratch, 'run');
   const manifest = join(scratch, 'manifest.json');
@@ -182,7 +182,7 @@ test('mixed Jira and Confluence migration at team backlog scale survives a physi
   assert.equal(profile.packages[0].analysis.counts.issue, issueCount);
   assert.equal(profile.packages[1].analysis.counts.page, pageCount);
   await runRehearsal(['stage', manifest, root, '--profile', profilePath], 0);
-  const staged = JSON.parse(await readFile(join(root, 'workspace', '.teamspace-rehearsal', 'stage.json')));
+  const staged = JSON.parse(await readFile(join(root, 'workspace', '.donefac-rehearsal', 'stage.json')));
   assert.equal(staged.profile.sha256, digest(profileRaw));
 
   const expected = { issues: issueCount, documents: pageCount, issueRelations: issueCount - 1, resourceLinks: pageCount,

@@ -613,7 +613,7 @@ class Context{
     const validated = emptyDataset(this.dataset.source);
     for (const item of this.dataset.records) addRecord(validated, item);
     this.dataset.records = validated.records;
-    this.warn('PREVIEW_ONLY', '이 패키지는 분석·보존 가능성 미리보기이며 Teamspace 업무로 적용하지 않았습니다.', null, null, 'info');
+    this.warn('PREVIEW_ONLY', '이 패키지는 분석·보존 가능성 미리보기이며 Donefac 업무로 적용하지 않았습니다.', null, null, 'info');
     return this.dataset;
   }
 }

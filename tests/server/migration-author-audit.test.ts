@@ -17,10 +17,10 @@ import { zip } from '../fixtures/legacy-export-zip.mjs';
 const originalDate = '2025-01-02T00:00:00.000Z';
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-migration-author-audit-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-migration-author-audit-'));
   const service = createApp({ dataDir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
-  const db = new DatabaseSync(join(dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(dataDir, 'donefac.sqlite'));
   t.after(async () => {
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));

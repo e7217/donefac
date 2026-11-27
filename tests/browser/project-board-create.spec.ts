@@ -22,7 +22,7 @@ test('보드 칸에서 해당 상태와 담당자를 기본값으로 새 업무�
   const issues: Issue[] = [];
 
   try {
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/issues`);
     await page.getByRole('button', { name: '보드', exact: true }).click();
     const board = page.getByRole('region', { name: '업무 보드', exact: true });

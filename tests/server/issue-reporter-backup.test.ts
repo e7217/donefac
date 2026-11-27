@@ -12,7 +12,7 @@ import type { Issue, TrashRestoreResult, WorkspaceSnapshot } from '../../shared/
 type Backup = { schemaVersion: number; issues: Issue[]; trashEntries: TrashArchive[] };
 
 async function open(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-issue-reporter-backup-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-issue-reporter-backup-'));
   const app = createApp({ dataDir });
   const server = app.app.listen(0, '127.0.0.1');
   t.after(async () => {

@@ -46,7 +46,7 @@ async function fixture(request: APIRequestContext) {
 }
 
 async function selectActorOnLoad(page: Page, actorId: string) {
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actorId);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actorId);
 }
 
 test('360px에서 같은 공유 보기를 두 작업자가 열고 각자의 담당 업무를 목록·보드·간트와 문서에서 확인한다', async ({ page, browser, baseURL, request }) => {

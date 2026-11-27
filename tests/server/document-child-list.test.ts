@@ -88,7 +88,7 @@ test('child list ranks live siblings from custom orders in the selected space an
 });
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-document-child-list-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-document-child-list-'));
   const service = createApp({ dataDir: directory, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {

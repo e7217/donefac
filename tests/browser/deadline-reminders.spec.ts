@@ -27,7 +27,7 @@ async function makeRecipient(request: APIRequestContext, name: string) {
 }
 
 async function openSettings(page: Page, projectId: string, recipient: User) {
-  await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), recipient.id);
+  await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), recipient.id);
   await page.goto(`/#/${projectId}/settings`);
   const actor = page.getByLabel('작업자 선택', { exact: true });
   await expect(actor).toHaveValue(recipient.id, { timeout: 35_000 });

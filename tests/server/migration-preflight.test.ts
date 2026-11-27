@@ -62,7 +62,7 @@ test('migration preflight exports the selected package and counts without copyin
   Object.assign(preview.counts, { updatedJiraComments: 1, confirmedJiraComments: 1, conflictingJiraComments: 1, archivedJiraCommentCorrections: 1 });
   const report = buildMigrationPreflightReport(preview, [{ ...jira, id: unrelatedPackageId }, jira]);
   assert.deepEqual(report, {
-    format: 'teamspace-migration-preflight', version: 1,
+    format: 'donefac-migration-preflight', version: 1,
     preview: { id: previewId, version: 1, createdAt: preview.createdAt, expiresAt: preview.expiresAt, canApply: false },
     mode: 'new', status: 'blocked',
     packages: [{ id: packageId, product: 'jira', format: 'jira-json', size: 4000, sha256: jira.sha256, errors: 1, warnings: 2 }],

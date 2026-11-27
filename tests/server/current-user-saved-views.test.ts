@@ -23,7 +23,7 @@ const blockerPath = `/projects/${projectId}/delivery-blockers`;
 const bulkPath = `/projects/${projectId}/issues/bulk`;
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-view-current-user-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-view-current-user-'));
   const runtime = createApp({ dataDir, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   t.after(async () => {

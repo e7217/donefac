@@ -391,7 +391,7 @@ test('간트 새로고침 뒤 미확인 되돌리기를 먼저 확인하고 새 
     await page.setViewportSize({ width: 360, height: 820 });
     const { chart, undo } = await openChart(page, original);
     const actorId = await page.getByLabel('작업자 선택', { exact: true }).inputValue();
-    const headers = { 'X-Actor-Id': actorId, 'X-Teamspace-Schedule-Undo-Scope': `project:${original.projectId}` };
+    const headers = { 'X-Actor-Id': actorId, 'X-Donefac-Schedule-Undo-Scope': `project:${original.projectId}` };
     const end = chart.getByLabel(`${original.key} 종료일`, { exact: true });
     const applied = nextPost(page, applyPath);
     await end.fill(fixture.date(4));

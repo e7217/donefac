@@ -35,7 +35,7 @@ test('모바일 백로그와 계획 상세에서 추이를 열고 날짜별 업�
     const observedDate = reservationLocalDateTime(unestimated.createdAt, 'Asia/Seoul').slice(0, 10);
     const unobservedDate = calendarDate(calendarDay(observedDate) - 3);
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/backlog/${cycle.id}`);
     const panel = page.getByRole('region', { name: '사이클 진행 추이', exact: true });
     const toggle = panel.getByRole('button', { name: '사이클 진행 추이', exact: true });

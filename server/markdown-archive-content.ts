@@ -62,8 +62,8 @@ export async function prepareMarkdownArchive(bytes: Buffer, { projectId, parentI
   for (const page of source.pages) {
     try {
       readers.set(page.path, readArchiveMarkdown(page.markdown, {
-        exportedTitle: source.format === 'teamspace',
-        sectionMarkers: source.format === 'teamspace',
+        exportedTitle: source.format === 'donefac',
+        sectionMarkers: source.format === 'donefac',
         parseTable: parseMarkdownArchiveTable,
         resolve(address) {
           const target = archiveDestination(page.path, address);

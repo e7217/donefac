@@ -479,7 +479,7 @@ export class MigrationService {
     const sourceIds = new Set([sourceProjectId, originalSourceProjectId]);
     if (sourceIds.size > 1) return sourceIds;
     // A search export can bind the project key before a later REST import binds its numeric ID.
-    // Prove the pair by the shared archived Jira key. A Teamspace project can include several Jira projects.
+    // Prove the pair by the shared archived Jira key. A Donefac project can include several Jira projects.
     const archived = this.store.db.prepare(`SELECT DISTINCT archive.source_id AS sourceId, archive.target_id AS projectId,
       json_extract(archive.json,'$.record.metadata.key') AS key, json_extract(archive.json,'$.record.metadata.pkey') AS pkey
       FROM source_records AS archive JOIN source_bindings AS binding
@@ -1563,8 +1563,8 @@ export class MigrationService {
         staged?.rollback();
         throw error;
       }
-      try { staged?.commit(); } catch { console.error('[teamspace migration] 첨부 추가 복구 기록 정리가 필요합니다.'); }
-      try { hooks.afterApply?.(prepared); } catch { console.error('[teamspace migration] 이관한 문서의 공동 편집 알림을 보낼 수 없습니다.'); }
+      try { staged?.commit(); } catch { console.error('[donefac migration] 첨부 추가 복구 기록 정리가 필요합니다.'); }
+      try { hooks.afterApply?.(prepared); } catch { console.error('[donefac migration] 이관한 문서의 공동 편집 알림을 보낼 수 없습니다.'); }
       return { import: receipt, duplicate: false };
     } finally { this.busy = false; }
   }

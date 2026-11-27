@@ -8,8 +8,12 @@ import { assertWorkspaceCredentials, CREDENTIAL_KEY_FILE, readWorkspaceCredentia
 
 const SCRIPT = fileURLToPath(import.meta.url);
 const WRAPPER = join(dirname(SCRIPT), 'pilot-lock.sh');
-const FORMAT = 'teamspace-pilot-cold-backup';
-const DB = 'teamspace.sqlite';
+const FORMAT = 'donefac-pilot-cold-backup';
+const DB = 'donefac.sqlite';
+// Data directories and backups written before the product rename use the former names.
+const LEGACY_FORMAT = 'teamspace-pilot-cold-backup';
+const LEGACY_DB = 'teamspace.sqlite';
+const databaseName = root => !exists(join(root, DB)) && exists(join(root, LEGACY_DB)) ? LEGACY_DB : DB;
 const KEY = CREDENTIAL_KEY_FILE;
 const MANIFEST = 'manifest.json';
 const MAX_MANIFEST = 64 * 1024 * 1024;
@@ -158,15 +162,15 @@ function workspaceFileInventory(db, tables, uploadDirectory) {
 
 function validateDatabase(root, checkpoint) {
   const key = credential(root);
-  const path = join(root, DB), fd = regularFd(path); closeSync(fd);
+  const path = join(root, databaseName(root)), fd = regularFd(path); closeSync(fd);
   const db = new DatabaseSync(path, { readOnly: !checkpoint, enableForeignKeyConstraints: true });
   let expected;
   try {
     const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
     for (const name of ['users', 'projects', 'issues', 'documents', 'settings']) {
-      if (!tables.has(name)) fail('Teamspace 데이터베이스의 기본 테이블이 없습니다.');
+      if (!tables.has(name)) fail('Donefac 데이터베이스의 기본 테이블이 없습니다.');
       const fields = new Set(db.prepare(`PRAGMA table_info(${name})`).all().map(row => row.name));
-      for (const column of name === 'settings' ? ['key', 'value'] : ['id', 'json']) if (!fields.has(column)) fail('Teamspace 데이터베이스의 기본 열이 없습니다.');
+      for (const column of name === 'settings' ? ['key', 'value'] : ['id', 'json']) if (!fields.has(column)) fail('Donefac 데이터베이스의 기본 열이 없습니다.');
     }
     const check = db.prepare('PRAGMA quick_check').all();
     if (check.length !== 1 || check[0].quick_check !== 'ok') fail('SQLite quick_check에 실패했습니다.');
@@ -211,7 +215,7 @@ function validRelative(value, empty = false) {
 }
 function clearReadonlyCaches(root, manifest) {
   const expected = new Set(manifest.files.map(file => file.path));
-  const wal = `${DB}-wal`, shm = `${DB}-shm`;
+  const name = databaseName(root), wal = `${name}-wal`, shm = `${name}-shm`;
   if (!expected.has(wal) && exists(join(root, wal))) {
     const fd = regularFd(join(root, wal));
     try { if (fstatSync(fd).size !== 0) fail('읽기 검증 후 예상하지 못한 WAL 데이터가 남았습니다. 복원을 게시하지 않습니다.'); }
@@ -229,7 +233,7 @@ function manifestOf(root) {
 }
 function verifyBackup(root) {
   const manifest = jsonFile(join(root, MANIFEST), MAX_MANIFEST);
-  if (!manifest || manifest.format !== FORMAT || manifest.version !== 1 || typeof manifest.createdAt !== 'string' || !Number.isFinite(Date.parse(manifest.createdAt)) || !Array.isArray(manifest.directories) || !Array.isArray(manifest.files) || manifest.files.length + manifest.directories.length > MAX_ENTRIES || !manifest.directories.includes('')) fail('지원하는 Teamspace 물리 백업 매니페스트가 필요합니다.');
+  if (!manifest || manifest.format !== FORMAT && manifest.format !== LEGACY_FORMAT || manifest.version !== 1 || typeof manifest.createdAt !== 'string' || !Number.isFinite(Date.parse(manifest.createdAt)) || !Array.isArray(manifest.directories) || !Array.isArray(manifest.files) || manifest.files.length + manifest.directories.length > MAX_ENTRIES || !manifest.directories.includes('')) fail('지원하는 Donefac 물리 백업 매니페스트가 필요합니다.');
   const seen = new Set();
   for (const path of manifest.directories) { if (!validRelative(path, true) || seen.has(path)) fail('매니페스트의 디렉터리 경로가 올바르지 않습니다.'); seen.add(path); }
   for (const file of manifest.files) {
@@ -243,7 +247,7 @@ function verifyBackup(root) {
     if (actual.size !== file.size || actual.sha256 !== file.sha256) fail(`백업 파일의 크기 또는 SHA-256이 일치하지 않습니다: ${file.path}`);
   }
   credential(join(root, 'data'));
-  if (!seen.has(DB) || !seen.has(KEY)) fail('백업에 Teamspace 데이터베이스와 키가 없습니다.');
+  if (!(seen.has(DB) || seen.has(LEGACY_DB)) || !seen.has(KEY)) fail('백업에 Donefac 데이터베이스와 키가 없습니다.');
   if (!Array.isArray(manifest.recoveryPending) || JSON.stringify(manifest.recoveryPending) !== JSON.stringify(recoveryJournals(join(root, 'data')))) fail('백업의 복구 저널 목록이 매니페스트와 다릅니다.');
   return manifest;
 }
@@ -256,8 +260,8 @@ function publish(stage, target) {
   sync(dirname(target));
 }
 function guardedLock(dataDir) {
-  if (process.env.TEAMSPACE_PILOT_LOCKED_DIR !== dataDir || process.env.TEAMSPACE_PILOT_LOCK_FD !== '9') fail('잠금 래퍼를 통해 실행해야 합니다.');
-  const held = fstatSync(9), sibling = lstatSync(`${dataDir}.teamspace.lock`);
+  if (process.env.DONEFAC_PILOT_LOCKED_DIR !== dataDir || process.env.DONEFAC_PILOT_LOCK_FD !== '9') fail('잠금 래퍼를 통해 실행해야 합니다.');
+  const held = fstatSync(9), sibling = lstatSync(`${dataDir}.donefac.lock`);
   if (!held.isFile() || !sibling.isFile() || sibling.isSymbolicLink() || held.dev !== sibling.dev || held.ino !== sibling.ino) fail('데이터 디렉터리 잠금 파일을 확인하지 못했습니다.');
   const stdio = Array(10).fill('ignore'); stdio[2] = 'pipe'; stdio[9] = 9;
   const lock = spawnSync('flock', ['-n', '-x', '9'], { stdio, shell: false });
@@ -269,10 +273,10 @@ function perform(operation, source, target) {
   let stage;
   try {
     if (operation === 'backup') {
-      credential(from); const databaseFd = regularFd(join(from, DB)); closeSync(databaseFd);
+      credential(from); const databaseFd = regularFd(join(from, databaseName(from))); closeSync(databaseFd);
       const tree = walk(from);
-      if (!tree.files.some(file => file.path === DB)) fail('Teamspace 데이터베이스가 없습니다.');
-      stage = mkdtempSync(join(dirname(to), '.teamspace-backup-')); chmodSync(stage, 0o700);
+      if (!tree.files.some(file => file.path === databaseName(from))) fail('Donefac 데이터베이스가 없습니다.');
+      stage = mkdtempSync(join(dirname(to), '.donefac-backup-')); chmodSync(stage, 0o700);
       privateDirectory(join(stage, 'data')); copyTree(from, join(stage, 'data'), tree);
       const expected = validateDatabase(join(stage, 'data'), true);
       const manifest = manifestOf(join(stage, 'data'));
@@ -285,7 +289,7 @@ function perform(operation, source, target) {
     } else {
       const originalManifest = verifyBackup(from);
       const payload = join(from, 'data'), tree = walk(payload);
-      stage = mkdtempSync(join(dirname(to), '.teamspace-restore-')); chmodSync(stage, 0o700);
+      stage = mkdtempSync(join(dirname(to), '.donefac-restore-')); chmodSync(stage, 0o700);
       copyTree(payload, stage, tree);
       const expected = validateDatabase(stage, false);
       clearReadonlyCaches(stage, originalManifest);

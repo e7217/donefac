@@ -28,7 +28,7 @@ type StatusEdit = IssueStatusEdit & { opener: HTMLElement };
 type BoardEntry = { issue: Issue; status: WorkflowStatus; projectKey: string; projectName: string };
 
 const CATEGORIES = Object.keys(STATUS_CATEGORY_LABELS) as StatusCategory[];
-const DRAG_TYPE = 'application/x-teamspace-team-board-issue';
+const DRAG_TYPE = 'application/x-donefac-team-board-issue';
 const HEADING = '전체 프로젝트 보드';
 const refreshMessages = {
   updated: '팀 보드를 새로고침했습니다.',

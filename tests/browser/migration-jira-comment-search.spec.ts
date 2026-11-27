@@ -73,7 +73,7 @@ test('360px에서 Jira 원본 댓글 주소로 빠른 검색과 전체 검색에
       outbound.push(route.request().url());
       await route.abort();
     });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${projectId}/issues`);
     const quick = page.getByRole('dialog', { name: '통합 검색', exact: true });
     const quickInput = quick.getByRole('textbox', { name: '통합 검색어', exact: true });

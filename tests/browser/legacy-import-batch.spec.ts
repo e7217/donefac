@@ -74,7 +74,7 @@ test('360px에서 Jira와 Confluence를 순차 분석하고 재시도 후 선택
   try {
     const prior = await json<LegacyPackageSummary>(await postPrior(), 201);
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), actor.id);
+    await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), actor.id);
     await page.goto(`/#/${project.id}/settings?section=migration`);
     const mapping = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
     const pick = (filename: string) => mapping.getByRole('checkbox', { name: `이관 패키지 ${filename}`, exact: true });
@@ -247,7 +247,7 @@ test('다른 화면에서 지운 분석 패키지를 매핑에 넘기지 않고 
   const instanceKey = `batch-removed-${suffix}`;
   const headers = { 'X-Actor-Id': actor.id };
   try {
-    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), actor.id);
+    await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), actor.id);
     await page.goto(`/#/${project.id}/settings?section=migration`);
     const legacy = page.getByRole('region', { name: '기존 도구 원본 분석', exact: true });
     await button(legacy, batchName).click();

@@ -51,7 +51,7 @@ test('360px 팀 알림에서 다른 프로젝트의 차단 추가와 해소, 마
     }
     await subscribe(editor.id);
 
-    await page.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), recipient.id);
+    await page.addInitScript(actor => localStorage.setItem('donefac.actor', actor), recipient.id);
     await page.goto(`/#/${otherProject.id}/issues`);
     await expect(page.getByLabel('작업자 선택', { exact: true })).toHaveValue(recipient.id);
     const trigger = page.getByRole('button', { name: '알림', exact: true });

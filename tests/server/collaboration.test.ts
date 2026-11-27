@@ -16,7 +16,7 @@ import { yDocToProsemirrorJSON } from 'y-prosemirror';
 import { createApp } from '../../server/app.js';
 import { MAX_COLLABORATION_UPDATE } from '../../server/collaboration.js';
 
-async function fixture(dir=mkdtempSync(join(tmpdir(),'teamspace-collab-'))){
+async function fixture(dir=mkdtempSync(join(tmpdir(),'donefac-collab-'))){
   const service=createApp({dataDir:dir});const server=service.app.listen(0,'127.0.0.1');service.attachWebSocket(server);await once(server,'listening');
   const base=`http://127.0.0.1:${(server.address() as any).port}`;let closed=false;
   const request=async(path:string,method='GET',body?:unknown,actorId='user-min')=>{const response=await fetch(base+'/api'+path,{method,headers:{'Content-Type':'application/json','X-Actor-Id':actorId},...(body===undefined?{}:{body:JSON.stringify(body)})});return{status:response.status,data:await response.json() as any};};
@@ -141,7 +141,7 @@ test('schema 17 startup upgrade keeps the epoch, XML state and late pending edit
     (paragraph.get(0) as Y.XmlText).insert(0, '설치 전 ');
     client.dispose(); client = undefined;
     await f.close();
-    const disk = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+    const disk = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
     try { disk.prepare('UPDATE collaboration_documents SET schema_version=17 WHERE document_id=?').run(id); }
     finally { disk.close(); }
     reopened = await fixture(f.dir);
@@ -234,7 +234,7 @@ test('two clients merge concurrent text without duplicate initialization; ACK co
     const remoteA=await a.p.next('update'),remoteB=await b.p.next('update');Y.applyUpdate(a.p.doc,Buffer.from(remoteA.update,'base64'));Y.applyUpdate(b.p.doc,Buffer.from(remoteB.update,'base64'));assert.deepEqual(content(a.p),content(b.p));assert.match(text(a.p).toString(),/^(?:AB|BA)원본$/);
     const snapshot=(await f.request('/workspace')).data.documents.find((d:any)=>d.id===id);assert.deepEqual(snapshot.content,content(a.p));const version=snapshot.version;
     const duplicate=await sendUpdate(a.p,epoch,ua,requestA);assert.equal(duplicate.document.version,version);const repeated=await sendUpdate(a.p,epoch,ua);assert.equal(repeated.document.version,version);
-    const disk=new DatabaseSync(join(f.dir,'teamspace.sqlite'),{readOnly:true});const row=disk.prepare('SELECT json FROM documents WHERE id=?').get(id) as {json:string};assert.equal(JSON.parse(row.json).version,version);const state=disk.prepare('SELECT state FROM collaboration_documents WHERE document_id=?').get(id) as {state:Uint8Array};const durable=new Y.Doc();Y.applyUpdate(durable,state.state);assert.deepEqual(yDocToProsemirrorJSON(durable,'default'),snapshot.content);durable.destroy();disk.close();
+    const disk=new DatabaseSync(join(f.dir,'donefac.sqlite'),{readOnly:true});const row=disk.prepare('SELECT json FROM documents WHERE id=?').get(id) as {json:string};assert.equal(JSON.parse(row.json).version,version);const state=disk.prepare('SELECT state FROM collaboration_documents WHERE document_id=?').get(id) as {state:Uint8Array};const durable=new Y.Doc();Y.applyUpdate(durable,state.state);assert.deepEqual(yDocToProsemirrorJSON(durable,'default'),snapshot.content);durable.destroy();disk.close();
     const before=(await f.request(`/documents/${id}/revisions`)).data;assert.equal(before.length,1);
     assert.deepEqual(await watchNotifications(),[]);
     const checkpoint=await f.request(`/documents/${id}/checkpoint`,'POST',{summary:'검토 가능한 이력'});assert.equal(checkpoint.status,200);assert.equal(checkpoint.data.version,version);assert.deepEqual(checkpoint.data.content,snapshot.content);

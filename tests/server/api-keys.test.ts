@@ -12,7 +12,7 @@ import { ApiKeyService } from '../../server/api-keys.js';
 import type { ApiKeyCreated, ApiKeyIssuanceResult, ApiKeyRecord, AttachmentHead, AttachmentVersion, Comment, Dependency, DocPage, Issue, IssueRelation, PlanningItem, Project, User, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-api-key-test-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-api-key-test-'));
   const service = createApp({ dataDir: dir });
   const server = service.app.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('No test server');
@@ -30,7 +30,7 @@ async function fixture() {
 const bearer = (token: string, extra: Record<string, string> = {}) => ({ Authorization: `Bearer ${token}`, ...extra });
 
 test('API keys store hashes only, list owner metadata, revoke by CAS and reject expired/invalid credentials', async () => {
-  const f = await fixture(); const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const f = await fixture(); const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     const created = await f.create();
     assert.match(created.token, /^ts_[A-Za-z0-9_-]{43}$/);
@@ -61,7 +61,7 @@ test('API keys store hashes only, list owner metadata, revoke by CAS and reject 
 
 test('guarded issuance recovers the exact key without returning its secret and fences native restores', async () => {
   const f = await fixture();
-  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   const owner = { 'X-Actor-Id': 'user-seo' };
   type Refusal = { details: { reason: string } };
   try {
@@ -197,7 +197,7 @@ test('public schedule dependencies authorize both endpoints and return only the 
     // Seed a mixed-project historical row directly so the read and edit guards
     // must check the stored endpoints even though normal creation forbids it.
     const mixed: Dependency = { id: 'mixed-dependency', predecessorId: 'issue-1', successorId: 'issue-10', type: 'FS', lagDays: 0, version: 1 };
-    const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+    const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
     try {
       database.prepare('INSERT INTO dependencies(id,predecessor_id,successor_id,json) VALUES(?,?,?,?)')
         .run(mixed.id, mixed.predecessorId, mixed.successorId, JSON.stringify(mixed));
@@ -412,7 +412,7 @@ test('native import revokes keys atomically: a late rollback preserves them, a s
 });
 
 test('audit failures roll back both key creation and revocation', async () => {
-  const f = await fixture(); const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const f = await fixture(); const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     database.exec("CREATE TRIGGER reject_key_audit BEFORE INSERT ON activities WHEN json_extract(NEW.json,'$.resourceType')='api-key' BEGIN SELECT RAISE(FAIL,'synthetic audit rejection'); END;");
     assert.equal((await f.call('/api-keys', 'POST', { name: '감사 실패', access: 'read', projectIds: null, expiresAt: null })).status, 500);

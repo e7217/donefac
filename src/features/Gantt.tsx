@@ -725,15 +725,15 @@ function ProjectGantt(props: GanttProps) {
       clearInlineDates();
       setDraftEpoch(value => value + 1);
     };
-    window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
-    window.addEventListener('teamspace:workspace-imported', importReset);
+    window.addEventListener('donefac:navigate', guard); window.addEventListener('beforeunload', unload);
+    window.addEventListener('donefac:workspace-imported', importReset);
     return () => {
-      window.removeEventListener('teamspace:navigate', guard);
+      window.removeEventListener('donefac:navigate', guard);
       window.removeEventListener('beforeunload', unload);
-      window.removeEventListener('teamspace:workspace-imported', importReset);
+      window.removeEventListener('donefac:workspace-imported', importReset);
     };
   }, [notify, refresh, refreshAfterUnknownSchedule, trackDraft, manualProblem?.kind, clearInlineDates, dateStorageError]);
-  function canLeave() { return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })); }
+  function canLeave() { return window.dispatchEvent(new Event('donefac:navigate', { cancelable: true })); }
   function closeTeamBlockers() {
     const draft = draftsRef.current.get(TEAM_BLOCKER_DRAFT);
     if (draft?.pending || (draft?.dirty && !window.confirm('입력한 차단 관계를 취소하시겠습니까?'))) return;
@@ -1360,7 +1360,7 @@ function ProjectGantt(props: GanttProps) {
     const successor = issueRows.get(relation.targetIssueId);
     if (!predecessor || !successor) return [];
     const dependency: Dependency = {
-      id: `team-blocker:${relation.origin ?? 'teamspace'}:${relation.id}`,
+      id: `team-blocker:${relation.origin ?? 'donefac'}:${relation.id}`,
       predecessorId: relation.sourceIssueId, successorId: relation.targetIssueId, ...TEAM_BLOCKER_SCHEDULE_RULE,
     };
     return [{ relation, dependency, predecessor, successor, check: teamBlockerChecks.get(relation.id) }];
@@ -1440,7 +1440,7 @@ function ProjectGantt(props: GanttProps) {
       teamBlockerIds: new Set(visibleTeamBlockerLinks.map(({ dependency }) => dependency.id)),
       findings: exportedFindings,
     });
-    downloadText(`teamspace-gantt-${project?.key ?? 'all'}.html`, renderGanttExport(report), 'text/html;charset=utf-8');
+    downloadText(`donefac-gantt-${project?.key ?? 'all'}.html`, renderGanttExport(report), 'text/html;charset=utf-8');
   }
   function downloadScheduleSheet() {
     if (!sheetScope || !sheetIssues.length || exportDisabled) return;
@@ -1448,7 +1448,7 @@ function ProjectGantt(props: GanttProps) {
       ? buildTeamGanttScheduleSheet(sheetIssues, data.issues, data.dependencies)
       : buildGanttScheduleSheet(sheetIssues, projectIssues, data.dependencies);
     if (!result.ok) { notify(result.error, 'error'); return; }
-    downloadText(`teamspace-schedule-${sheetScope === 'team' ? 'all' : sheetScope.key}.tsv`, result.text, 'text/tab-separated-values;charset=utf-8');
+    downloadText(`donefac-schedule-${sheetScope === 'team' ? 'all' : sheetScope.key}.tsv`, result.text, 'text/tab-separated-values;charset=utf-8');
   }
   function canHideRows(nextIssues: Issue[]) {
     const visibleIds = new Set(nextIssues.map(issue => issue.id));

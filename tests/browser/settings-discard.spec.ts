@@ -44,7 +44,7 @@ test('워크플로와 달력을 함께 편집하면 뒤의 탐색 취소가 앞�
   await settingsSection(page, '업무 구성').click();
   await expect(stateName).toHaveValue('취소하면 보존할 워크플로'); await expect(workflowEditor.getByRole('button', { name: '워크플로 저장', exact: true })).toBeEnabled();
   // Staying mounted also exercises the actual reset, rather than relying on an unmount.
-  await decisions(page, [true, true], () => page.evaluate(() => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))));
+  await decisions(page, [true, true], () => page.evaluate(() => window.dispatchEvent(new Event('donefac:navigate', { cancelable: true }))));
   await expect(stateName).toHaveValue(workflow.statuses[0].label); await expect(workflowEditor.getByRole('button', { name: '워크플로 저장', exact: true })).toBeDisabled();
   await settingsSection(page, '업무 달력').click();
   await expect(calendarName).toHaveValue(originalCalendar.name); await expect(calendarEditor.getByRole('button', { name: '업무 달력 저장', exact: true })).toBeDisabled();

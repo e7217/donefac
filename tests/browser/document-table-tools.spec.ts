@@ -192,7 +192,7 @@ test('공동 편집에서 키보드로 셀을 선택하고 다른 편집자와 �
   } }), 201);
   const contexts = await Promise.all(users.slice(0, 2).map(async user => {
     const context = await browser.newContext({ baseURL, viewport: { width: 960, height: 880 } });
-    await context.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), user.id);
+    await context.addInitScript(actor => localStorage.setItem('donefac.actor', actor), user.id);
     return context;
   }));
   try {

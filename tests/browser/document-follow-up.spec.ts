@@ -626,7 +626,7 @@ test('360px 티켓에서 동료가 고정한 결정 근거를 확인한 뒤 문�
     const plain = await linked.json() as ResourceLink;
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     const route = `#/${project.id}/issues?issue=${issue.id}`;
     await page.goto(`/${route}`);
     const panel = page.getByRole('dialog', { name: issueTitle, exact: true });
@@ -1356,7 +1356,7 @@ test('360px 팀 결정 후속 업무에서 여러 프로젝트와 공통 문서�
     expect(changedSource.ok(), await changedSource.text()).toBeTruthy();
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${base.id}/overview`);
     await page.getByRole('button', { name: '메뉴 열기', exact: true }).click();
     await page.getByRole('navigation', { name: '워크스페이스', exact: true }).getByRole('button', { name: '팀 개요', exact: true }).click();
@@ -1643,7 +1643,7 @@ test('360px에서 체크리스트 항목을 후속 업무로 만들고 기존 �
     const existing = await created.json() as Issue;
     const enabled = await request.post(`/api/documents/${source.id}/collaboration/enable`, { data: { expectedVersion: source.version } });
     expect(enabled.ok(), await enabled.text()).toBe(true);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await openDecision(page, source, project.id);
     const editor = page.locator('.docs-live-prose');
     await expect(editor).toHaveAttribute('contenteditable', 'true');
@@ -1713,7 +1713,7 @@ test('360px에서 체크리스트 원문이 바뀌면 작성한 업무 입력을
   const path = `/api/documents/${source.id}/follow-up-issues`;
   const nextRequest = () => page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'POST');
   try {
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await openDecision(page, source, project.id);
     const editor = page.locator('.docs-prose');
     await expect(editor).toHaveAttribute('contenteditable', 'true');
@@ -1823,7 +1823,7 @@ test('360px에서 같은 문구의 기존 체크리스트 항목은 앞 문단�
     const first = await createIssue('상위 항목의 연결 업무');
     const additional = await createIssue('상위 항목의 추가 업무');
     const nested = await createIssue('하위 항목의 연결 업무');
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await openDecision(page, source, project.id);
     const editor = page.locator('.docs-prose');
     await expect(editor).toHaveAttribute('contenteditable', 'true');
@@ -1955,7 +1955,7 @@ test('360px에서 저장한 체크리스트 ID로 같은 문구의 순서와 문
       issues.push(await result.json() as Issue);
     }
     const [first, second, anonymous] = issues;
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await openDecision(page, source, project.id);
     const editor = page.locator('.docs-prose');
     await expect(editor).toHaveAttribute('contenteditable', 'true');

@@ -65,7 +65,7 @@ test('360px 문서 순서 편집에서 필터 밖 형제와 최신 목록을 확
     const initialActivity = orderActivity(await workspace(request));
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     const documentUrl = `/#/${project.id}/documents/${first.id}`;
     await page.goto(`${documentUrl}?${new URLSearchParams({ label: documentLabelKey(label) })}`);
     const tree = page.getByRole('complementary', { name: '문서 목록', exact: true });

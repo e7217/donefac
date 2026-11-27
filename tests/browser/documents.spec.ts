@@ -444,7 +444,7 @@ test('수동 문서의 제목 초안은 다른 사용자가 저장한 본문·�
     if (request.url().endsWith(path) && request.method() === 'PATCH') browserWrites.push(request.postDataJSON());
   });
 
-  await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), document.authorId);
+  await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), document.authorId);
   await openDocument(page, document);
   await expect(page.getByRole('button', { name: '공동 편집 시작', exact: true })).toBeVisible();
   const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
@@ -589,8 +589,8 @@ test('360px 편집 사본의 응답을 잃은 뒤 한 건만 확인하고 그 �
   await expect(editor).toHaveText('동료가 저장한 최신 본문');
   await editor.fill(laterBody);
   const sequences = await page.evaluate(({ actorId, id }) => {
-    const draft = JSON.parse(localStorage.getItem(`teamspace:document-draft:${actorId}:${id}`) ?? 'null');
-    const attempt = JSON.parse(sessionStorage.getItem(`teamspace:document-edit-copy:${JSON.stringify([actorId, id])}`) ?? 'null');
+    const draft = JSON.parse(localStorage.getItem(`donefac:document-draft:${actorId}:${id}`) ?? 'null');
+    const attempt = JSON.parse(sessionStorage.getItem(`donefac:document-edit-copy:${JSON.stringify([actorId, id])}`) ?? 'null');
     return { draft: draft?.editSequence, attempted: attempt?.editSequence };
   }, { actorId: document.authorId, id: document.id });
   expect(sequences.draft).toEqual(expect.any(Number));

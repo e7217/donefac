@@ -381,10 +381,10 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, initial
     const unload = (event: BeforeUnloadEvent) => {
       if (dirtyRef.current || pendingRef.current || attempt.current) { event.preventDefault(); event.returnValue = ''; }
     };
-    window.addEventListener('teamspace:navigate', guard, handlesNestedNavigation);
+    window.addEventListener('donefac:navigate', guard, handlesNestedNavigation);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', guard, handlesNestedNavigation);
+      window.removeEventListener('donefac:navigate', guard, handlesNestedNavigation);
       window.removeEventListener('beforeunload', unload);
     };
   }, [handlesNestedNavigation, confirmationLocation, usesIssueReceipt, notify, onClose, refreshAfterClose]);

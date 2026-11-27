@@ -17,7 +17,7 @@ async function downloadSheet(page: Page, projectKey: string) {
     page.waitForEvent('download'),
     scheduleDownload(page).click(),
   ]);
-  expect(download.suggestedFilename()).toBe(`teamspace-schedule-${projectKey}.tsv`);
+  expect(download.suggestedFilename()).toBe(`donefac-schedule-${projectKey}.tsv`);
   const bytes = await readFile(await download.path());
   expect([...bytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
   const [header, ...lines] = bytes.toString('utf8', 3).replace(/\r?\n$/, '').split(/\r?\n/);

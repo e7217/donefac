@@ -29,7 +29,7 @@ const targetQuery = (targetBranch: string) => `?${new URLSearchParams({ targetBr
 
 type RequestOptions = { method?: string; body?: unknown; headers?: Record<string, string> };
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-gitlab-branch-merge-requests-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-gitlab-branch-merge-requests-'));
   const seen: { method?: string; url: URL; credential?: string | string[] }[] = [];
   let repositoryUrl = '';
   let projectOverrides: Record<string, unknown> = {};

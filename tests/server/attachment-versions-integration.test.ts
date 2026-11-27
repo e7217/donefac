@@ -41,7 +41,7 @@ async function open(dir: string) {
 }
 
 async function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-attachment-versions-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-attachment-versions-'));
   let running: Awaited<ReturnType<typeof open>> | undefined;
   t.after(async () => {
     try { await running?.close(); }
@@ -117,7 +117,7 @@ test('append uses the observed head, preserves immutable byte URLs, and survives
   await read(f.upload(appendPath(first.id, first.id, 'duplicate.pdf') + `&expectedVersionId=${first.id}`, firstPdf), 400);
   assert.deepEqual(entries(f), [first.id]);
 
-  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     database.exec("CREATE TRIGGER synthetic_version_audit BEFORE INSERT ON activities WHEN json_extract(NEW.json,'$.resourceId')='issue-2' BEGIN SELECT RAISE(ABORT,'synthetic version audit failure'); END;");
     try { await read(f.upload(path, firstPdf), 500); }
@@ -239,7 +239,7 @@ test('interrupted per-version journals keep committed files and remove only aban
   let committed!: AttachmentVersion;
   let abandonedId!: string;
   await f.restart(() => {
-    const db = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+    const db = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
     db.exec('PRAGMA foreign_keys=ON');
     const appender = new AttachmentAppend(f.dir);
     for (const shouldCommit of [false, true]) {

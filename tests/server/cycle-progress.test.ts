@@ -61,7 +61,7 @@ function path(cycle: PlanningItem, project = cycle.projectId) {
 
 test('cycle progress observes scope, estimates and workflow transitions, then freezes at completion with carryover', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-22T16:00:00.000Z') });
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-cycle-progress-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-cycle-progress-'));
   let app = await open(dataDir);
   try {
     const cycle = await app.plan('관측할 사이클');
@@ -160,7 +160,7 @@ test('cycle progress observes scope, estimates and workflow transitions, then fr
 
 test('cycle progress bounds date windows and pages evidence against a revision under project-scoped API keys', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-22T16:00:00.000Z') });
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-cycle-progress-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-cycle-progress-'));
   const app = await open(dataDir);
   try {
     const cycle = await app.plan('긴 관측 기간', { startDate: '2026-04-15' });

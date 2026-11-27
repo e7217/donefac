@@ -11,8 +11,8 @@ type Match = { range: Range; block: HTMLElement };
 type Matches = { matches: Match[]; truncated: boolean };
 type SearchResult = { query: string; caseSensitive: boolean; content: RichContent; result: Matches };
 type Part = { node: Text; from: number; to: number };
-const allHighlights = 'teamspace-document-reader-find';
-const activeHighlight = 'teamspace-document-reader-find-current';
+const allHighlights = 'donefac-document-reader-find';
+const activeHighlight = 'donefac-document-reader-find-current';
 const emptyResult: Matches = { matches: [], truncated: false };
 
 function findInSavedBody(root: HTMLElement, pattern: RegExp): Matches {

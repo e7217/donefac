@@ -27,7 +27,7 @@ type Backup = WorkspaceSnapshot & {
 type RequestOptions = { method?: string; body?: unknown; actor?: string | null; headers?: Record<string, string> };
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-comment-resolution-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-comment-resolution-'));
   async function start() {
     const app = createApp({ dataDir: directory, outboundWorker: false });
     const server = app.app.listen(0, '127.0.0.1');

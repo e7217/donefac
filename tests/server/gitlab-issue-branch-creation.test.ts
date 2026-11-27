@@ -40,7 +40,7 @@ async function close(server: Server) {
 }
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-issue-branch-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-issue-branch-'));
   const remoteCalls: Call[] = [];
   const heads = new Map([['main', sourceSha], ['release/current', startingSha]]);
   let baseUrl = '';
@@ -167,7 +167,7 @@ test('ticket branch creation pins the reviewed commit, uses only a supplied writ
   const snapshot = await f.call<WorkspaceSnapshot>('/workspace');
   assert.equal(snapshot.issues.find(issue => issue.id === f.issue.id)?.status, f.issue.status);
   assert.equal(snapshot.activities.filter(activity => activity.resourceId === f.issue.id && activity.action === 'GitLab 브랜치 연결').length, 1);
-  for (const file of readdirSync(f.dataDir).filter(name => name.startsWith('teamspace.sqlite'))) {
+  for (const file of readdirSync(f.dataDir).filter(name => name.startsWith('donefac.sqlite'))) {
     assert.equal(readFileSync(join(f.dataDir, file)).includes(writeToken), false);
   }
 

@@ -336,10 +336,10 @@ function PublicationDialog({
         event.returnValue = '';
       }
     };
-    window.addEventListener('teamspace:navigate', navigate);
+    window.addEventListener('donefac:navigate', navigate);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', navigate);
+      window.removeEventListener('donefac:navigate', navigate);
       window.removeEventListener('beforeunload', unload);
     };
   }, [notify, onClose, page.id, resetNotes]);
@@ -541,7 +541,7 @@ function PublicationDialog({
         setSnapshotKind('published');
       }
       resetNotes();
-      window.dispatchEvent(new Event('teamspace:publication-changed'));
+      window.dispatchEvent(new Event('donefac:publication-changed'));
       notify({
         request: '저장된 문서의 검토를 요청했습니다.',
         approve: result.review ? '문서 검토를 승인했습니다.' : '검토본을 발행했습니다.',

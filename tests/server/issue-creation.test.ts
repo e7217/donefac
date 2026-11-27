@@ -23,7 +23,7 @@ const cycleBoardCreatePath = (project = projectId) => `/projects/${project}/cycl
 const cycleDestination = ({ id, version }: PlanningItem) => ({ id, expectedVersion: version });
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-issue-create-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-issue-create-'));
   async function start() {
     const runtime = createApp({ dataDir: directory, outboundWorker: false });
     const server = runtime.app.listen(0, '127.0.0.1');
@@ -31,7 +31,7 @@ async function fixture(t: TestContext) {
     return { runtime, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}/api` };
   }
   let service = await start();
-  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const observer = new DatabaseSync(join(directory, 'donefac.sqlite'));
   async function stop() {
     service.server.closeAllConnections();
     try { await new Promise<void>((resolve, reject) => service.server.close(error => error ? reject(error) : resolve())); }
@@ -476,7 +476,7 @@ test('cloning saves a fresh issue and one symmetric relation, with idempotent re
   assert.deepEqual((await call(`/comments?resourceType=issue&resourceId=${issue.id}`)).data, []);
   assert.ok(relation);
   assert.equal(relation.type, 'related');
-  assert.equal(relation.origin, 'teamspace');
+  assert.equal(relation.origin, 'donefac');
   assert.deepEqual([relation.sourceIssueId, relation.targetIssueId], [source.id, issue.id].sort());
   assert.deepEqual((await call<IssueRelation[]>(`/issues/${issue.id}/relations`)).data, [relation]);
   assert.deepEqual(sideEffects(), before.map((value, index) => value + (index === 2 ? 3 : 1)));

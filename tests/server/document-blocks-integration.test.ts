@@ -25,7 +25,7 @@ const issueSummary = (projectId: string, savedViewId: string | null, groupBy: st
 });
 const labelList = (attrs: Record<string, unknown> = {}): RichContent => ({ type: 'documentLabelList', attrs });
 const details:RichContent={type:'details',content:[{type:'detailsSummary',content:[{type:'text',text:'검토 <기준>',marks:[{type:'bold'}]}]},{type:'detailsContent',content:[p('접혀 있어도 보존할 결정')]}]};
-async function fixture(){const dir=mkdtempSync(join(tmpdir(),'teamspace-document-integration-'));const service=createApp({dataDir:dir});const server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;return{
+async function fixture(){const dir=mkdtempSync(join(tmpdir(),'donefac-document-integration-'));const service=createApp({dataDir:dir});const server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;return{
   base,
   async call<T=Record<string,unknown>>(path:string,method='GET',data?:unknown,token?:string,actorId='user-min'){const response=await fetch(base+path,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{'X-Actor-Id':actorId})},...(data===undefined?{}:{body:JSON.stringify(data)})});return{status:response.status,data:await response.json() as T};},
   async close(){service.close();await new Promise<void>(resolve=>server.close(()=>resolve()));rmSync(dir,{recursive:true,force:true});},
@@ -624,10 +624,10 @@ test('document Markdown preserves reference destinations and folded content with
     type: 'heading', attrs: { level, ...(sectionId ? { sectionId } : {}) }, content: [{ type: 'text', text: value }],
   });
   const navigation = body({ type: 'documentToc', attrs: { minLevel: 2, maxLevel: 2, layout: 'flat' } },
-    heading(1, '범위 밖', 'teamspace-toc-1'), heading(2, '검토 [대상]'), heading(2, '검토 [대상]', 'existing-id'));
+    heading(1, '범위 밖', 'donefac-toc-1'), heading(2, '검토 [대상]'), heading(2, '검토 [대상]', 'existing-id'));
   const exported = contentMarkdown(navigation);
-  assert.ok(exported.includes('[검토 \\[대상\\]](#teamspace-toc-2) · [검토 \\[대상\\]](#existing-id)'));
-  assert.ok(exported.includes('<a id="teamspace-toc-2"></a>'));
+  assert.ok(exported.includes('[검토 \\[대상\\]](#donefac-toc-2) · [검토 \\[대상\\]](#existing-id)'));
+  assert.ok(exported.includes('<a id="donefac-toc-2"></a>'));
   assert.ok(exported.includes('<a id="existing-id"></a>'));
   assert.ok(!exported.includes('[범위 밖]'));
 });

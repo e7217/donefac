@@ -68,7 +68,7 @@ test('360px 붙여넣은 선후행 변경을 프로젝트 간 후행에 반영�
     expect(original.link).toEqual(localLink);
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     const chartHash = `#/${sourceProject.id}/gantt`;
     await page.goto(`/${chartHash}`);
     const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });

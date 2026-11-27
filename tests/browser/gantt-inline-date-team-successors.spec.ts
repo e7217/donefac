@@ -80,7 +80,7 @@ test('360px 여러 날짜 초안과 프로젝트 간 공통 후행 일정을 함
     }
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     const chartHash = `#/${sourceProject.id}/gantt?${new URLSearchParams({ scope: 'team', ganttQ: prefix })}`;
     await page.goto(`/${chartHash}`);
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });

@@ -306,8 +306,8 @@ test('공동 편집에서 속성 값과 추가한 항목을 동기화하고 다�
     const sessionPath = `/api/documents/${source.id}/collaboration`;
     const enabled = await request.post(`${sessionPath}/enable`, { headers, data: { expectedVersion: source.version } });
     expect(enabled.status(), await enabled.text()).toBe(200);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
-    await context.addInitScript(id => localStorage.setItem('teamspace.actor', id), collaborator.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
+    await context.addInitScript(id => localStorage.setItem('donefac.actor', id), collaborator.id);
     const peer = await context.newPage();
     await Promise.all([page.goto(path(source)), peer.goto(path(source))]);
     await expect(page.locator('.docs-collaboration-presence')).toContainText('2명 접속', { timeout: 30_000 });

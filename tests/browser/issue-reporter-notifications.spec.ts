@@ -76,7 +76,7 @@ test('360px 요청자가 상태 변경과 댓글 알림에서 업무와 원래 �
     }
 
     await page.addInitScript(id => {
-      if (!localStorage.getItem('teamspace.actor')) localStorage.setItem('teamspace.actor', id);
+      if (!localStorage.getItem('donefac.actor')) localStorage.setItem('donefac.actor', id);
     }, editor.id);
     await openAs(editor.id);
     await changeStatus('in_progress');

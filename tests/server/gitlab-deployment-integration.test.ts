@@ -22,7 +22,7 @@ const branchSha = 'c'.repeat(40);
 const timestamp = (offset = 0) => new Date(Date.UTC(2024, 1, 10, 8, 0, offset)).toISOString();
 
 async function fixture(t: TestContext, connection: { baseUrl?: string; token?: string } = {}) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-gitlab-deployment-http-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-gitlab-deployment-http-'));
   const application = createApp({ dataDir, seed: true, outboundWorker: false });
   const server = application.app.listen(0, '127.0.0.1');
   await once(server, 'listening');

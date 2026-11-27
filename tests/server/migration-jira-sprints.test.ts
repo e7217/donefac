@@ -19,7 +19,7 @@ const start = '2025-01-06';
 const end = '2025-01-17';
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-jira-sprints-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-jira-sprints-'));
   const service = createApp({ dataDir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {
@@ -180,7 +180,7 @@ test('Jira sprint and version choices survive restore and append preserves team 
   const currentRelease = await plan('release', '통합 계획');
   await f.call<PlanningItem>(`/planning-items/${release.id}`, 'PATCH', { expectedVersion: currentRelease.version, targetDate: '2025-02-25' });
 
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     db.exec(`CREATE TRIGGER reject_jira_sprint_issue BEFORE INSERT ON issues
       WHEN json_extract(NEW.json,'$.title')='새 사이클에 붙일 업무'

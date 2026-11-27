@@ -10,14 +10,14 @@ import { Store } from '../../server/store.js';
 
 const scope: GitlabWebhookReceiptScope = {
   instance: 'https://git.example.test', repositoryId: 23, event: 'pipeline',
-  receiverUrl: 'https://teamspace.example.test/api/integrations/gitlab/webhook',
+  receiverUrl: 'https://donefac.example.test/api/integrations/gitlab/webhook',
 };
 const digest = (message: string) => createHash('sha256').update(message).digest('hex');
 const id = digest('internal-message-id');
 const week = 7 * 24 * 60 * 60 * 1000;
 
 function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-webhook-receipts-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-webhook-receipts-'));
   let store = new Store(dir);
   let receipts = new GitlabWebhookReceipts(store);
   t.after(() => {
@@ -55,12 +55,12 @@ test('matches a digest only within the exact scope and keeps the original succes
   for (const different of [
     { ...scope, instance: 'https://other-git.example.test' },
     { ...scope, repositoryId: 24 },
-    { ...scope, receiverUrl: 'https://other-teamspace.example.test/api/integrations/gitlab/webhook' },
+    { ...scope, receiverUrl: 'https://other-donefac.example.test/api/integrations/gitlab/webhook' },
     { ...scope, event: 'push' },
   ] as const) assert.equal(f.receipts.match(different, id), null);
   const columns = f.store.db.prepare('SELECT * FROM gitlab_webhook_receipts').all();
   assert.equal(columns.length, 1);
-  assert.doesNotMatch(JSON.stringify(columns), /internal-message-id|private-header-value|teamspace\.example|git\.example/u);
+  assert.doesNotMatch(JSON.stringify(columns), /internal-message-id|private-header-value|donefac\.example|git\.example/u);
 
   f.receipts.remember(scope, 'unhashed-message-id', accepted);
   f.receipts.remember(scope, digest('mismatched-kind'), delivery({ event: 'push' }));

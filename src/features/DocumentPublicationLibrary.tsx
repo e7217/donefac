@@ -144,8 +144,8 @@ function PublicationListView({
     const changed = () => {
       void load();
     };
-    window.addEventListener('teamspace:publication-changed', changed);
-    return () => window.removeEventListener('teamspace:publication-changed', changed);
+    window.addEventListener('donefac:publication-changed', changed);
+    return () => window.removeEventListener('donefac:publication-changed', changed);
   }, [load]);
   const applySearch = useEffectEvent((key: string, requestedQuery: string) => {
     if (key === readKey && !search.composing && requestedQuery === searchQuery && requestedQuery !== query) {

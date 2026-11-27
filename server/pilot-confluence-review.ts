@@ -108,7 +108,7 @@ export async function readPilotConfluenceReview(env: Record<string, string | und
     confluenceReviews?: readonly PilotConfluenceReview[];
   confluenceReviewCoverage?: readonly MigrationConfluenceReviewCoverage[];
   }> {
-  const { TEAMSPACE_PILOT_CONFLUENCE_RESTRICTIONS: restrictions, TEAMSPACE_PILOT_CONFLUENCE_REVIEW: review } = env;
+  const { DONEFAC_PILOT_CONFLUENCE_RESTRICTIONS: restrictions, DONEFAC_PILOT_CONFLUENCE_REVIEW: review } = env;
   if (restrictions === undefined && review === undefined) return {};
   if (teamAccess) throw new Error('Confluence 검토는 오프라인 리허설에서 실행해 주세요.');
   const message = review === undefined ? restrictionsError : readError;

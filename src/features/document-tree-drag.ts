@@ -8,7 +8,7 @@ type DropPlacement = { kind: 'order'; placement: DocumentOrderPlacement } | { ki
 type DragSource = { page: DocPage; version?: string; scope: string };
 type DropTarget = DropPlacement & { key: string; appearance: 'before' | 'after' | 'inside' | 'root'; label: string };
 
-const DOCUMENT_DRAG = 'application/x-teamspace-document-tree';
+const DOCUMENT_DRAG = 'application/x-donefac-document-tree';
 const sameLocation = (first: Location, second: Location) =>
   first.projectId === second.projectId && first.parentId === second.parentId;
 

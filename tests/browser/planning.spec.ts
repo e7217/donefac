@@ -317,7 +317,7 @@ test('계획 편집은 검색과 탐색 취소 및 버전 충돌에서 유지되
     page.once('dialog', dialog => dialog.accept()); await editor.getByRole('button', { name: '최신 정보', exact: true }).click(); await expect(editor.getByLabel('계획 설명', { exact: true })).toHaveValue('서버 변경');
     let reached: () => void = () => undefined; const gate = new Promise<void>(resolve => { release = resolve; }); const intercepted = new Promise<void>(resolve => { reached = resolve; });
     await page.route(`**/api/planning-items/${item.id}`, async route => { if (route.request().method() !== 'PATCH') return route.continue(); const response = await route.fetch(); reached(); await gate; await route.fulfill({ response }); });
-    await name.fill('지연 응답 저장'); await editor.getByRole('button', { name: '계획 저장', exact: true }).click(); await intercepted; await expect(name).toBeDisabled(); expect(await page.evaluate(() => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })))).toBe(false); release(); await expect(name).toBeEnabled(); await expect(name).toHaveValue('지연 응답 저장');
+    await name.fill('지연 응답 저장'); await editor.getByRole('button', { name: '계획 저장', exact: true }).click(); await intercepted; await expect(name).toBeDisabled(); expect(await page.evaluate(() => window.dispatchEvent(new Event('donefac:navigate', { cancelable: true })))).toBe(false); release(); await expect(name).toBeEnabled(); await expect(name).toHaveValue('지연 응답 저장');
     await name.fill('작업자 변경 전 임시 입력');
     const actor = page.getByLabel('작업자 선택', { exact: true });
     const previousActor = await actor.inputValue(), nextActor = initial.users.find(user => user.id !== previousActor)!;

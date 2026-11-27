@@ -17,11 +17,11 @@ const day = (offset: number) => new Date(Date.now() + offset * 86_400_000).toISO
 const test = base.extend<{ pilot: PilotFixture }>({
   pilot: [async ({ playwright, baseURL }, provide) => {
     // This spec is intentionally unusable against an unspecified/live host.
-    expect(process.env.TEAMSPACE_PILOT_TEST_URL, 'Run through the isolated pilot harness').toBeTruthy();
+    expect(process.env.DONEFAC_PILOT_TEST_URL, 'Run through the isolated pilot harness').toBeTruthy();
     expect(baseURL).toBeTruthy();
     const address = new URL(baseURL!);
     expect(['127.0.0.1', 'localhost', '[::1]']).toContain(address.hostname);
-    expect(address.origin).toBe(new URL(process.env.TEAMSPACE_PILOT_TEST_URL!).origin);
+    expect(address.origin).toBe(new URL(process.env.DONEFAC_PILOT_TEST_URL!).origin);
     expect(address.username + address.password).toBe('');
     const requests = await playwright.request.newContext({ baseURL });
     let project: Project | undefined;
@@ -192,7 +192,7 @@ test('built same-origin pilot serves issue/Gantt, persists document edits and do
 test('built pilot upgrades real WebSockets and persists edits from two browser actors through reload', async ({ browser, baseURL, pilot: f }) => {
   const contexts = await Promise.all(f.actors.map(() => browser.newContext({ baseURL, viewport: { width: 1440, height: 1000 } })));
   try {
-    for (const [index, context] of contexts.entries()) await context.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), f.actors[index]);
+    for (const [index, context] of contexts.entries()) await context.addInitScript(actor => localStorage.setItem('donefac.actor', actor), f.actors[index]);
     const [a, b] = await Promise.all(contexts.map(context => context.newPage()));
     const evidence = [runtimeEvidence(a, baseURL!), runtimeEvidence(b, baseURL!)];
     await Promise.all([a, b].map(page => page.goto(`/#/${f.project.id}/documents/${f.document.id}`)));

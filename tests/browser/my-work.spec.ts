@@ -31,7 +31,7 @@ test('내 업무 검색은 전체 페이지를 검색하고 참여 조건과 검
     const excluded = await create('장비 역할 외 검토', projectB.id, '2026-07-17', { assigneeId: actor.id, collaboratorIds: [] });
     const closed = await create('장비 완료 업무', projectB.id, '2026-07-17', { status: 'done' });
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.clock.setFixedTime(new Date('2026-07-16T16:00:00Z'));
     const queueHash = `#/${projectA.id}/mywork`;
     await page.goto(`/${queueHash}`);
@@ -136,7 +136,7 @@ test('내 업무에서 현재 페이지의 두 프로젝트 업무를 일괄 검
     const today = await create(second.id, '오늘 마감', '2026-07-17');
     const excluded = await create(second.id, '참여 범위 밖', '2026-07-17', []);
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.clock.setFixedTime(new Date('2026-07-16T16:00:00Z'));
     const queueHash = `#/${first.id}/mywork`;
     await page.goto(`/${queueHash}`);
@@ -262,7 +262,7 @@ test('구독한 업무는 현재 작업자별로 모아 보고 상세에서 해�
     const watched = await create('구독만 하는 업무', projectB.id, actor.id, peer.id);
     const assigned = await create('담당하면서 구독한 업무', projectA.id, actor.id, actor.id);
     const other = await create('동료가 구독한 업무', projectB.id, peer.id);
-    await page.addInitScript(id => window.localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => window.localStorage.setItem('donefac.actor', id), actor.id);
     let rejectReads = true;
     await page.route('**/api/notifications/subscriptions/issues', route => rejectReads
       ? route.fulfill({ status: 503, json: { error: '합성 구독 조회 오류' } }) : route.continue());
@@ -455,7 +455,7 @@ test('360px 내 업무에서 상세를 열지 않고 상태와 인수인계를 �
   const changePath = `${issuePath}/status-change`;
 
   try {
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     const address = `#/${contextProject.id}/mywork`;
     await page.goto(`/${address}`);
     const pageHeading = page.getByRole('heading', { name: '내 업무', exact: true });

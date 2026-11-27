@@ -1,5 +1,5 @@
 {
-  "name": "teamspace",
+  "name": "donefac",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "private": true,
@@ -11,7 +11,7 @@
     "dev": "node scripts/dev.mjs",
     "build": "node scripts/run-framework.mjs build",
     "build:pilot": "node node_modules/vite/bin/vite.js build --config pilot/vite.config.ts",
-    "start:pilot": "bash scripts/pilot-lock.sh \"${TEAMSPACE_DATA_DIR:?Set an absolute TEAMSPACE_DATA_DIR}\" node --import tsx server/pilot.ts",
+    "start:pilot": "bash scripts/pilot-lock.sh \"${DONEFAC_DATA_DIR:-${TEAMSPACE_DATA_DIR:?Set an absolute DONEFAC_DATA_DIR}}\" node --import tsx server/pilot.ts",
     "pilot:backup": "node scripts/pilot-backup.mjs backup",
     "pilot:restore": "node scripts/pilot-backup.mjs restore",
     "pilot:rehearsal": "node --import tsx scripts/pilot-migration.mjs",

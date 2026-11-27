@@ -59,7 +59,7 @@ function escapeHtml(value: string) {
 function statusBadgeHtml(node: RichContent) {
   const label = escapeHtml(String(node.attrs?.label ?? '')).replace(/\|/g, '&#124;');
   const tone = isStatusBadgeTone(node.attrs?.tone) ? node.attrs.tone : 'neutral';
-  return `<span data-teamspace-node="statusBadge" data-status-tone="${tone}" data-status-label="${label}" class="document-status-badge">${label}</span>`;
+  return `<span data-donefac-node="statusBadge" data-status-tone="${tone}" data-status-label="${label}" class="document-status-badge">${label}</span>`;
 }
 
 function summaryHtml(node: RichContent): string {
@@ -93,7 +93,7 @@ function markdownHeadings(content: RichContent): Map<RichContent, MarkdownHeadin
     const sectionId = heading.attrs?.sectionId;
     let anchor = isDocumentSectionId(sectionId) ? sectionId : '';
     if (!anchor) {
-      do { anchor = `teamspace-toc-${++next}`; } while (reserved.has(anchor));
+      do { anchor = `donefac-toc-${++next}`; } while (reserved.has(anchor));
     }
     result.set(heading, { anchor, level: Number(heading.attrs?.level) || 1, title });
   }

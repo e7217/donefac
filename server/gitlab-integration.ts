@@ -2831,7 +2831,7 @@ export class GitlabIntegrationService{
         const result = await this.projectWebhooks[operation](req.body, actorId, controller.signal);
         if (result.state === 'created') {
           try { hooks.activity(req, 'integration', 'gitlab', 'GitLab 웹훅 등록', `저장소 ${result.repositoryId}`); }
-          catch { console.error('[teamspace GitLab] 웹훅 등록 활동을 기록하지 못했습니다.'); }
+          catch { console.error('[donefac GitLab] 웹훅 등록 활동을 기록하지 못했습니다.'); }
         }
         if (!controller.signal.aborted) res.json(result);
       } catch (error) { if (!controller.signal.aborted) throw error; }

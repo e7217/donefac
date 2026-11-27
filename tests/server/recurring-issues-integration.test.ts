@@ -34,7 +34,7 @@ type Backup = WorkspaceSnapshot & { schemaVersion: number; recurringIssueRules?:
 type RequestOptions = { status?: number | readonly number[]; method?: string; body?: unknown; actor?: string; token?: string };
 
 async function fixture(t: TestContext, worker = false) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-recurring-issues-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-recurring-issues-'));
   let clock = defaultClock;
   async function start() {
     const app = createApp({ dataDir: directory, outboundWorker: false, deadlineReminderWorker: false,
@@ -86,7 +86,7 @@ async function fixture(t: TestContext, worker = false) {
     })).token;
   }
   function withDatabase<T>(callback: (database: DatabaseSync) => T): T {
-    const database = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+    const database = new DatabaseSync(join(directory, 'donefac.sqlite'));
     try { return callback(database); } finally { database.close(); }
   }
   return {

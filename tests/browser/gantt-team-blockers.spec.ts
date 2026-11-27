@@ -85,7 +85,7 @@ test('360px 전체 간트에서 두 프로젝트의 보이는 행을 골라 차�
     const crossProjectQuery = `${f.prefix} 교차 연결`;
     const hash = gantt(f.first);
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(`/${ganttSearch(hash, crossProjectQuery)}`);
     await expect(row(page, source)).toBeVisible();
     await expect(row(page, target)).toBeVisible();
@@ -148,7 +148,7 @@ test('360px 전체 간트에서 두 프로젝트의 보이는 행을 골라 차�
     expect(savedResponse.request().postDataJSON()).toEqual({ sourceIssueId: source.id, targetIssueId: target.id,
       expectedSourceVersion: source.version + 1, expectedTargetVersion: target.version });
     const relation = await json<IssueRelation>(savedResponse, 201);
-    expect(relation).toMatchObject({ origin: 'teamspace', type: 'blocks', sourceIssueId: source.id, targetIssueId: target.id });
+    expect(relation).toMatchObject({ origin: 'donefac', type: 'blocks', sourceIssueId: source.id, targetIssueId: target.id });
     await expect(form).toHaveCount(0);
     const relationRow = panel.locator(`[data-team-blocker-id="${relation.id}"]`);
     await expect(issueButton(relationRow, source)).toBeVisible();
@@ -202,7 +202,7 @@ test('360px에서 체크한 두 업무를 연결하고 가려진 후행 일정�
     const query = `${f.prefix} 선택 연결`;
     const hash = ganttSearch(gantt(f.first), query);
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(`/${hash}`);
     const selection = (issue: Issue) => row(page, issue).getByRole('checkbox', { name: `${issue.key} 선택`, exact: true });
     const shortcut = button(page, '선택 업무 간 차단 연결');
@@ -313,7 +313,7 @@ test('전체 프로젝트 간트에서 차단 관계 저장 응답이 유실되�
     const closed = await f.issue(f.first, '완료된 다른 프로젝트 승인', { status: 'done' });
     const before = await f.schedule();
     const hash = gantt(f.second);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(`/${hash}`);
     await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(f.prefix);
     await row(page, target).getByRole('checkbox', { name: `${target.key} 선택`, exact: true }).check();
@@ -343,7 +343,7 @@ test('전체 프로젝트 간트에서 차단 관계 저장 응답이 유실되�
     await expect(issueButton(panel, target)).toBeVisible();
     expect(writes).toEqual([{ sourceIssueId: source.id, targetIssueId: target.id,
       expectedSourceVersion: source.version, expectedTargetVersion: target.version }]);
-    expect(committed).toMatchObject({ origin: 'teamspace', type: 'blocks', sourceIssueId: source.id, targetIssueId: target.id });
+    expect(committed).toMatchObject({ origin: 'donefac', type: 'blocks', sourceIssueId: source.id, targetIssueId: target.id });
     await expect(panel).toContainText(f.first.name);
     await expect(panel).toContainText(f.second.name);
     await expect(page).toHaveURL(url => url.hash === ganttSearch(hash, f.prefix));
@@ -371,7 +371,7 @@ test('360px 팀 간트에서 필터 밖 차단 업무를 열고 관계 변경을
     const before = await f.schedule();
     const hash = `${gantt(f.second)}&ganttProject=${f.second.id}`;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(`/${hash}`);
     await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(f.prefix);
     await expect(row(page, source)).toHaveCount(0);
@@ -480,7 +480,7 @@ test('360px 팀 간트에서 다른 프로젝트의 차단 일정과 후행 업�
     const before = await f.schedule();
     const hash = `${gantt(f.first)}&ganttProject=${f.second.id}`;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(`/${hash}`);
     const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
     await search.fill(f.prefix);
@@ -599,7 +599,7 @@ test('360px에서 선행 날짜를 편집하고 동시 수정 확인 후 모든 
     await f.dependency(source, local);
     const hash = `${gantt(f.first)}&ganttProject=${f.second.id}`;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     const automaticRefresh = (url: URL) => url.pathname === '/api/workspace' && url.searchParams.has('ganttSince');
     await page.route(automaticRefresh, route => route.fulfill({ status: 204 }));
     await page.goto(`/${hash}`);
@@ -733,7 +733,7 @@ test('360px 팀 간트에서 날짜 초안을 프로젝트 간 일정 검토에 
     const before = await f.schedule();
     const hash = `${gantt(f.first)}&ganttProject=${f.first.id}`;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(`/${hash}`);
     const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
     await search.fill(f.prefix);
@@ -839,7 +839,7 @@ test('360px 프로젝트 간트의 차트 날짜 미리보기에서 다른 프�
     const before = await f.schedule();
     const hash = `#/${f.first.id}/gantt`;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(`/${hash}`);
     await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(f.prefix);
     await page.getByLabel('간트 표시 시작일', { exact: true }).fill('2026-11-18');

@@ -79,7 +79,7 @@ test('360px 공유 목록에서 업무 상태와 초안을 보호하면서 표�
     const view = await f.view({ layout: 'list', filters: { query: f.prefix, status: 'todo', assigneeId: f.actor.id, type: 'all' } });
     const source = `#/${f.first.id}/issues?savedView=${view.id}`;
     await page.setViewportSize(viewport);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(`/${source}`);
     const rows = page.locator('.issue-table tbody tr[data-issue-id]');
     await expect(rows).toHaveCount(4, { timeout: 25_000 });
@@ -202,7 +202,7 @@ test('360px에서 보드 열과 전체 프로젝트 간트의 표시 순서 및 
       query: f.prefix, status: 'all', assigneeId: f.actor.id, type: 'all',
     } });
     await page.setViewportSize(viewport);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     const projectBoard = `#/${f.first.id}/issues?savedView=${boardView.id}`;
     await page.goto(`/${projectBoard}`);
     const projectCards = page.locator('.issue-board-card[data-issue-id]');

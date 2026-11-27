@@ -11,7 +11,7 @@ interface LegacyFixture { requests: APIRequestContext; apiOrigin: string; docume
 // The retained developer API and every other browser fixture remain untouched.
 const test = base.extend<{ legacy: LegacyFixture }>({
   legacy: [async ({ playwright }, provide) => {
-    const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-legacy-browser-'));
+    const dataDir = mkdtempSync(join(tmpdir(), 'donefac-legacy-browser-'));
     const service = createApp({ dataDir });
     const server = service.app.listen(0, '127.0.0.1');
     service.attachWebSocket(server);
@@ -167,14 +167,14 @@ test('이전 형식 가져오기 뒤 재접속·재열기에서도 오래된 오
     await expect.poll(() => replayed?.id).toBe(copied!.id);
     await expect(copyButton).toBeEnabled();
     await expect(page.locator('.docs-live-prose')).toContainText('old-pending');
-    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith('teamspace:collaboration-pending:')))).toBe(true);
+    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith('donefac:collaboration-pending:')))).toBe(true);
     blockList = false;
     trashBeforeRefresh = true;
     await copyButton.click();
     await expect.poll(() => archivedCopyId).toBeTruthy();
     await expect(copyButton).toBeEnabled();
     await expect(page.locator('.docs-live-prose')).toContainText('old-pending');
-    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith('teamspace:collaboration-pending:')))).toBe(true);
+    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith('donefac:collaboration-pending:')))).toBe(true);
     const restoredCopy = await legacy.requests.post(`/api/trash/${archivedCopyId}/restore`, { data: {} });
     expect(restoredCopy.status(), await restoredCopy.text()).toBe(200);
     await copyButton.click();
@@ -185,6 +185,6 @@ test('이전 형식 가져오기 뒤 재접속·재열기에서도 오래된 오
     const after = await (await legacy.requests.get('/api/workspace')).json() as WorkspaceSnapshot;
     expect(after.documents.find(document => document.id === legacy.document.id)?.plainText).toBe('가져온 수동 문서 본문');
     expect(after.documents.filter(document => document.id !== original.id && document.plainText.includes('old-pending')).map(document => document.id)).toEqual([copied!.id]);
-    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith('teamspace:collaboration-pending:')))).toBe(false);
+    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith('donefac:collaboration-pending:')))).toBe(false);
   } finally { await context.close(); }
 });

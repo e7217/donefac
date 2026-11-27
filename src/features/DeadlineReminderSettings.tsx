@@ -76,11 +76,11 @@ export function DeadlineReminderSettings({ actorId, actorName, notify }: {
       void load();
     };
     void load();
-    window.addEventListener('teamspace:workspace-imported', imported);
+    window.addEventListener('donefac:workspace-imported', imported);
     return () => {
       request.current?.abort();
       request.current = null;
-      window.removeEventListener('teamspace:workspace-imported', imported);
+      window.removeEventListener('donefac:workspace-imported', imported);
     };
   }, [load]);
 
@@ -114,10 +114,10 @@ export function DeadlineReminderSettings({ actorId, actorName, notify }: {
         event.returnValue = '';
       }
     };
-    window.addEventListener('teamspace:navigate', guard);
+    window.addEventListener('donefac:navigate', guard);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', guard);
+      window.removeEventListener('donefac:navigate', guard);
       window.removeEventListener('beforeunload', unload);
     };
   }, [notify, saved]);
@@ -156,7 +156,7 @@ export function DeadlineReminderSettings({ actorId, actorName, notify }: {
       setForm({ saved, draft: draftFor(saved) });
       dirty.current = false;
       notify('마감 알림 설정을 저장했습니다.');
-      window.dispatchEvent(new Event('teamspace:notifications-updated'));
+      window.dispatchEvent(new Event('donefac:notifications-updated'));
     } catch (cause) {
       if (controller.signal.aborted) return;
       if (cause instanceof ApiError && cause.status === 409) setConflict(true);

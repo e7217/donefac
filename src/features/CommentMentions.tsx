@@ -17,7 +17,7 @@ type Range = Pick<CommentMention, 'from' | 'to'>;
 type InputEdit = Range & { body: string; inputType: string };
 type MentionQuery = Range & { text: string };
 
-const cachePrefix = 'teamspace:comment-draft:1\n';
+const cachePrefix = 'donefac:comment-draft:1\n';
 const queryLimit = 120;
 
 export function emptyCommentDraft(): CommentDraft {

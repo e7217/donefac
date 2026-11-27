@@ -13,8 +13,8 @@ export const DOCUMENT_FIND_REPLACEMENT_LIMIT = 500;
 export type DocumentFindMatch = { from: number; to: number };
 
 const lineBreak = /[\r\n\u0085\u2028\u2029]/u;
-const findKey = new PluginKey<DecorationSet>('teamspace-document-find');
-const replaceMeta = 'teamspace-document-find-replace';
+const findKey = new PluginKey<DecorationSet>('donefac-document-find');
+const replaceMeta = 'donefac-document-find-replace';
 const encoder = new TextEncoder();
 // Leave room for Yjs struct, mark and delete metadata under the 1 MiB wire limit.
 const replacementBatchBytes = 512 * 1024;
@@ -68,7 +68,7 @@ export function findDocumentText(doc: EditorNode, query: string, caseSensitive: 
 }
 
 export const documentFindExtension = Extension.create({
-  name: 'teamspaceDocumentFind',
+  name: 'donefacDocumentFind',
   addProseMirrorPlugins() {
     return [new Plugin<DecorationSet>({
       key: findKey,

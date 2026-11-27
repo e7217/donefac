@@ -6,7 +6,7 @@ import { zip } from '../fixtures/legacy-export-zip.mjs';
 
 test.use({ viewport: { width: 360, height: 820 }, timezoneId: 'UTC' });
 
-test('Jira XML 상태 변경과 Teamspace 편집을 업무 이력에서 확인한다', async ({ page, request }) => {
+test('Jira XML 상태 변경과 Donefac 편집을 업무 이력에서 확인한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   const suffix = randomUUID().slice(0, 7).toUpperCase();
   const key = `JH${suffix}`;
@@ -97,7 +97,7 @@ test('Jira XML 상태 변경과 Teamspace 편집을 업무 이력에서 확인�
     expect(historyRequests).toHaveLength(0);
 
     await dialog.getByRole('button', { name: '변경 이력', exact: true }).click();
-    const local = dialog.getByRole('region', { name: 'Teamspace 변경 이력', exact: true });
+    const local = dialog.getByRole('region', { name: 'Donefac 변경 이력', exact: true });
     await expect(local).toContainText(`${issue.key}:`);
     await expect(local).toContainText('status');
     const history = dialog.getByRole('region', { name: 'Jira 상태 변경 이력', exact: true });

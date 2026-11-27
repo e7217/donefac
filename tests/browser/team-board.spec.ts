@@ -130,7 +130,7 @@ test('360px 전체 프로젝트 보드에서 실제 상태를 선택하고 티�
     const ranks = await f.ranks();
     const writes = trackIssueWrites(page);
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(`/#/${f.first.id}/overview`);
     await button(page, '메뉴 열기').click();
     await button(page.getByRole('navigation', { name: '워크스페이스', exact: true }), '팀 개요').click();
@@ -247,7 +247,7 @@ test('팀 보드에서 다른 프로젝트 카드가 있는 열에 끌어도 업
     const ranks = await f.ranks();
     const writes = trackIssueWrites(page);
     await page.setViewportSize({ width: 1800, height: 1000 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(`/${teamPath(f.first)}?${new URLSearchParams({ boardQuery: f.prefix })}`);
     await expect(inside(page, 'in_progress', east)).toBeVisible();
     await expect(inside(page, 'review', west)).toBeVisible();
@@ -292,7 +292,7 @@ test('팀 보드에서 워크플로 변경을 확인한 뒤 응답이 유실된 
     const ranks = await f.ranks();
     const writes = trackIssueWrites(page);
     await page.setViewportSize({ width: 1800, height: 1000 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(`/${teamPath(f.first)}?${new URLSearchParams({ boardQuery: f.prefix })}`);
     const dropForReview = async () => {
       await card(page, east).dragTo(card(page, west), { targetPosition: { x: 34, y: 10 } });

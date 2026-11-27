@@ -93,14 +93,14 @@ test('360px에서 숨긴 발췌를 포함하고 원본 변경과 발행 당시�
     const hostChild = await create('포함 문서의 하위 문서', '포함 하위의 본문', host.id);
     const withoutExcerpt = await create('발췌가 없는 참고 문서', '일반 본문만 있는 문서');
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
     await openDocument(page, source);
     await expect(editor).toBeVisible();
 
     await editor.getByText(outside, { exact: true }).click();
     await page.keyboard.press('End');
     await page.getByRole('button', { name: '발췌 구역 삽입', exact: true }).click();
-    const definition = editor.locator('[data-teamspace-node="documentExcerpt"]');
+    const definition = editor.locator('[data-donefac-node="documentExcerpt"]');
     await definition.locator('[data-node-view-content] p').first().click();
     await page.getByRole('button', { name: '굵게', exact: true }).click();
     await page.keyboard.insertText(excerpt);
@@ -206,8 +206,8 @@ test('공동 편집에서 선택한 발췌의 본문과 원본 숨김 설정이 
       headers, data: { expectedVersion: source.version },
     }), 200);
     expect(session.schemaVersion).toBe(COLLABORATION_SCHEMA);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
-    await peerContext.addInitScript(id => localStorage.setItem('teamspace.actor', id), reviewer.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
+    await peerContext.addInitScript(id => localStorage.setItem('donefac.actor', id), reviewer.id);
     const peer = await peerContext.newPage();
     await openDocument(page, source);
     await openDocument(peer, source);
@@ -219,7 +219,7 @@ test('공동 편집에서 선택한 발췌의 본문과 원본 숨김 설정이 
     await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe(text);
     await page.getByRole('button', { name: '발췌 구역 삽입', exact: true }).click();
 
-    const definition = (client: Page) => client.locator('.docs-live-prose [data-teamspace-node="documentExcerpt"]');
+    const definition = (client: Page) => client.locator('.docs-live-prose [data-donefac-node="documentExcerpt"]');
     const checkbox = (client: Page) => definition(client).getByRole('checkbox', { name: '원본에서 숨기기', exact: true });
     const textBody = (client: Page) => definition(client).locator('[data-node-view-content] p');
     await expect(textBody(peer)).toHaveText(text);

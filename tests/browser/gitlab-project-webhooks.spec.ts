@@ -20,7 +20,7 @@ test('360px에서 저장한 저장소의 웹훅을 점검하고 한 번 등록�
   const { projects: [project] } = await readJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
   const initial = await readJson<GitlabSettings>(await request.get(settingsPath));
   const baseUrl = `http://127.0.0.1:1/forge/tools/${randomUUID()}`;
-  const receiverUrl = `https://teamspace-project-webhook.test${receiverPath}`;
+  const receiverUrl = `https://donefac-project-webhook.test${receiverPath}`;
   const readToken = `synthetic-project-hook-read-${randomUUID()}`;
   const managementToken = `synthetic-project-hook-manager-${randomUUID()}`;
   const webhookSecret = `synthetic-project-hook-secret-${randomUUID()}`;
@@ -164,7 +164,7 @@ test('360px에서 저장한 저장소의 웹훅을 점검하고 한 번 등록�
     const manual = setup.getByRole('region', { name: 'GitLab 웹훅 수동 등록', exact: true });
     await expect(manual).toContainText('저장소 99에서 Settings → Webhooks');
     await expect(manual).toContainText('주소가 없을 때만 Add new webhook');
-    await expect(manual).toContainText('Secret token에 Teamspace에 저장한 값을 입력하세요.');
+    await expect(manual).toContainText('Secret token에 Donefac에 저장한 값을 입력하세요.');
     await expect(manual).toContainText('Deployment events와 SSL 검증');
     await expect(manual).not.toContainText(webhookSecret);
     await expect(register).toHaveCount(0);
@@ -217,7 +217,7 @@ test('360px에서 저장한 저장소의 웹훅을 점검하고 한 번 등록�
 test('등록 응답을 받지 못한 서명 웹훅의 수동 등록 안내는 저장된 인증 방식을 사용한다', async ({ page, request }) => {
   const { projects: [project] } = await readJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
   const initial = await readJson<GitlabSettings>(await request.get(settingsPath));
-  const receiverUrl = `https://teamspace-project-webhook.test${receiverPath}`;
+  const receiverUrl = `https://donefac-project-webhook.test${receiverPath}`;
   const repositoryId = 42;
   const settings: GitlabSettings = { ...initial, baseUrl: 'https://gitlab-signing.test', projectIds: [repositoryId],
     signingTokenConfigured: true, webhookSecretConfigured: true, webhookReceiverUrl: receiverUrl };
@@ -236,7 +236,7 @@ test('등록 응답을 받지 못한 서명 웹훅의 수동 등록 안내는 �
   const register = setup.getByRole('button', { name: 'GitLab에 웹훅 등록', exact: true });
   await register.click();
   const manual = setup.getByRole('region', { name: 'GitLab 웹훅 수동 등록', exact: true });
-  await expect(manual).toContainText('Signing token에 Teamspace에 저장한 값을 입력하세요.');
+  await expect(manual).toContainText('Signing token에 Donefac에 저장한 값을 입력하세요.');
   await expect(manual).toContainText('Generate signing token');
   await expect(manual).not.toContainText('Secret token');
   await expect(manual).not.toContainText(signingToken);

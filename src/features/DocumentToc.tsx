@@ -43,7 +43,7 @@ export function ReadonlyDocumentToc({ entries, attrs, routeHeading }: {
     const root = marker.current?.closest<HTMLElement>('[data-document-outline-root]');
     if (root) jumpToReadonlyHeading(root, target);
   }
-  return <aside ref={marker} className="document-toc" data-teamspace-node="documentToc">
+  return <aside ref={marker} className="document-toc" data-donefac-node="documentToc">
     <DocumentToc entries={entries} options={documentTocOptions(attrs)} navigate={navigate} />
   </aside>;
 }
@@ -57,7 +57,7 @@ export function DocumentTocNodeView({ node, editor, selected, updateAttributes, 
     const heading = editor.view.nodeDOM(position);
     if (heading instanceof HTMLElement) revealDocumentTarget(heading, editor.view.dom);
   }
-  return <NodeViewWrapper as="aside" className={`document-toc${selected ? ' is-selected' : ''}`} data-teamspace-node="documentToc" contentEditable={false}>
+  return <NodeViewWrapper as="aside" className={`document-toc${selected ? ' is-selected' : ''}`} data-donefac-node="documentToc" contentEditable={false}>
     <DocumentToc entries={entries} options={options} navigate={navigate} editable controls={editor.isEditable && <details className="document-toc-settings">
       <summary>목차 설정</summary>
       <div className="document-toc-fields">

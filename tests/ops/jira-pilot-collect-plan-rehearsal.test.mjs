@@ -159,7 +159,7 @@ async function readWikiBinding(pilot, receiptId, issueId, wikiBaseUrl) {
 
 test('Jira batches and their offline Confluence link survive receipt verification and physical restore', { timeout: 120_000 }, async t => {
   const source = await jira(t);
-  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-jira-batch-rehearsal-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'donefac-jira-batch-rehearsal-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const config = join(scratch, 'jira.json'), plan = join(scratch, 'plan.json');
   const files = ['part-one.zip', 'part-two.zip'];
@@ -212,7 +212,7 @@ test('Jira batches and their offline Confluence link survive receipt verificatio
 
   await run(t, rehearsal, ['stage', manifest, root, '--jira-plan', plan]);
   const workspace = join(root, 'workspace');
-  const { packages, jiraPlans } = JSON.parse(await readFile(join(workspace, '.teamspace-rehearsal', 'stage.json')));
+  const { packages, jiraPlans } = JSON.parse(await readFile(join(workspace, '.donefac-rehearsal', 'stage.json')));
   assert.deepEqual(packages.map(pkg => pkg.sha256), [...batchHashes.slice().reverse(), createHash('sha256').update(wikiBytes).digest('hex')]);
   const wikiPackage = packages.find(pkg => pkg.product === 'confluence');
   assert.ok(wikiPackage);
@@ -223,7 +223,7 @@ test('Jira batches and their offline Confluence link survive receipt verificatio
     packageIds: batchHashes.map(hash => packages.find(pkg => pkg.sha256 === hash).packageId),
   }];
   assert.deepEqual(jiraPlans, expectedPlans);
-  const privatePlan = directory => join(directory, '.teamspace-rehearsal', 'jira-plans', `${planned.sha256}.json`);
+  const privatePlan = directory => join(directory, '.donefac-rehearsal', 'jira-plans', `${planned.sha256}.json`);
   assert.deepEqual(await readFile(privatePlan(workspace)), planBytes);
   assert.equal((await lstat(privatePlan(workspace))).mode & 0o777, 0o600);
   // Verification and backup must use the staged private copy once the operator moves the input plan.
@@ -291,7 +291,7 @@ test('Jira batches and their offline Confluence link survive receipt verificatio
     assert.deepEqual(audited.resourceLinkProjection, originalWikiBinding.projection);
   }
   const restoredPath = join(attempt, 'restored');
-  const restoredStatePath = join(restoredPath, '.teamspace-rehearsal', 'stage.json');
+  const restoredStatePath = join(restoredPath, '.donefac-rehearsal', 'stage.json');
   const restoredState = JSON.parse(await readFile(restoredStatePath));
   assert.deepEqual(restoredState.jiraPlans, expectedPlans);
   assert.deepEqual(await readFile(privatePlan(restoredPath)), planBytes);
@@ -309,7 +309,7 @@ test('Jira batches and their offline Confluence link survive receipt verificatio
   assert.match(badProof.stderr, /Jira.*보관한 ZIP 연결/u);
   assert.doesNotMatch(badProof.stdout, /이관 검토 주소/u);
 
-  const db = new DatabaseSync(join(workspace, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(workspace, 'donefac.sqlite'));
   try {
     const removed = db.prepare(`DELETE FROM issue_relations WHERE id IN (
       SELECT json_extract(json,'$.jiraRelationId') FROM source_records WHERE import_id=? AND kind='relation')`).run(receipt.id);

@@ -63,7 +63,7 @@ async function open(dataDir: string) {
 }
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-trash-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-trash-'));
   let running: Awaited<ReturnType<typeof open>> | undefined;
   t.after(async () => {
     try { await running?.close(); }
@@ -329,7 +329,7 @@ test('individual attachment and comment archives survive restart and backup; par
   const comment = await f.call<Comment>('/comments', 'POST', { resourceType: 'document', resourceId: doc.id, body: '분리하여 보관할 댓글' }, 201, reviewer);
 
   await f.call(`/attachments/${original.id}?expectedVersionId=${original.id}`, 'DELETE', undefined, 409);
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     db.exec("CREATE TRIGGER fail_item_trash_audit BEFORE INSERT ON activities BEGIN SELECT RAISE(ABORT,'synthetic item rollback'); END");
     await f.call(`/attachments/${original.id}`, 'DELETE', undefined, 500);
@@ -715,7 +715,7 @@ test('issue trash hides canonical data and restores attachments, worklogs, and d
 
   await f.call(issuePath(target.id), 'DELETE', { expectedVersion: target.version + 1 }, 409);
   assert.equal((await trash(f)).total, 0);
-  const observer = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const observer = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     observer.exec("CREATE TRIGGER fail_trash_audit BEFORE INSERT ON activities BEGIN SELECT RAISE(ABORT,'synthetic trash rollback'); END;");
     await f.call(issuePath(target.id), 'DELETE', { expectedVersion: target.version }, 500);

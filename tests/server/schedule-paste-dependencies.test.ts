@@ -16,7 +16,7 @@ import type {
 type LinkShape = Pick<Dependency, 'type' | 'lagDays'>;
 
 async function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-paste-dependencies-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-paste-dependencies-'));
   const service = createApp({ dataDir: dir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {
@@ -45,13 +45,13 @@ async function fixture(t: TestContext) {
   return {
     call, createProject, project,
     setLegacyKey(issue: Issue, key: string) {
-      const db = new DatabaseSync(join(dir, 'teamspace.sqlite'));
+      const db = new DatabaseSync(join(dir, 'donefac.sqlite'));
       try {
         db.prepare("UPDATE issues SET json = json_set(json, '$.key', ?) WHERE id=?").run(key, issue.id);
       } finally { db.close(); }
     },
     usePreviousTeamBindings(previewId: string) {
-      const db = new DatabaseSync(join(dir, 'teamspace.sqlite'));
+      const db = new DatabaseSync(join(dir, 'donefac.sqlite'));
       try {
         const stored = db.prepare('SELECT json FROM schedule_paste_previews WHERE id=?').get(previewId) as { json: string };
         const { resolvedKeyBindings, ...proposal } = JSON.parse(stored.json) as Record<string, unknown> & {

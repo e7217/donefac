@@ -48,7 +48,7 @@ function waitPost(page: Page, path: string) {
 
 async function openRow(page: Page, issue: Issue, actorId: string) {
   await page.setViewportSize({ width: 360, height: 820 });
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actorId);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actorId);
   await page.goto(`/#/${issue.projectId}/gantt`);
   const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
   await expect(search).toBeVisible({ timeout: 35_000 });
@@ -70,7 +70,7 @@ test('360px 간트에서 날짜 초안과 기존 연결 방향을 함께 저장�
       predecessorId: anchor.id, successorId: other.id, type: 'FS', lagDays: 0,
     } }), 201);
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(`/#/${f.project.id}/gantt`);
     const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
     await expect(search).toBeVisible({ timeout: 35_000 });

@@ -65,7 +65,7 @@ test('360px 팀 보드에서 보이는 업무를 프로젝트별 상태로 검�
     const right = await createIssue(second, '대상 둘째');
     const hidden = await createIssue(first, '별도 카드');
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${first.id}/teamboard`);
     const board = page.getByRole('region', { name: '전체 프로젝트 보드', exact: true });
     const search = page.getByRole('searchbox', { name: '보드 업무 검색', exact: true });

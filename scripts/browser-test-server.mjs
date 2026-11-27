@@ -6,8 +6,8 @@ import { basename, dirname, extname, join, relative, resolve, sep } from 'node:p
 import { fileURLToPath } from 'node:url';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const webPort = parsePort('TEAMSPACE_TEST_WEB_PORT', 5179);
-const apiPort = parsePort('TEAMSPACE_TEST_API_PORT', 5189);
+const webPort = parsePort('DONEFAC_TEST_WEB_PORT', 5179);
+const apiPort = parsePort('DONEFAC_TEST_API_PORT', 5189);
 if (webPort === apiPort) throw new Error('브라우저 검사 웹/API 포트는 서로 달라야 합니다.');
 const children = [];
 const abort = new AbortController();
@@ -107,11 +107,11 @@ process.on('unhandledRejection', error => { void shutdown(1, error instanceof Er
 try {
   await available(apiPort); await available(webPort);
   if (!stopping) {
-    taskDataDir = mkdtempSync(join(tmpdir(), 'teamspace-browser-'));
+    taskDataDir = mkdtempSync(join(tmpdir(), 'donefac-browser-'));
     checkoutRoot = join(taskDataDir, 'checkout');
     mirrorSource(checkoutRoot);
     const runtimeDir = join(checkoutRoot, '.sites-runtime');
-    const env = { ...process.env, PORT: String(apiPort), API_PORT: String(apiPort), WEB_PORT: String(webPort), TEAMSPACE_DATA_DIR: join(taskDataDir, 'workspace'), BROWSER: 'none', CI: '1', SITES_RUNTIME_ROOT: runtimeDir, WRANGLER_REGISTRY_PATH: join(runtimeDir, 'wrangler/dev-registry'), MINIFLARE_REGISTRY_PATH: join(runtimeDir, 'wrangler/registry'), WRANGLER_LOG_PATH: join(runtimeDir, 'wrangler/logs'), WRANGLER_SEND_METRICS: 'false', WRANGLER_WRITE_LOGS: 'false' };
+    const env = { ...process.env, PORT: String(apiPort), API_PORT: String(apiPort), WEB_PORT: String(webPort), DONEFAC_DATA_DIR: join(taskDataDir, 'workspace'), BROWSER: 'none', CI: '1', SITES_RUNTIME_ROOT: runtimeDir, WRANGLER_REGISTRY_PATH: join(runtimeDir, 'wrangler/dev-registry'), MINIFLARE_REGISTRY_PATH: join(runtimeDir, 'wrangler/registry'), WRANGLER_LOG_PATH: join(runtimeDir, 'wrangler/logs'), WRANGLER_SEND_METRICS: 'false', WRANGLER_WRITE_LOGS: 'false' };
     console.log(`[browser-server] isolated workspace ${taskDataDir}; web=${webPort}, api=${apiPort}`);
     launch('api', ['--import', 'tsx', 'server/index.ts'], env);
     await healthy(`http://127.0.0.1:${apiPort}/api/health`, 20_000);

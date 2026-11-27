@@ -12,7 +12,7 @@ import type {
 } from '../../shared/types.js';
 
 async function open(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-completion-records-backup-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-completion-records-backup-'));
   const service = createApp({ dataDir: directory });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {

@@ -114,8 +114,8 @@ test('360px에서 저장된 목록의 검색·조건·순서와 현재 선택대
     const prior = await workspace(request);
     const all = page.getByRole('button', { name: '현재 목록 CSV', exact: true });
     const selected = page.getByRole('button', { name: '선택 업무 CSV', exact: true });
-    const allFilename = `teamspace-issues-${project.key}.csv`;
-    const selectedFilename = `teamspace-issues-${project.key}-selected.csv`;
+    const allFilename = `donefac-issues-${project.key}.csv`;
+    const selectedFilename = `donefac-issues-${project.key}-selected.csv`;
     await expect(selected).toHaveCount(0);
     const exported = await downloadCsv(page, all, allFilename);
     expect(exported.rows.map(row => row[0])).toEqual([second.key, first.key, checkedThenHidden.key]);

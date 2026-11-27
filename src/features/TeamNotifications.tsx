@@ -126,16 +126,16 @@ function NotificationInbox({ actorId, users, onOpen }: TeamNotificationsProps) {
     refresh();
     const timer = window.setInterval(refresh, 30_000);
     window.addEventListener('focus', refresh);
-    window.addEventListener('teamspace:notifications-updated', refresh);
-    window.addEventListener('teamspace:workspace-imported', imported);
+    window.addEventListener('donefac:notifications-updated', refresh);
+    window.addEventListener('donefac:workspace-imported', imported);
     document.addEventListener('visibilitychange', refresh);
     return () => {
       readRequest.current?.abort();
       readRequest.current = null;
       window.clearInterval(timer);
       window.removeEventListener('focus', refresh);
-      window.removeEventListener('teamspace:notifications-updated', refresh);
-      window.removeEventListener('teamspace:workspace-imported', imported);
+      window.removeEventListener('donefac:notifications-updated', refresh);
+      window.removeEventListener('donefac:workspace-imported', imported);
       document.removeEventListener('visibilitychange', refresh);
     };
   }, [actorId, filter, load, open]);

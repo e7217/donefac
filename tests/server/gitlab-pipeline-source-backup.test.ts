@@ -12,7 +12,7 @@ import type { DeliveryBlockerDraftResult, DeliveryBlockerReport, GitlabLink, Git
 type Backup = WorkspaceSnapshot & { schemaVersion: number; trashEntries: { id: string; gitlabLinks: GitlabLink[] }[] };
 
 test('pipeline execution metadata survives native backup and archived issue restore and is versioned', async t => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-pipeline-source-backup-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-pipeline-source-backup-'));
   const runtime = createApp({ dataDir, seed: true, outboundWorker: false, deadlineReminderWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   await once(server, 'listening');

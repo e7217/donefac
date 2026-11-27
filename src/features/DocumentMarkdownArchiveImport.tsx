@@ -28,7 +28,7 @@ const phaseLabels: Record<RequestPhase, string> = {
   refresh: '저장한 문서 목록을 불러오는 중입니다.',
 };
 const formatLabels: Record<DocumentMarkdownArchivePreview['format'], string> = {
-  teamspace: 'Teamspace Markdown ZIP', docmost: 'Docmost Markdown ZIP', markdown: 'Markdown ZIP',
+  donefac: 'Donefac Markdown ZIP', docmost: 'Docmost Markdown ZIP', markdown: 'Markdown ZIP',
 };
 
 export function confirmMarkdownArchiveClose(state: ArchiveImportNavigation) {

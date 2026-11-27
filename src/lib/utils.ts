@@ -1,7 +1,7 @@
 import { clsx, type ClassValue } from 'clsx';
 import { extendTailwindMerge } from 'tailwind-merge';
 
-// Teamspace replaces Tailwind's default type scale (see app/globals.css), so
+// Donefac replaces Tailwind's default type scale (see app/globals.css), so
 // tailwind-merge must know these names are font sizes, not text colors.
 const twMerge = extendTailwindMerge({
   extend: {

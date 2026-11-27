@@ -16,12 +16,12 @@ const actorId = 'user-seo';
 const copyPath = (cycle: PlanningItem) => `/planning-items/${cycle.id}/copy`;
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-cycle-copy-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-cycle-copy-'));
   const service = createApp({ dataDir: directory, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
-  const database = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(directory, 'donefac.sqlite'));
   t.after(async () => {
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));

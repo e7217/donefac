@@ -144,7 +144,7 @@ test('360px 프로젝트 목록에서 필수 담당자와 상태를 함께 저�
     const { issue, workflow, location } = await f.setup({ layout: 'list' });
     const rank = await f.rank();
     const writes = changes(page);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(location);
     const row = page.locator(`tr[data-issue-id="${issue.id}"]`);
     const action = statusAction(page, issue);
@@ -201,7 +201,7 @@ test('360px 보드의 상태 변경에서 필수 설명과 사용자 정의 필�
     const checked = form.getByRole('combobox', { name: '추가 확인 완료', exact: true });
     const effort = form.getByRole('spinbutton', { name: '남은 확인 횟수', exact: true });
     const note = form.getByRole('textbox', { name: '인수인계 댓글', exact: true });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(location);
     const action = statusAction(page, issue);
     await action.tap();
@@ -254,7 +254,7 @@ test('동료가 채운 필수 속성을 재검토하고 업무 설명과 인수�
   const f = await fixture(request);
   try {
     const { issue, location } = await f.setup({ handoffFields: true });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(location);
     await statusAction(page, issue).tap();
     const form = chooser(page);
@@ -313,7 +313,7 @@ test('360px 보드에서 변경된 우선순위와 목표 마감일을 검토하
     const dateMode = form.getByRole('combobox', { name: '목표 마감일 처리', exact: true });
     const date = form.getByLabel('목표 마감일', { exact: true });
     const note = form.getByRole('textbox', { name: '인수인계 댓글', exact: true });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(location);
     const action = statusAction(page, issue);
     await action.tap();
@@ -389,7 +389,7 @@ test('360px 보드에서 필수 목표 마감일에도 기본 근무일 자동 �
     const apply = button(form, '상태 변경 적용');
     const priority = form.getByRole('combobox', { name: '우선순위', exact: true });
     const dateMode = form.getByRole('combobox', { name: '목표 마감일 처리', exact: true });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(location);
     await statusAction(page, issue).tap();
     await destination(page).selectOption(f.guarded.id);
@@ -418,7 +418,7 @@ test('360px 프로젝트 보드에서 키보드와 터치로 허용한 상태만
     const { issue, workflow, location } = await f.setup({ guardedField: 'labels' });
     const rank = await f.rank();
     const writes = changes(page);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(location);
     const before = page.getByRole('region', { name: '업무 보드', exact: true });
     const action = statusAction(page, issue);
@@ -486,7 +486,7 @@ test('프로젝트 보드 상태 변경은 워크플로 충돌과 응답 유실�
     const { issue, workflow, location } = await f.setup({ grouped: true, guardedField: 'labels' });
     const rank = await f.rank();
     const writes = changes(page);
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(location);
     const action = statusAction(page, issue);
     await action.tap();
@@ -589,7 +589,7 @@ test('보드는 응답이 끊겼을 때 같은 작업자의 다른 요청과 저
   const f = await fixture(request);
   try {
     const { issue, location } = await f.setup();
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(location);
     const dialog = chooser(page);
     await statusAction(page, issue).tap();

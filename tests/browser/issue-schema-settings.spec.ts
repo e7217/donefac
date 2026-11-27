@@ -101,7 +101,7 @@ test('유형·속성 초안은 외부 갱신·버전 충돌과 복합 탐색 취
     let reached: () => void = () => undefined; const gate = new Promise<void>(resolve => { release = resolve; }), intercepted = new Promise<void>(resolve => { reached = resolve; });
     await page.route(`**/api/projects/${project.id}/issue-schema`, async route => { if (route.request().method() !== 'PATCH') return route.continue(); const response = await route.fetch(); reached(); await gate; await route.fulfill({ response }); });
     await name.fill('지연 응답으로 저장한 유형'); await editor.getByRole('button', { name: '유형·속성 저장', exact: true }).click(); await intercepted;
-    await expect(name).toBeDisabled(); expect(await page.evaluate(() => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })))).toBe(false); release(); await expect(name).toBeEnabled(); await expect(editor.getByRole('button', { name: '유형·속성 저장', exact: true })).toBeDisabled();
+    await expect(name).toBeDisabled(); expect(await page.evaluate(() => window.dispatchEvent(new Event('donefac:navigate', { cancelable: true })))).toBe(false); release(); await expect(name).toBeEnabled(); await expect(editor.getByRole('button', { name: '유형·속성 저장', exact: true })).toBeDisabled();
     await name.fill('복합 탐색에서도 보존할 유형');
     const actor = page.getByLabel('작업자 선택', { exact: true }), previousActor = await actor.inputValue(), nextActor = initial.users.find(value => value.id !== previousActor)!;
     await decisions(page, [false], () => actor.selectOption(nextActor.id)); await expect(name).toHaveValue('복합 탐색에서도 보존할 유형');

@@ -1,6 +1,6 @@
 export const MAX_MARKDOWN_ARCHIVE_BYTES = 64 * 1024 * 1024;
 
-export type DocumentMarkdownArchiveFormat = 'teamspace' | 'docmost' | 'markdown';
+export type DocumentMarkdownArchiveFormat = 'donefac' | 'docmost' | 'markdown';
 
 export interface MarkdownArchiveHtmlNode {
   tag: string;

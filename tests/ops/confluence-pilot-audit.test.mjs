@@ -130,7 +130,7 @@ async function fixture(t, { pages = [root, child], listed = pages, listingOverri
 }
 
 async function invocation(t, baseUrl, { pageIds, archive } = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'teamspace-confluence-audit-'));
+  const directory = await mkdtemp(join(tmpdir(), 'donefac-confluence-audit-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const config = join(directory, 'source.json');
   const exportPath = join(directory, 'native-private-source.zip');
@@ -166,7 +166,7 @@ async function assertFindings(path, { directory, archive, status, selection, fin
   const { checkedAt, ...report } = parseConfluenceFindings(JSON.parse(raw));
   assert.equal(new Date(checkedAt).toISOString(), checkedAt);
   assert.deepEqual(report, {
-    format: 'teamspace-confluence-audit-findings', version: 3, selection, status,
+    format: 'donefac-confluence-audit-findings', version: 3, selection, status,
     archive: { sha256: createHash('sha256').update(archive).digest('hex'), bytes: archive.length },
     spacePermissions: 'manual-review', unidentifiedPages, findings, coverage, permissionCheckedPageIds,
   });

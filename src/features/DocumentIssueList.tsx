@@ -333,7 +333,7 @@ export function IssueBlockChooser({ selection, data, preferredProjectId, actorId
           {macro.server && <p>원본 Jira 연결 <strong>{macro.server}</strong></p>}
           {macro.columns && <p>원본 표시 열 {macro.columns}</p>}
           {macro.maximumIssues !== undefined && <p>원본 표시 한도 {macro.maximumIssues}개</p>}
-          <p>Teamspace 업무 목록은 최대 {DOCUMENT_ISSUE_LIST_LIMIT}개 업무의 키, 제목, 상태와 담당자를 표시합니다.</p>
+          <p>Donefac 업무 목록은 최대 {DOCUMENT_ISSUE_LIST_LIMIT}개 업무의 키, 제목, 상태와 담당자를 표시합니다.</p>
         </div>}
         <label>프로젝트<select ref={projectSelect} className="field" aria-label={`${blockLabel} 프로젝트`} value={projectId}
           disabled={restoringJira && (Boolean(restoredView) || sourceStale)}

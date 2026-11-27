@@ -40,7 +40,7 @@ function receiverAddress(publicOrigin?: string): string | undefined {
   if (!publicOrigin) return undefined;
   const url = new URL(publicOrigin);
   if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
-    throw new Error('GitLab 웹훅 수신에는 Teamspace의 HTTPS 기본 주소가 필요합니다.');
+    throw new Error('GitLab 웹훅 수신에는 Donefac의 HTTPS 기본 주소가 필요합니다.');
   }
   return new URL('/api/integrations/gitlab/webhook', url).href;
 }
@@ -96,7 +96,7 @@ export class GitlabProjectWebhookSetup {
   private target(input: Record<string, unknown>) {
     const connection = this.connection(input.expectedVersion);
     const receiverUrl = this.receiverUrl;
-    if (!receiverUrl) throw new GitlabProjectWebhookSetupError(409, 'Teamspace 팀 접속 HTTPS 주소를 먼저 설정해 주세요.');
+    if (!receiverUrl) throw new GitlabProjectWebhookSetupError(409, 'Donefac 팀 접속 HTTPS 주소를 먼저 설정해 주세요.');
     if (!connection.baseUrl) throw new GitlabProjectWebhookSetupError(409, 'GitLab 기본 주소를 먼저 저장해 주세요.');
     const { repositoryId } = input;
     if (typeof repositoryId !== 'number' || !Number.isSafeInteger(repositoryId) || repositoryId < 1) {
@@ -164,7 +164,7 @@ export class GitlabProjectWebhookSetup {
     };
     const hooks = await this.findHooks(target, token, signal).finally(checkCurrent);
     if (!hooks.some(hook => hook.id === hookId && hook.receiverExact !== false)) {
-      throw new GitlabProjectWebhookSetupError(404, '현재 Teamspace 수신 주소와 일치하는 웹훅이 없습니다. 웹훅 설정을 다시 점검해 주세요.',
+      throw new GitlabProjectWebhookSetupError(404, '현재 Donefac 수신 주소와 일치하는 웹훅이 없습니다. 웹훅 설정을 다시 점검해 주세요.',
         { reason: 'receiver_changed' });
     }
 

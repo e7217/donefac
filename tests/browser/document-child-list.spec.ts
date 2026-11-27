@@ -284,10 +284,10 @@ test('공동 편집에서 다른 상위 문서 범위와 제목 형식이 동기
   });
   expect(enabled.status(), await enabled.text()).toBe(200);
   const [author, collaborator] = wiki.workspace.users;
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
   const context = await browser.newContext({ baseURL });
   try {
-    await context.addInitScript(id => localStorage.setItem('teamspace.actor', id), collaborator.id);
+    await context.addInitScript(id => localStorage.setItem('donefac.actor', id), collaborator.id);
     const peer = await context.newPage();
     await Promise.all([openDocument(page, root), openDocument(peer, root)]);
     await expect(page.locator('.docs-collaboration-presence')).toContainText('2명 접속');

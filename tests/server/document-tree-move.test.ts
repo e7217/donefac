@@ -22,7 +22,7 @@ const reviewer = 'user-seo';
 const documentPath = (id: string) => `/documents/${id}`;
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-document-move-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-document-move-'));
   const runtime = createApp({ dataDir, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   runtime.attachWebSocket(server);

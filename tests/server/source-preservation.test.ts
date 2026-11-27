@@ -17,7 +17,7 @@ import { WorklogService } from '../../server/worklogs.js';
 const now = '2026-11-19T00:00:00.000Z', old = '2020-01-02T03:04:05.000Z';
 const isError = (status = 400) => (error: unknown) => error instanceof SourcePreservationError && error.status === status;
 function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-source-preservation-')), store = new Store(dir), service = new SourcePreservationService(store);
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-source-preservation-')), store = new Store(dir), service = new SourcePreservationService(store);
   const users: User[] = [{ id: 'actor', name: '이관 작업자', email: 'actor@example.test', color: '#567899' }, { id: 'mapped', name: '현재 팀원', email: 'mapped@example.test', color: '#567899' }];
   const projects: Project[] = ['A', 'B'].map(letter => ({ id: `project-${letter}`, key: `SRC${letter}`, name: `합성 ${letter}`, description: '', color: '#567899', createdAt: now }));
   const issues: Issue[] = ['a', 'b'].map(letter => ({ id: `issue-${letter}`, key: `SRCA-${letter === 'a' ? 1 : 2}`, projectId: projects[0].id, title: `합성 업무 ${letter}`, description: '현재 본문', type: '작업', status: 'todo', priority: 'medium', assigneeId: null, collaboratorIds: [], parentId: null, labels: [], startDate: null, endDate: null, dueDate: null, estimate: null, cycle: null, module: null, release: null, version: 1, createdAt: now, updatedAt: now, completedAt: null }));

@@ -122,7 +122,7 @@ export function MyWork({ data, actorId, openIssue, notify, refresh, onOpenIssueF
   }
 
   function openStatusEdit({ issue, status }: MyWorkItem, choices: WorkflowStatus[], opener: HTMLButtonElement) {
-    if (statusEdit || bulk.active || !choices.length || !window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
+    if (statusEdit || bulk.active || !choices.length || !window.dispatchEvent(new Event('donefac:navigate', { cancelable: true }))) return;
     setStatusEdit({ issue, current: status, choices, workflowVersion: projectWorkflow(data, issue.projectId).version, opener });
   }
 

@@ -59,13 +59,13 @@ function SubscriptionButton({ actorId, targetType, targetId, notify }: Props) {
     };
     load();
     window.addEventListener('focus', refresh);
-    window.addEventListener('teamspace:workspace-imported', imported);
+    window.addEventListener('donefac:workspace-imported', imported);
     document.addEventListener('visibilitychange', refresh);
     return () => {
       request.current?.abort();
       request.current = null;
       window.removeEventListener('focus', refresh);
-      window.removeEventListener('teamspace:workspace-imported', imported);
+      window.removeEventListener('donefac:workspace-imported', imported);
       document.removeEventListener('visibilitychange', refresh);
     };
   }, [load]);

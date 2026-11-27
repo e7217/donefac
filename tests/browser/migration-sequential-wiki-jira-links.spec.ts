@@ -103,7 +103,7 @@ test('360px에서 먼저 이관한 Confluence 문서에서 나중에 이관한 J
     const sectionHash = documentSectionHash(original.id, sectionId, original.projectId);
     const editor = page.locator('.docs-editor-wrap .docs-prose');
     const link = (name: LinkName) => editor.getByRole('link', { name, exact: true });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/${sectionHash}`);
     for (const name of Object.keys(links) as LinkName[]) await expect(link(name)).toHaveAttribute('href', links[name]);
     await link('지정한 Jira 댓글').click();

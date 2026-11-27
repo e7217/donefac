@@ -18,7 +18,7 @@ const excerpt = (...content: RichContent[]): RichContent => ({ type: 'documentEx
 const include = (documentId: string): RichContent => ({ type: 'documentExcerptInclude', attrs: { documentId, label: '팀 점검 절차', noPanel: true } });
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-document-excerpts-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-document-excerpts-'));
   const app = createApp({ dataDir: directory, outboundWorker: false });
   const server = app.app.listen(0, '127.0.0.1');
   t.after(async () => {

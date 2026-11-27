@@ -62,8 +62,8 @@ export function CycleProgress(props: Props) {
 
   useEffect(() => {
     const close = () => setOpen(false);
-    window.addEventListener('teamspace:workspace-imported', close);
-    return () => window.removeEventListener('teamspace:workspace-imported', close);
+    window.addEventListener('donefac:workspace-imported', close);
+    return () => window.removeEventListener('donefac:workspace-imported', close);
   }, []);
 
   return <section className="cycle-progress" aria-labelledby={headingId}>

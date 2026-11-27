@@ -40,7 +40,7 @@ async function asJson<T>(response: Response, expected = 200) {
 }
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-document-offline-export-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-document-offline-export-'));
   const runtime = createApp({ dataDir: directory, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -95,7 +95,7 @@ async function unzip(response: Response) {
   const { files } = await readLegacyArchive(bytes, 'offline.zip');
   const text = (path: string) => { const entry = files.get(path); assert.ok(entry, path); return entry.toString('utf8'); };
   const manifest: Manifest = JSON.parse(text('manifest.json'));
-  assert.equal(manifest.format, 'teamspace-document-markdown');
+  assert.equal(manifest.format, 'donefac-document-markdown');
   assert.equal(manifest.schemaVersion, 1);
   assert.equal(files.size, manifest.documents.length + manifest.attachments.length + 2);
   return { files, text, manifest };

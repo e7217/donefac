@@ -71,7 +71,7 @@ test('360px 티켓에서 다른 프로젝트의 업무 관계를 편집하고 �
     const response = await saved;
     expect(response.status(), await response.text()).toBe(201);
     const relation = await response.json() as IssueRelation;
-    expect(relation).toMatchObject({ origin: 'teamspace', type: 'blocks', sourceIssueId: target.id, targetIssueId: source.id });
+    expect(relation).toMatchObject({ origin: 'donefac', type: 'blocks', sourceIssueId: target.id, targetIssueId: source.id });
     await expect(create).toHaveCount(0);
     await expect(add).toBeFocused();
     await expect(relations.getByText('이 업무가 차단됨', { exact: true })).toBeVisible();
@@ -175,7 +175,7 @@ test('업무 관계 수정 응답이 끊기면 같은 요청을 확인하고 이
       await route.abort('failed');
     });
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/issues?issue=${source.id}`);
     const panel = page.getByRole('dialog', { name: source.title, exact: true });
     const title = panel.getByRole('textbox', { name: '제목', exact: true });
@@ -407,7 +407,7 @@ test('360px 티켓에서 최신 타 프로젝트 원본을 확인하고 초안�
     expect(closed.request().postDataJSON()).toMatchObject({ expectedOriginalVersion: latestOriginal.version, status: closedStatus.id });
     const result = await closed.json() as IssueCloseAsDuplicateResult;
     expect(result.issue).toMatchObject({ id: duplicate.id, title: duplicate.title, status: closedStatus.id, version: duplicate.version + 1 });
-    expect(result.relation).toMatchObject({ origin: 'teamspace', type: 'duplicates', sourceIssueId: duplicate.id, targetIssueId: original.id });
+    expect(result.relation).toMatchObject({ origin: 'donefac', type: 'duplicates', sourceIssueId: duplicate.id, targetIssueId: original.id });
     await expect(close).toHaveCount(0);
     await expect(relations.getByRole('button', { name: '업무 관계 추가', exact: true })).toBeFocused();
     await expect(relations.getByText('이 업무가 중복임', { exact: true })).toBeVisible();
@@ -456,7 +456,7 @@ for (const { name, editAfterClosure } of lostDuplicateResponseScenarios) {
       const issuePath = `/api/issues/${duplicate.id}`;
       let postCount = 0;
       const forwardedStatuses: number[] = [];
-      await page.addInitScript(userId => localStorage.setItem('teamspace.actor', userId), actor.id);
+      await page.addInitScript(userId => localStorage.setItem('donefac.actor', userId), actor.id);
       await page.route(`**${issuePath}/close-as-duplicate`, async route => {
         if (route.request().method() !== 'POST') return route.continue();
         postCount += 1;
@@ -520,7 +520,7 @@ for (const { name, editAfterClosure } of lostDuplicateResponseScenarios) {
       const savedRelations = await request.get(`${issuePath}/relations`);
       expect(savedRelations.status(), await savedRelations.text()).toBe(200);
       expect(await savedRelations.json()).toMatchObject([
-        { origin: 'teamspace', type: 'duplicates', sourceIssueId: duplicate.id, targetIssueId: original.id },
+        { origin: 'donefac', type: 'duplicates', sourceIssueId: duplicate.id, targetIssueId: original.id },
       ]);
     } finally {
       await purgeCreatedIssues(request, created);

@@ -12,7 +12,7 @@ import type { LegacyPackageSummary,LegacyRecordPage,LegacyRecord,WorkspaceSnapsh
 
 const csv=Buffer.from('Issue id,Issue key,Summary,Description,Reporter,Created,Comment\r\n100,OLD-1,한글 원본,"보존할 첫 줄\r\n두 번째 줄",original.author,2020-01-01 12:00:00,"2020-01-02;original.author;보존 댓글"\r\n');
 async function fixture(directory?:string){
-  const dir=directory||mkdtempSync(join(tmpdir(),'teamspace-legacy-integration-')),service=createApp({dataDir:dir,outboundWorker:false}),server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as {port:number}).port}/api`;
+  const dir=directory||mkdtempSync(join(tmpdir(),'donefac-legacy-integration-')),service=createApp({dataDir:dir,outboundWorker:false}),server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as {port:number}).port}/api`;
   async function call<T=unknown>(path:string,method='GET',body?:unknown,headers:Record<string,string>={}){const response=await fetch(base+path,{method,headers:{'Content-Type':'application/json',...headers},...(body===undefined?{}:{body:JSON.stringify(body)})});return{status:response.status,data:await response.json() as T};}
   async function upload(bytes=csv,filename='export.csv',instanceKey='original-jira'){const response=await fetch(`${base}/legacy-import/packages?filename=${encodeURIComponent(filename)}&instanceKey=${encodeURIComponent(instanceKey)}`,{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Actor-Id':'user-seo'},body:bytes});return{status:response.status,data:await response.json() as LegacyPackageSummary};}
   return{dir,call,upload,close:async()=>{await new Promise<void>(resolve=>server.close(()=>resolve()));service.close();}};
@@ -43,14 +43,14 @@ test('HTTP validation rejects malformed files, unsupported queries and public AP
 });
 
 test('analysis metadata, audit and original file roll back together; delete audit failure retains exact source',async()=>{
-  const dir=mkdtempSync(join(tmpdir(),'teamspace-legacy-rollback-')),store=new Store(dir),service=new LegacyImportService(store,dir);try{
+  const dir=mkdtempSync(join(tmpdir(),'donefac-legacy-rollback-')),store=new Store(dir),service=new LegacyImportService(store,dir);try{
     await assert.rejects(service.upload(csv,{filename:'export.csv',instanceKey:'jira'},'source-actor',()=>{throw new Error('synthetic audit failure');}),/synthetic audit/);assert.equal(service.list().length,0);assert.deepEqual(readdirSync(join(dir,'legacy-imports')),[]);assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM legacy_records').get()!.count,0);
     const created=await service.upload(csv,{filename:'export.csv',instanceKey:'jira'},'source-actor');assert.throws(()=>service.remove(created.summary.id,1,()=>{throw new Error('synthetic delete failure');}),/synthetic delete/);assert.equal(service.list().length,1);assert.deepEqual(readFileSync(join(dir,'legacy-imports',created.summary.id+'.bundle')),csv);
   }finally{service.close();store.db.close();rmSync(dir,{recursive:true,force:true});}
 });
 
 test('worker busy and shutdown guards settle pending requests without accessing a closed store; startup recovers orphans',async()=>{
-  const dir=mkdtempSync(join(tmpdir(),'teamspace-legacy-close-')),store=new Store(dir),service=new LegacyImportService(store,dir);
+  const dir=mkdtempSync(join(tmpdir(),'donefac-legacy-close-')),store=new Store(dir),service=new LegacyImportService(store,dir);
   try{
     const upload=service.upload(csv,{filename:'export.csv',instanceKey:'jira'},'source-actor');await assert.rejects(service.upload(csv,{filename:'export.csv',instanceKey:'jira-2'},'source-actor'),error=>(error as {status:number}).status===409);service.close();store.db.close();await assert.rejects(upload,error=>(error as {status:number}).status===503);
     const root=join(dir,'legacy-imports'),pending=join(root,randomUUID()+'.pending'),orphan=join(root,randomUUID()+'.bundle');writeFileSync(pending,'uncommitted');writeFileSync(orphan,'orphan');writeFileSync(join(root,'operator-note.txt'),'keep');const nextStore=new Store(dir),next=new LegacyImportService(nextStore,dir);try{assert.equal(existsSync(pending),false);assert.equal(existsSync(orphan),false);assert.equal(readFileSync(join(root,'operator-note.txt'),'utf8'),'keep');}finally{next.close();nextStore.db.close();}

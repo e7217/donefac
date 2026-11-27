@@ -5,9 +5,9 @@
 자동화 클라이언트는 `/api/v1` 경로와 `Authorization: Bearer ...` 헤더를 사용한다. 키를 회수하거나 만료되면 사용할 수 없다. 변경 이력의 작업자는 키 소유자로 고정된다. 요청의 `X-Actor-Id`나 `actorId`로 다른 작업자를 지정하지 않는다.
 
 ```bash
-export TEAMSPACE_API_KEY='발급받은 키'
+export DONEFAC_API_KEY='발급받은 키'
 curl --fail-with-body \
-  -H "Authorization: Bearer $TEAMSPACE_API_KEY" \
+  -H "Authorization: Bearer $DONEFAC_API_KEY" \
   http://127.0.0.1:5181/api/v1/projects
 ```
 
@@ -71,7 +71,7 @@ curl --fail-with-body \
 
 ## 현재·이전 티켓 키 조회
 
-`GET /api/v1/issue-key-matches?key=OLD-123`은 현재 키 또는 이전 키가 정확히 일치하는 활성 티켓을 `{issue,matchedAliases}` 배열로 반환한다. 대소문자와 전각 영숫자를 정규화한다. 현재 키가 맞는 티켓이 먼저 나오고, 같은 번호를 사용한 나머지 티켓도 배열에 각각 포함된다. 한 티켓은 한 번만 나오며 `matchedAliases` 항목은 `{key,source}` 형식이다. `source` 값은 Jira 원래 키의 `jira` 또는 Teamspace 프로젝트 이동 전 키의 `move`다.
+`GET /api/v1/issue-key-matches?key=OLD-123`은 현재 키 또는 이전 키가 정확히 일치하는 활성 티켓을 `{issue,matchedAliases}` 배열로 반환한다. 대소문자와 전각 영숫자를 정규화한다. 현재 키가 맞는 티켓이 먼저 나오고, 같은 번호를 사용한 나머지 티켓도 배열에 각각 포함된다. 한 티켓은 한 번만 나오며 `matchedAliases` 항목은 `{key,source}` 형식이다. `source` 값은 Jira 원래 키의 `jira` 또는 Donefac 프로젝트 이동 전 키의 `move`다.
 
 `projectId`를 보내면 티켓의 현재 소속 프로젝트로 좁힌다. 읽기·쓰기 키 모두 키에 허용된 현재 프로젝트만 조회한다. 조건에 맞는 티켓이 없으면 빈 배열을 반환한다. 브라우저는 같은 계약의 `/api/issue-key-matches`를 사용한다.
 
@@ -87,27 +87,27 @@ curl --fail-with-body \
 
 같은 스킴·호스트·포트·설치 경로의 Jira 업무 키 또는 Confluence 페이지 ID를 저장된 링크에서 찾는다. `/display/…` 주소는 직접 저장한 제목 링크와, 같은 원본 패키지에서 제목·공간을 확인한 이관 문서를 찾는다. 이관 문서는 영수증의 서버·설치 경로, 보관된 문서와 원본의 연결, 현재 저장된 숫자 페이지 ID 링크를 함께 대조한다. 활성 업무·문서를 한 번씩 반환하며 같은 주소에 연결된 별도 대상은 각각 반환한다. 원본 서버에 접속하지 않는다. `GET /api/search?q=…`에 유효한 원본 주소를 보내면 같은 대상을 기존 `{issues, documents}` 형식으로 반환한다.
 
-Confluence 댓글 주소에는 `focusedCommentId` 또는 `#comment-<원본 댓글 ID>`가 들어간다. 둘을 함께 쓰면 번호가 일치해야 한다. 검색용 주소는 원본 댓글 번호를 `focusedCommentId`에 보존한다. 해당 설치의 이관 영수증·페이지 연결·댓글 기록을 확인하고 활성 문서의 댓글을 하나로 찾으면 `targets`에 `{targetType:'document',targetId,commentId}`를 반환한다. `commentId`는 Teamspace 댓글 ID다. 잘못된 선택자는 `400`, 문서나 댓글의 소유 관계가 불명확하거나 대상이 휴지통에 있으면 빈 `targets`가 반환된다. `GET /api/search`는 정확한 댓글이 있을 때 문서 ID와 댓글 ID를 연결하는 `documentCommentIds`도 반환한다.
+Confluence 댓글 주소에는 `focusedCommentId` 또는 `#comment-<원본 댓글 ID>`가 들어간다. 둘을 함께 쓰면 번호가 일치해야 한다. 검색용 주소는 원본 댓글 번호를 `focusedCommentId`에 보존한다. 해당 설치의 이관 영수증·페이지 연결·댓글 기록을 확인하고 활성 문서의 댓글을 하나로 찾으면 `targets`에 `{targetType:'document',targetId,commentId}`를 반환한다. `commentId`는 Donefac 댓글 ID다. 잘못된 선택자는 `400`, 문서나 댓글의 소유 관계가 불명확하거나 대상이 휴지통에 있으면 빈 `targets`가 반환된다. `GET /api/search`는 정확한 댓글이 있을 때 문서 ID와 댓글 ID를 연결하는 `documentCommentIds`도 반환한다.
 
 Jira 댓글 주소는 `/browse/TEAM-17?focusedCommentId=42` 또는 `/browse/TEAM-17#comment-42` 형식을 지원한다. 두 선택자의 번호가 모두 있으면 일치해야 한다. `focusedId`는 `?focusedId=42#comment-42`처럼 같은 번호의 프래그먼트와 함께 제공하는 경우에만 유효하며 `focusedCommentId`와 함께 쓸 수 없다. 정규화한 검색 주소는 `focusedCommentId`를 보존한다.
 
-Jira의 원본 설치 주소와 티켓 키에 해당하는 이관 영수증·업무 연결·댓글 소유 관계를 대조한다. 접근 제한이 없는 활성 이관 댓글을 하나로 확인하면 `targets`에 `{targetType:'issue',targetId,commentId}`를 반환한다. `commentId`는 Teamspace 댓글 ID다. `/api/atlassian-links/resolve`는 잘못된 선택자에 `400`을 반환한다. 대상이 없거나 휴지통에 있거나 소유 근거가 모호한 유효 주소에는 빈 `targets`를 반환한다. `GET /api/search`는 정확한 결과에 업무 ID와 댓글 ID를 연결하는 `issueCommentIds`도 반환한다. 잘못된 Jira 댓글 선택자는 빈 검색 결과를 반환한다. 브라우저의 Teamspace 티켓 주소는 `issueComment`에 현재 댓글 ID를 보관한다.
+Jira의 원본 설치 주소와 티켓 키에 해당하는 이관 영수증·업무 연결·댓글 소유 관계를 대조한다. 접근 제한이 없는 활성 이관 댓글을 하나로 확인하면 `targets`에 `{targetType:'issue',targetId,commentId}`를 반환한다. `commentId`는 Donefac 댓글 ID다. `/api/atlassian-links/resolve`는 잘못된 선택자에 `400`을 반환한다. 대상이 없거나 휴지통에 있거나 소유 근거가 모호한 유효 주소에는 빈 `targets`를 반환한다. `GET /api/search`는 정확한 결과에 업무 ID와 댓글 ID를 연결하는 `issueCommentIds`도 반환한다. 잘못된 Jira 댓글 선택자는 빈 검색 결과를 반환한다. 브라우저의 Donefac 티켓 주소는 `issueComment`에 현재 댓글 ID를 보관한다.
 
 ### 저장된 티켓 설명의 Confluence 주소
 
 브라우저는 저장된 Markdown 티켓 설명에서 이관 영수증으로 확인한 Confluence 서버·포트·설치 경로의 지원 주소를 일반 클릭하면 `GET /api/atlassian-links/resolve-migrated-document?url=…`로 조회한다. 확인한 설치 주소 목록은 워크스페이스 응답의 `confluenceMigrationOrigins`에서 읽는다. 절대 HTTP(S) 주소 하나를 인코딩해 보낸다. 서버는 저장된 이관 근거에서 페이지 ID 또는 원래 공간 키와 제목을 해석하고 원본 주소를 다시 대조한다. 절을 지정한 주소는 보존한 원본의 제목·앵커를 정확히 해석할 수 있고 대응하는 절 식별자가 현재 문서에 있을 때 연결한다.
 
-접근 제한과 제외 여부를 확인한 활성 이관 문서가 하나면 `{target:{documentId,sectionId?}}`를 반환한다. 문서·절의 근거가 모호하거나 유효한 주소의 서버·설치 경로를 확인할 수 없으면 `{target:null}`을 반환한다. 잘못된 주소, 중복되거나 지원하지 않는 선택자, 추가 요청 매개변수는 `400`이다. 응답은 `Cache-Control: no-store`를 사용한다. 조회는 읽기 전용이며 Teamspace에 보존된 기록을 사용하므로 원본 서버에 접속하지 않는다.
+접근 제한과 제외 여부를 확인한 활성 이관 문서가 하나면 `{target:{documentId,sectionId?}}`를 반환한다. 문서·절의 근거가 모호하거나 유효한 주소의 서버·설치 경로를 확인할 수 없으면 `{target:null}`을 반환한다. 잘못된 주소, 중복되거나 지원하지 않는 선택자, 추가 요청 매개변수는 `400`이다. 응답은 `Cache-Control: no-store`를 사용한다. 조회는 읽기 전용이며 Donefac에 보존된 기록을 사용하므로 원본 서버에 접속하지 않는다.
 
 ### 문서 본문의 Jira 주소
 
-브라우저는 워크스페이스의 `jiraMigrationOrigins`와 서버·포트·설치 경로가 일치하는 Jira 원본 업무 또는 댓글 링크를 현재 문서에서 일반 클릭하면 `GET /api/atlassian-links/resolve-migrated-jira-target?url=…`로 조회한다. 서버는 적용 영수증의 설치 주소와 보관된 원본 업무의 ID·키·소유 근거를 대조한다. 위의 Jira 댓글 선택자를 쓰면 정확한 활성 댓글도 확인한다. 확인한 한 건을 `{target:{issueId,commentId?}}`로 반환하며 `commentId`는 Teamspace 댓글 ID다. 유효한 주소에서 근거가 모호하거나 대상이 없으면 `{target:null}`을 반환한다. 지원하지 않는 쿼리·프래그먼트나 추가 요청 매개변수는 `400`이다. 응답은 `Cache-Control: no-store`를 사용한다. 조회 중 원본 서버로 요청을 보내지 않는다.
+브라우저는 워크스페이스의 `jiraMigrationOrigins`와 서버·포트·설치 경로가 일치하는 Jira 원본 업무 또는 댓글 링크를 현재 문서에서 일반 클릭하면 `GET /api/atlassian-links/resolve-migrated-jira-target?url=…`로 조회한다. 서버는 적용 영수증의 설치 주소와 보관된 원본 업무의 ID·키·소유 근거를 대조한다. 위의 Jira 댓글 선택자를 쓰면 정확한 활성 댓글도 확인한다. 확인한 한 건을 `{target:{issueId,commentId?}}`로 반환하며 `commentId`는 Donefac 댓글 ID다. 유효한 주소에서 근거가 모호하거나 대상이 없으면 `{target:null}`을 반환한다. 지원하지 않는 쿼리·프래그먼트나 추가 요청 매개변수는 `400`이다. 응답은 `Cache-Control: no-store`를 사용한다. 조회 중 원본 서버로 요청을 보내지 않는다.
 
 ## 티켓 사이의 업무 관계
 
 `GET /api/issues/:id/relations`는 현재 티켓이 양쪽 중 하나인 `IssueRelationView[]`을 반환한다. `POST`로 `{otherIssueId,type,direction}`을 보낸다. `type`은 `related`, `blocks`, `duplicates`다. `direction`이 `outgoing`이면 URL의 티켓이 차단하는 쪽 또는 중복 티켓이며, `incoming`이면 상대 티켓이 그 역할이다. `related`는 두 티켓을 ID 순서로 저장한다. 같은 관계를 다시 보내면 이미 저장된 행과 `200`을 반환하고, 새 연결은 `201`을 반환한다.
 
-직접 만든 관계에는 `origin: "teamspace"`가 있다. `PATCH /api/issues/:id/relations/:relationId`에 `{expectedVersion,type,direction}`을 보내 유형과 방향을 변경한다. `DELETE`는 같은 경로의 `?expectedVersion=…`을 사용한다. 버전이 바뀌면 `409`로 최신 버전을 알려준다. 이관한 관계는 원래 이름을 반환하며 읽기 전용이다. 관계 자체와 양쪽 활동 이력은 함께 저장한다. 자체 백업 형식 51은 직접 만든 관계를 보존하고 복원 시 버전을 높인다.
+직접 만든 관계에는 `origin: "donefac"`가 있다. `PATCH /api/issues/:id/relations/:relationId`에 `{expectedVersion,type,direction}`을 보내 유형과 방향을 변경한다. `DELETE`는 같은 경로의 `?expectedVersion=…`을 사용한다. 버전이 바뀌면 `409`로 최신 버전을 알려준다. 이관한 관계는 원래 이름을 반환하며 읽기 전용이다. 관계 자체와 양쪽 활동 이력은 함께 저장한다. 자체 백업 형식 51은 직접 만든 관계를 보존하고 복원 시 버전을 높인다.
 
 관계 수정 본문에 UUID v4 `requestId`와 현재 워크스페이스의 `expectedRestoreGeneration`을 함께 보낼 수 있다. 같은 작업자가 같은 요청으로 적용 결과를 다시 확인하면 현재 관계를 반환한다. 이후 동료가 저장한 관계의 유형과 방향도 현재 값으로 반환한다. 요청 ID를 다른 입력에 사용하거나 복원 이전 세대에서 보낸 요청은 `409`로 응답한다.
 
@@ -119,7 +119,7 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 `POST /api/issues/:id/close-as-duplicate`에 `{originalIssueId,status,expectedVersion,expectedOriginalVersion,expectedWorkflowVersion}`을 보낸다. `id`는 열린 중복 업무이며 원본 업무는 다른 프로젝트에도 있을 수 있다. `status`에는 현재 업무 유형의 워크플로에서 허용하는 `done` 또는 `cancelled` 범주의 상태 ID를 넣는다. 기존 상태 전이의 필수 입력, 열린 차단 업무, 자동 담당자와 목표 마감일 규칙을 적용한다.
 
-성공 시 `200`과 `{issue,relation}`을 반환한다. 중복 업무에서 원본 업무 방향으로 관계를 저장하며 같은 Teamspace 관계를 재사용한다. 두 업무와 워크플로 버전이 일치해야 한다. 직접 만든 중복 관계에 다른 원본이 이미 지정됐거나 새 연결이 순환을 만들면 `409`를 반환한다. 상태·관계·변경 이력은 함께 저장한다. 응답을 잃은 경우 최신 업무와 관계를 조회해 적용 결과를 확인한다. `/api/v1`에는 두 업무의 프로젝트를 허용하는 쓰기 키를 사용한다.
+성공 시 `200`과 `{issue,relation}`을 반환한다. 중복 업무에서 원본 업무 방향으로 관계를 저장하며 같은 Donefac 관계를 재사용한다. 두 업무와 워크플로 버전이 일치해야 한다. 직접 만든 중복 관계에 다른 원본이 이미 지정됐거나 새 연결이 순환을 만들면 `409`를 반환한다. 상태·관계·변경 이력은 함께 저장한다. 응답을 잃은 경우 최신 업무와 관계를 조회해 적용 결과를 확인한다. `/api/v1`에는 두 업무의 프로젝트를 허용하는 쓰기 키를 사용한다.
 
 ## 업무와 문서의 직접 연결
 
@@ -133,9 +133,9 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 ## 팀 간트의 프로젝트 간 차단
 
-브라우저의 `GET /api/schedule/team-blockers`는 서로 다른 프로젝트의 현재 두 업무를 잇는 차단 관계를 조회한다. 응답 항목은 `{id, sourceIssueId, targetIssueId, version}`이며 원인에서 차단 대상 방향이다. 원본 방향과 양쪽 업무 연결이 확인된 Jira 차단 관계에는 `origin: 'jira'`가 추가된다. 같은 방향의 Teamspace 차단이 있으면 그 항목을 반환한다. 화면은 두 업무의 현재 워크플로로 진행 중인 차단을 표시한다. 방향 수정과 해제에는 기존 업무 관계 경로를 사용한다. [티켓 사이의 업무 관계](#티켓-사이의-업무-관계)
+브라우저의 `GET /api/schedule/team-blockers`는 서로 다른 프로젝트의 현재 두 업무를 잇는 차단 관계를 조회한다. 응답 항목은 `{id, sourceIssueId, targetIssueId, version}`이며 원인에서 차단 대상 방향이다. 원본 방향과 양쪽 업무 연결이 확인된 Jira 차단 관계에는 `origin: 'jira'`가 추가된다. 같은 방향의 Donefac 차단이 있으면 그 항목을 반환한다. 화면은 두 업무의 현재 워크플로로 진행 중인 차단을 표시한다. 방향 수정과 해제에는 기존 업무 관계 경로를 사용한다. [티켓 사이의 업무 관계](#티켓-사이의-업무-관계)
 
-`POST /api/schedule/team-blockers`에 `{sourceIssueId, targetIssueId, expectedSourceVersion, expectedTargetVersion}`을 보낸다. 현재 서로 다른 프로젝트에 속한 열린 업무를 확인하고, 두 저장 버전이 일치하면 `blocks` 관계와 활동 이력을 함께 저장해 `201`을 반환한다. 유효한 같은 방향의 Teamspace 관계가 이미 있으면 그 관계를 `200`으로 반환한다. 업무가 사라지면 `404`, 현재 프로젝트·상태 또는 버전이 조건에 맞지 않으면 `409`를 반환한다. 버전 충돌에는 `source_version_changed` 또는 `target_version_changed`와 `currentVersion`을 표시한다.
+`POST /api/schedule/team-blockers`에 `{sourceIssueId, targetIssueId, expectedSourceVersion, expectedTargetVersion}`을 보낸다. 현재 서로 다른 프로젝트에 속한 열린 업무를 확인하고, 두 저장 버전이 일치하면 `blocks` 관계와 활동 이력을 함께 저장해 `201`을 반환한다. 유효한 같은 방향의 Donefac 관계가 이미 있으면 그 관계를 `200`으로 반환한다. 업무가 사라지면 `404`, 현재 프로젝트·상태 또는 버전이 조건에 맞지 않으면 `409`를 반환한다. 버전 충돌에는 `source_version_changed` 또는 `target_version_changed`와 `currentVersion`을 표시한다.
 
 ### 다른 프로젝트에 새 차단 대상 업무 만들기
 
@@ -145,7 +145,7 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 ## 저장된 간트 데이터 갱신
 
-브라우저의 `GET /api/workspace`는 `X-Teamspace-Gantt-Revision` 헤더를 보낸다. 마지막으로 받은 32자리 16진수 값을 `?ganttSince=…`에 보내면 같은 버전은 빈 본문의 `204`, 다른 버전은 `200`과 최신 워크스페이스다. 업무·선후행, 프로젝트 달력·계획·저장 보기·마일스톤·기준선, 작업량 설정, 프로젝트 간 차단 관계와 시간 예약이 저장될 때 간트 버전이 바뀐다. 간트 전용 설정은 팀 보드 버전을 유지한다. 한 요청에는 `teamBoardSince`와 `ganttSince` 중 하나를 사용한다.
+브라우저의 `GET /api/workspace`는 `X-Donefac-Gantt-Revision` 헤더를 보낸다. 마지막으로 받은 32자리 16진수 값을 `?ganttSince=…`에 보내면 같은 버전은 빈 본문의 `204`, 다른 버전은 `200`과 최신 워크스페이스다. 업무·선후행, 프로젝트 달력·계획·저장 보기·마일스톤·기준선, 작업량 설정, 프로젝트 간 차단 관계와 시간 예약이 저장될 때 간트 버전이 바뀐다. 간트 전용 설정은 팀 보드 버전을 유지한다. 한 요청에는 `teamBoardSince`와 `ganttSince` 중 하나를 사용한다.
 
 워크스페이스 본문의 `teamScheduleBlockers`는 같은 저장 시점의 프로젝트 간 차단 목록이다. 간트는 행과 차트 변경 미리보기에서 현재 열린 후행 업무를 찾는 데 사용한다. 워크스페이스 복원 뒤 저장된 관계에서 목록을 다시 계산한다.
 
@@ -403,7 +403,7 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 이 버전 검사와 함께 `assigneeId`를 지정하면 팀원 ID 또는 `null`을 상태와 함께 저장한다. 현재 값과 같아도 직접 지정한 값은 자동 배정보다 우선한다. `assigneeId`를 생략하면 현재 프로젝트의 배정 규칙을 적용한다. 전이의 필수 담당자 조건은 저장할 최종 값으로 검사한다. 검증을 통과한 경우에만 변경을 함께 커밋한다. 프로젝트 업무 목록과 두 보드의 상태 변경 창은 요청 ID를 지원하는 `POST /api/issues/:id/status-change`를 사용한다.
 
-브라우저의 `GET /api/workspace`는 `X-Teamspace-Board-Revision` 헤더와 `Cache-Control: no-store`를 보낸다. 조회한 32자리 16진수 버전을 `?teamBoardSince=…`로 다시 보내면 같은 버전에는 본문 없는 `204`를, 바뀐 버전에는 `200`과 최신 워크스페이스를 돌려준다. 업무·프로젝트·사용자·워크플로·업무 양식·업무 순서·GitLab 연결·선후행과 업무–문서 링크의 저장이 버전을 갱신한다. 서버 재시작과 물리 복원은 SQLite에 저장된 버전을 사용한다. 수동으로 전체 워크스페이스를 다시 읽을 때는 쿼리를 생략한다.
+브라우저의 `GET /api/workspace`는 `X-Donefac-Board-Revision` 헤더와 `Cache-Control: no-store`를 보낸다. 조회한 32자리 16진수 버전을 `?teamBoardSince=…`로 다시 보내면 같은 버전에는 본문 없는 `204`를, 바뀐 버전에는 `200`과 최신 워크스페이스를 돌려준다. 업무·프로젝트·사용자·워크플로·업무 양식·업무 순서·GitLab 연결·선후행과 업무–문서 링크의 저장이 버전을 갱신한다. 서버 재시작과 물리 복원은 SQLite에 저장된 버전을 사용한다. 수동으로 전체 워크스페이스를 다시 읽을 때는 쿼리를 생략한다.
 
 팀 보드의 화면 주소 `#/<projectId>/teamboard`에는 `boardGitlab` 조건을 더할 수 있다. 전체 프로젝트 간트의 주소는 같은 값의 `ganttGitlab` 조건을 받는다. 허용 값은 `open_merge_request`, `merge_blocked`, `failed_pipeline`, `running_pipeline`, `manual_pipeline`, `no_activity`다. 프로젝트·담당자·검색 조건과 함께 현재 워크스페이스를 판정한다. 값을 생략하거나 알 수 없는 값을 보내면 GitLab 조건 없이 업무를 표시하며, 주소에서 알 수 없는 값을 정리한다.
 
@@ -427,7 +427,7 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 브라우저의 `PATCH /api/projects/:projectId/workflow`에서 전이 항목에 `requireResolvedBlockers: true`를 보내면 해당 경로와 업무 유형에 규칙을 적용한다. `false`는 규칙을 해제하고, 생략하면 같은 출발·도착 경로에 저장된 설정을 유지한다. 기본값은 꺼짐이다. 형식 81의 자체 백업에 저장한다.
 
-실제 상태 변경은 대상 티켓으로 들어오는 직접 차단 관계를 확인한다. Teamspace에서 만든 관계와 이관 원본에서 연결 대상과 방향을 확인한 Jira 관계가 적용된다. 원인 티켓이 있는 프로젝트의 상태 분류가 완료 또는 취소일 때 해결된 것으로 본다. 열린 원인이 있으면 일반 업무 저장과 보드 이동은 `422` 및 `details.reason: "open_issue_blockers"`를 반환한다. 범위 제한 쓰기 키에도 같은 규칙을 적용하며 응답은 원인 티켓의 식별자나 제목을 포함하지 않는다. 일괄 편집은 미리보기와 적용 시점에 다시 확인한다. GitLab은 미리보기와 실제 이벤트에 차단 사유를 기록하며 다음 새 이벤트부터 현재 상태를 평가한다. 워크플로의 상태 일괄 이관은 관리용 상태 매핑 규칙을 사용한다.
+실제 상태 변경은 대상 티켓으로 들어오는 직접 차단 관계를 확인한다. Donefac에서 만든 관계와 이관 원본에서 연결 대상과 방향을 확인한 Jira 관계가 적용된다. 원인 티켓이 있는 프로젝트의 상태 분류가 완료 또는 취소일 때 해결된 것으로 본다. 열린 원인이 있으면 일반 업무 저장과 보드 이동은 `422` 및 `details.reason: "open_issue_blockers"`를 반환한다. 범위 제한 쓰기 키에도 같은 규칙을 적용하며 응답은 원인 티켓의 식별자나 제목을 포함하지 않는다. 일괄 편집은 미리보기와 적용 시점에 다시 확인한다. GitLab은 미리보기와 실제 이벤트에 차단 사유를 기록하며 다음 새 이벤트부터 현재 상태를 평가한다. 워크플로의 상태 일괄 이관은 관리용 상태 매핑 규칙을 사용한다.
 
 ## 상태 변경의 하위 업무 검증
 
@@ -483,7 +483,7 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 ## 공동 편집 블록 순서
 
-공동 편집 프로토콜 18은 블록의 Yjs 본문 식별자를 유지하며 순서 기록을 같은 업데이트로 보관한다. `DocPage.content`와 검색용 본문은 적용한 순서대로 저장한다. 이력과 Teamspace 백업의 협업 상태를 복원할 때 같은 순서를 검사한다. 저장된 형식 17의 본문과 편집 세대는 그대로 이어서 사용한다.
+공동 편집 프로토콜 18은 블록의 Yjs 본문 식별자를 유지하며 순서 기록을 같은 업데이트로 보관한다. `DocPage.content`와 검색용 본문은 적용한 순서대로 저장한다. 이력과 Donefac 백업의 협업 상태를 복원할 때 같은 순서를 검사한다. 저장된 형식 17의 본문과 편집 세대는 그대로 이어서 사용한다.
 
 ## 공동 편집 복구 사본
 
@@ -521,17 +521,17 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 브라우저의 `GET /api/document-exports/markdown.zip`에 `source=saved` 또는 `source=published`와 범위를 지정한다. `scope=subtree&documentId=<ID>`는 문서와 하위 트리, `scope=space&projectId=<ID>`는 해당 프로젝트, `scope=space`는 팀 공통 공간이다. `source=published`는 승인된 최신 발행본을 사용한다.
 
-응답은 `application/zip`이며 `Content-Disposition`에 다운로드 파일명을 제공한다. ZIP의 `README.md`는 문서 트리이고 `manifest.json`의 `format`은 `teamspace-document-markdown`, `schemaVersion`은 `1`이다. `documents`에 상대 파일 경로·저장 버전·`parentId`와 `originalParentId`·발행 정보를 기록한다. 발행본만 내보낼 때 `parentId`는 패키지에 있는 가장 가까운 상위 문서다. `attachments`는 소유 문서와 파일 버전 ID·이름·크기·SHA-256·경로를 기록하고 `diagnostics`는 오프라인으로 연결할 수 없는 참조와 동적 블록을 보여준다.
+응답은 `application/zip`이며 `Content-Disposition`에 다운로드 파일명을 제공한다. ZIP의 `README.md`는 문서 트리이고 `manifest.json`의 `format`은 `donefac-document-markdown`, `schemaVersion`은 `1`이다. `documents`에 상대 파일 경로·저장 버전·`parentId`와 `originalParentId`·발행 정보를 기록한다. 발행본만 내보낼 때 `parentId`는 패키지에 있는 가장 가까운 상위 문서다. `attachments`는 소유 문서와 파일 버전 ID·이름·크기·SHA-256·경로를 기록하고 `diagnostics`는 오프라인으로 연결할 수 없는 참조와 동적 블록을 보여준다.
 
 최신 저장본은 현재 첨부와 본문에서 직접 참조한 과거 파일 버전을 모두 담는다. 승인·발행본은 그 본문이 직접 참조한 파일만 담는다. 같은 서비스 주소의 문서·절·파일 링크는 패키지 상대 경로로 바꾸고, 다른 주소로 저장된 링크는 진단에 기록한다. 문서 500개, 첨부 1,500개, 압축 전후 각각 64MiB까지 처리한다. 조건이 올바르지 않으면 `400`, 해당 문서나 공간 또는 내보낼 저장본이 없으면 `404`, 한도를 넘으면 `413`, 대상 파일을 읽거나 무결성을 확인할 수 없으면 `503`과 JSON 오류를 반환한다.
 
 ## 문서 트리 Markdown ZIP 가져오기
 
-브라우저의 `POST /api/document-markdown-import/preview?projectId=<ID>&parentId=<ID>`에 `application/octet-stream` ZIP 바이트를 보낸다. `projectId`의 빈 값은 팀 공통 공간이며 `parentId`의 빈 값은 최상위다. 현재 작업자 기준으로 `{id,format,projectId,parentId,expiresAt,pages,warnings,attachmentCount}`를 반환한다. `format`은 `teamspace`, `docmost`, `markdown` 중 하나다. `pages`에는 `{path,parentPath,title,attachmentCount}`, `warnings`에는 `{path,message}`가 들어간다.
+브라우저의 `POST /api/document-markdown-import/preview?projectId=<ID>&parentId=<ID>`에 `application/octet-stream` ZIP 바이트를 보낸다. `projectId`의 빈 값은 팀 공통 공간이며 `parentId`의 빈 값은 최상위다. 현재 작업자 기준으로 `{id,format,projectId,parentId,expiresAt,pages,warnings,attachmentCount}`를 반환한다. `format`은 `donefac`, `docmost`, `markdown` 중 하나다. `pages`에는 `{path,parentPath,title,attachmentCount}`, `warnings`에는 `{path,message}`가 들어간다.
 
 `POST /api/document-markdown-import/apply?previewId=<ID>`에 같은 작업자와 ZIP 바이트를 보낸다. 미리보기는 30분 동안 적용할 수 있다. 대상 공간과 상위 문서가 미리보기 이후 바뀌었거나 파일이 다르면 `409`로 새 미리보기를 요청한다. 성공하면 `{documentIds,rootIds,attachmentCount,duplicate}`를 `201`로 반환한다. 7일 안에 같은 요청을 다시 보내면 같은 문서 ID와 `duplicate: true`를 `200`으로 돌려준다. 문서·첫 이력·활동·첨부·적용 기록을 함께 저장하며 자체 JSON 복원 시 적용 기록을 초기화한다.
 
-압축 전후 각각 64MiB, UTF-8 `.md` 한 파일당 512KiB, 변환한 본문 합계 64MiB, 문서 500개, 첨부 후보 1,500개와 파일당 20MiB까지 처리한다. Teamspace ZIP은 명세의 계층·첨부 소유권·크기·SHA-256을 확인한다. Docmost ZIP은 메타데이터가 지정한 계층과 순서·아이콘을 사용한다. 일반 ZIP은 상위 문서 이름과 같은 폴더, 폴더의 `index.md` 또는 `README.md`에서 상위 문서를 확인한다. Docmost·일반 ZIP은 본문 경로로 확인한 파일을 가져오며 나머지 파일은 검토 안내에 표시한다.
+압축 전후 각각 64MiB, UTF-8 `.md` 한 파일당 512KiB, 변환한 본문 합계 64MiB, 문서 500개, 첨부 후보 1,500개와 파일당 20MiB까지 처리한다. Donefac ZIP은 명세의 계층·첨부 소유권·크기·SHA-256을 확인한다. Docmost ZIP은 메타데이터가 지정한 계층과 순서·아이콘을 사용한다. 일반 ZIP은 상위 문서 이름과 같은 폴더, 폴더의 `index.md` 또는 `README.md`에서 상위 문서를 확인한다. Docmost·일반 ZIP은 본문 경로로 확인한 파일을 가져오며 나머지 파일은 검토 안내에 표시한다.
 
 문서·절, 첨부 상대 링크는 새 주소로 연결한다. 단독 Markdown 이미지가 ZIP 안의 PNG·JPEG·GIF·WebP를 가리키면 이미지 블록으로 가져온다. 작업자를 각 새 초안의 작성자로 기록한다. 구조나 크기 오류가 있으면 전체 적용을 보류한다.
 
@@ -700,9 +700,9 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 ## Jira 필터를 공유 보기로 옮기기
 
-`POST /api/views/jira/preview`에 `{projectId,jql}`을 보낸다. JQL에 프로젝트 조건이 없으면 선택한 Teamspace 프로젝트에서 검토한다. 원래 Jira 프로젝트 키와 ID는 이관 기록으로 소속이 확인될 때 사용할 수 있다. 현재 프로젝트의 키와 이름도 사용할 수 있다. 같은 이름의 상태·유형·팀원이 서로 다른 대상과 일치하거나 원본 프로젝트가 여러 개 합쳐진 경우에는 대응할 범위를 확인하도록 오류를 표시한다.
+`POST /api/views/jira/preview`에 `{projectId,jql}`을 보낸다. JQL에 프로젝트 조건이 없으면 선택한 Donefac 프로젝트에서 검토한다. 원래 Jira 프로젝트 키와 ID는 이관 기록으로 소속이 확인될 때 사용할 수 있다. 현재 프로젝트의 키와 이름도 사용할 수 있다. 같은 이름의 상태·유형·팀원이 서로 다른 대상과 일치하거나 원본 프로젝트가 여러 개 합쳐진 경우에는 대응할 범위를 확인하도록 오류를 표시한다.
 
-선택한 Teamspace 프로젝트가 Jira 원본 프로젝트 하나와 연결되면 현재 프로젝트의 이관 업무와 적용 영수증에서 원래 상태·업무 유형의 이름과 ID, 담당자·요청자 계정의 사용자 이름·사용자 키·계정 ID·확인된 이메일을 찾는다. Jira에서 담당자나 요청자로 확인한 같은 계정은 두 조건 모두에 사용할 수 있다. 여러 원본 값이 하나의 Teamspace 값에 합쳐졌거나, 하나의 검색값이 서로 다른 현재 값에 해당하면 변환을 보류한다. 미리보기에는 현재 이름을 표시하고, 저장한 보기에는 Teamspace ID를 사용한다. [Atlassian Jira Data Center JQL 필드](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html)
+선택한 Donefac 프로젝트가 Jira 원본 프로젝트 하나와 연결되면 현재 프로젝트의 이관 업무와 적용 영수증에서 원래 상태·업무 유형의 이름과 ID, 담당자·요청자 계정의 사용자 이름·사용자 키·계정 ID·확인된 이메일을 찾는다. Jira에서 담당자나 요청자로 확인한 같은 계정은 두 조건 모두에 사용할 수 있다. 여러 원본 값이 하나의 Donefac 값에 합쳐졌거나, 하나의 검색값이 서로 다른 현재 값에 해당하면 변환을 보류한다. 미리보기에는 현재 이름을 표시하고, 저장한 보기에는 Donefac ID를 사용한다. [Atlassian Jira Data Center JQL 필드](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html)
 
 최대 4,000자의 검색식에서 `AND`와 괄호를 사용할 수 있다. `project`·`status`·`issuetype`·`assignee`·`reporter`는 `=`로 비교하고, 담당자와 요청자는 `IS EMPTY`로 미지정을 확인한다. `assignee = currentUser()`와 `reporter = currentUser()`는 **현재 사용자** 조건으로 옮긴다. 미리보기는 요청한 작업자의 업무로 계산하며, 저장한 보기는 열람할 때의 작업자로 다시 계산한다. `status IN (...)`이나 상태 조건만 이어진 `OR`은 여러 상태를 고른 보기로 변환한다. `AND`로 연결된 상태 조건은 서로 겹치는 상태를 선택한다. 현재 상태를 확인할 수 없거나 겹치는 값이 없으면 오류를 표시한다. 라벨에는 `=`, `IN`, `!=`, `NOT IN`, `IS EMPTY`, `IS NOT EMPTY`를 사용할 수 있다. `labels !=`와 `labels NOT IN`은 라벨이 있는 업무에서 비교한다. 서로 다른 필드를 잇는 `OR`, 이 범위 밖의 함수와 연산자, 원본 이력과 텍스트 검색은 변환 오류로 표시한다. [JQL 필드](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html) · [Atlassian JQL 연산자](https://confluence.atlassian.com/jiracoreserver/advanced-searching-operators-reference-939937721.html) · [Atlassian 빈 값 비교 안내](https://support.atlassian.com/jira/kb/why-my-jql-search-with-not-in-or-not-equals-operators-has-issues-missing/)
 
@@ -710,13 +710,13 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 `startOfDay()`와 `endOfDay()`는 서울의 날짜 기준으로 옮긴다. 인수는 생략하거나 따옴표로 감싼 정수 일 수를 사용한다. `due < startOfDay()`는 `{mode:'due_relative',toDays:-1}`, `due >= startOfDay() AND due < endOfDay("+2d")`는 `{mode:'due_relative',fromDays:0,toDays:2}`다. 숫자 경계는 −3,650~3,650 사이로 양 끝을 포함한다. `from`·`to`를 함께 저장하면 고정 날짜 범위와 상대 범위를 모두 적용한다. 자정을 넘긴 미리보기는 다시 검토해야 한다. 주·월·연 단위 함수와 시간 단위 인수, `= endOfDay()`는 변환을 보류한다. 이 조건을 포함한 자체 백업은 형식 125를 사용한다. [Atlassian JQL 날짜 함수](https://confluence.atlassian.com/jirasoftwareserver106/advanced-searching-functions-reference-1573490874.html)
 
-`priority`는 `=`와 `IN`을 지원하며 `AND`의 교집합을 원본 값에서 먼저 계산한다. 이관 기록으로 한 Jira 프로젝트를 확인하면 같은 패키지의 옵션과 업무에 남은 ID·이름을 대조한다. CSV에 이름만 있으면 확인한 같은 이름의 범위를 사용할 수 있다. 숫자 ID는 해당 ID가 확인된 원본 값을 선택한다. 원본 이름이 여러 ID를 가리키거나 최종 조건이 같은 Teamspace 우선순위에 대응하는 원본 값 일부만 선택하면 변환 오류로 표시한다. 이관한 업무의 현재 값이 확인된 원본 매핑에서 어긋나거나 확인할 근거가 없는 업무가 선택한 우선순위에 있으면 저장을 보류한다. Jira 이관 연결이 없는 프로젝트에서는 Teamspace의 우선순위 코드와 한글 이름을 사용한다. 저장한 `filters.priorities`는 이후 새 티켓도 현재 값으로 조회한다. [Atlassian JQL 우선순위](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Priority)
+`priority`는 `=`와 `IN`을 지원하며 `AND`의 교집합을 원본 값에서 먼저 계산한다. 이관 기록으로 한 Jira 프로젝트를 확인하면 같은 패키지의 옵션과 업무에 남은 ID·이름을 대조한다. CSV에 이름만 있으면 확인한 같은 이름의 범위를 사용할 수 있다. 숫자 ID는 해당 ID가 확인된 원본 값을 선택한다. 원본 이름이 여러 ID를 가리키거나 최종 조건이 같은 Donefac 우선순위에 대응하는 원본 값 일부만 선택하면 변환 오류로 표시한다. 이관한 업무의 현재 값이 확인된 원본 매핑에서 어긋나거나 확인할 근거가 없는 업무가 선택한 우선순위에 있으면 저장을 보류한다. Jira 이관 연결이 없는 프로젝트에서는 Donefac의 우선순위 코드와 한글 이름을 사용한다. 저장한 `filters.priorities`는 이후 새 티켓도 현재 값으로 조회한다. [Atlassian JQL 우선순위](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Priority)
 
 `component`는 원본 Jira 프로젝트와 매핑을 확인한 뒤 `filters.fieldFilter`로 변환한다. 원본 이름이나 따옴표 없는 숫자 ID로 `=`, `IN`, `!=`, `NOT IN`을 사용하고, `IS EMPTY`와 `IS NOT EMPTY`로 값 유무를 확인한다. 제외 비교는 값이 있는 업무에 적용한다. `AND`와 컴포넌트끼리의 `OR`는 최대 8개 규칙을 담은 하나의 `all` 또는 `any` 그룹으로 표현할 수 있는 경우 변환한다. 원본에 이름만 있는 CSV는 확인한 이름으로 조회할 수 있다. 이관 근거가 불충분해 값 유무나 제외를 판단할 수 없거나 원본 값이 여러 현재 선택지로 연결되면 오류를 표시한다. [Atlassian JQL 컴포넌트](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Component)
 
 `fixVersion`에는 `=`, `IN`, `IS EMPTY`, `IS NOT EMPTY`를 사용할 수 있다. `NULL`은 `EMPTY`와 같다. 원래 Jira 프로젝트에 속한 이름 또는 따옴표 없는 숫자 ID를 현재 릴리스 ID와 대조한다. 대표 릴리스 하나로 표현할 때 활성 이관 업무의 원본 수정 버전 집합과 같은 결과가 나오는지 확인한다. 복수 버전 중 누락된 버전 때문에 후보가 달라지거나 원본 필드가 누락된 경우 변환을 보류한다. 명확한 단일 조건과 미지정은 `filters.planning.releaseId`에 넣는다. 복수 조건은 `releaseFilter:{kind:'any',ids:[...]}`, 지정됨은 `releaseFilter:{kind:'assigned'}`로 저장한다. 복수는 같은 프로젝트의 서로 다른 릴리스 ID 2~40개를 지정하며 `releaseId`와 함께 보내면 오류다. 공유 보기에서 사용하는 릴리스는 삭제 전에 보기에서 해제한다. 새 조건을 담은 백업은 형식 126을 사용한다. [Atlassian Jira 수정 버전](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Fixversion)
 
-미리보기는 적용할 `filters`, 읽을 수 있는 `criteria`, 입력한 `orderBy`, 조건에 맞는 업무 `total`과 처음 20개 `issues`, 검토 `revision`을 반환한다. `due`·`dueDate`, `created`·`createdDate`, `updated`·`updatedDate`에 `ASC` 또는 `DESC`를 명시하고 정렬 필드가 서로 다르면 같은 순서의 `sort`를 반환한다. Teamspace의 현재 날짜를 사용하고 비어 있는 날짜는 뒤에 표시한다. `Rank`, `priority`, 방향이 생략된 기준이나 지원하지 않는 기준이 섞인 정렬은 `requiresProjectOrderAcceptance: true`를 반환한다. [Atlassian JQL 정렬](https://support.atlassian.com/jira-software-cloud/docs/jql-keywords/) · [Atlassian Jira 우선순위 순서](https://confluence.atlassian.com/adminjiraserver/associating-priorities-with-projects-939514001.html)
+미리보기는 적용할 `filters`, 읽을 수 있는 `criteria`, 입력한 `orderBy`, 조건에 맞는 업무 `total`과 처음 20개 `issues`, 검토 `revision`을 반환한다. `due`·`dueDate`, `created`·`createdDate`, `updated`·`updatedDate`에 `ASC` 또는 `DESC`를 명시하고 정렬 필드가 서로 다르면 같은 순서의 `sort`를 반환한다. Donefac의 현재 날짜를 사용하고 비어 있는 날짜는 뒤에 표시한다. `Rank`, `priority`, 방향이 생략된 기준이나 지원하지 않는 기준이 섞인 정렬은 `requiresProjectOrderAcceptance: true`를 반환한다. [Atlassian JQL 정렬](https://support.atlassian.com/jira-software-cloud/docs/jql-keywords/) · [Atlassian Jira 우선순위 순서](https://confluence.atlassian.com/adminjiraserver/associating-priorities-with-projects-939514001.html)
 
 `POST /api/views/jira/import`에 `{projectId,jql,name,layout,revision,acceptProjectOrder}`를 보낸다. `layout`은 `list` 또는 `board`다. `requiresProjectOrderAcceptance`가 있으면 `acceptProjectOrder:true`로 프로젝트 순서 적용을 확인한다. 변환 결과나 검토 업무가 바뀌면 `409`와 `details.code: 'stale_jira_view_preview'`를 반환한다. 성공 시 일반 공유 보기와 같은 형식으로 `filters`와 적용할 `sort`를 저장한다.
 
@@ -806,7 +806,7 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 수동 동기화는 조회를 완료한 저장소를 반영하고 `repositories`에 저장소별 결과를 돌려준다. 성공과 실패가 섞이면 `partial: true`가 표시된다. 요청한 저장소가 모두 실패하면 새 링크를 저장하지 않고 502 응답에 저장소별 실패 사유를 전달한다. `{repositoryIds,expectedVersion,includeHistory?}`로 현재 설정에 있는 저장소만 골라 다시 시도할 수 있다. 그 사이 연결 설정이 변경되면 선택 재시도를 거절한다.
 
-`sync-status`는 Teamspace에 저장된 `settingsVersion`과 `{repositoryId,activity,deployments}` 배열을 `repositories`로 반환한다. 각 종류의 결과가 아직 없으면 `null`이다. 기록이 있으면 이미 완료된 시도 중 가장 최근에 시작한 시도의 `completedAt`과 마지막 성공 시각 `lastSuccessfulAt`이 들어간다. 이전 성공 기록이 없으면 `lastSuccessfulAt`은 `null`이다. `activity`는 `includeHistory`와 저장소별 `result`, `deployments`는 `status`와 성공 통계 `result` 또는 오류 `error`를 담는다. 오류 요약에는 단계, 확인된 HTTP 상태와 고정 메시지만 들어간다. GitLab 주소나 읽기 토큰이 바뀌면 두 종류의 요약을 초기화한다. 저장소 제거는 해당 저장소의 두 요약, Jira 매핑 변경은 해당 저장소의 활동 요약에 적용한다. 물리 백업은 요약을 보존하며 자체 JSON 가져오기는 초기화한다.
+`sync-status`는 Donefac에 저장된 `settingsVersion`과 `{repositoryId,activity,deployments}` 배열을 `repositories`로 반환한다. 각 종류의 결과가 아직 없으면 `null`이다. 기록이 있으면 이미 완료된 시도 중 가장 최근에 시작한 시도의 `completedAt`과 마지막 성공 시각 `lastSuccessfulAt`이 들어간다. 이전 성공 기록이 없으면 `lastSuccessfulAt`은 `null`이다. `activity`는 `includeHistory`와 저장소별 `result`, `deployments`는 `status`와 성공 통계 `result` 또는 오류 `error`를 담는다. 오류 요약에는 단계, 확인된 HTTP 상태와 고정 메시지만 들어간다. GitLab 주소나 읽기 토큰이 바뀌면 두 종류의 요약을 초기화한다. 저장소 제거는 해당 저장소의 두 요약, Jira 매핑 변경은 해당 저장소의 활동 요약에 적용한다. 물리 백업은 요약을 보존하며 자체 JSON 가져오기는 초기화한다.
 
 미리보기와 동기화는 GitLab 저장소마다 최근 MR 최대 1,000개와 최근 파이프라인 50개를 읽는다. 파이프라인 기록의 직접 티켓 키를 적용한다. MR의 키를 사용하려면 MR의 소스와 대상 저장소가 모두 파이프라인의 저장소로 확인되고 브랜치와 전체 head SHA가 각각 일치해야 한다. 인증된 파이프라인 웹훅도 같은 기준으로 이미 연결된 MR을 대조한다. 조회당 10초와 디코딩된 응답 16MiB 한도가 적용된다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/), [GitLab 파이프라인 조회](https://docs.gitlab.com/api/pipelines/)
 
@@ -838,13 +838,13 @@ GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing To
 
 ### GitLab 프로젝트 웹훅 점검과 등록
 
-팀 접속 모드의 `TEAMSPACE_PILOT_ORIGIN`으로 검증한 HTTPS 주소에서 수신 경로 `/api/integrations/gitlab/webhook`을 구성한다. 설정 조회의 `webhookReceiverUrl`로 확인한다. 점검과 등록에는 저장된 GitLab 주소와 저장소를 사용한다.
+팀 접속 모드의 `DONEFAC_PILOT_ORIGIN`으로 검증한 HTTPS 주소에서 수신 경로 `/api/integrations/gitlab/webhook`을 구성한다. 설정 조회의 `webhookReceiverUrl`로 확인한다. 점검과 등록에는 저장된 GitLab 주소와 저장소를 사용한다.
 
 점검은 `{expectedVersion,repositoryId,managementToken?}`을 받는다. 관리 토큰을 생략하면 저장한 읽기 토큰으로 조회한다. 페이지당 100개씩 최대 10페이지를 읽고, 다음 페이지나 응답을 검증할 수 없으면 누락을 판정하지 않는다. 응답은 `settingsVersion`, `repositoryId`, `receiverUrl`, `authMode`, `state`와 같은 수신 경로의 `hooks` ID·설정 여부를 담는다. 필요 설정이 갖춰지면 `configured`, 주소의 세부 경로나 이벤트·SSL·브랜치·전송 조건을 검토해야 하면 `review`, 누락이 확인되면 `missing`이다. 기존 등록의 인증 성공 여부는 `webhook-status`에서 확인한다. [GitLab 프로젝트 웹훅 API](https://docs.gitlab.com/api/project_webhooks/) · [GitLab API 페이지 처리](https://docs.gitlab.com/api/rest/#pagination)
 
 등록은 `{expectedVersion,repositoryId,reviewId,managementToken,webhookCredential}`을 받는다. `reviewId`는 인증 값이 설정된 누락 저장소의 점검 결과에 표시되며, 같은 작업자·저장소·연결 버전으로 10분간 유효하다. 관리 토큰은 저장소의 Maintainer·Owner 권한 또는 관리자 권한과 `api` 범위가 필요하다. 다시 입력한 웹훅 인증 값을 저장한 값과 대조하며, Signing Token이 설정된 경우 기능 플래그 없이 서명 등록을 지원하는 GitLab 19.1 이상인지 먼저 확인한다. 등록용 자격 증명은 저장하지 않는다. [GitLab 토큰 범위](https://docs.gitlab.com/security/tokens/access_token_scopes/) · [GitLab 프로젝트 웹훅 API](https://docs.gitlab.com/api/project_webhooks/) · [GitLab 버전 조회](https://docs.gitlab.com/api/metadata/)
 
-등록 직전 목록과 연결 버전을 확인한다. 같은 경로의 훅이 있으면 확인 결과만 반환한다. 새 훅의 Push·Merge Request·Pipeline·Deployment와 SSL 검증을 켜고 `created`로 반환한다. 기존 훅의 `deploymentEvents`가 `false`이거나 확인할 수 없으면 `review`가 표시된다. 쓰기 응답을 확인할 수 없으면 `unknown`으로 반환하고 이후에는 목록을 조회해 확인한다. 재시작 후에도 미확인 시도를 기억한다. 목록에 계속 나타나지 않으면 GitLab에서 해당 저장소 설정을 확인한다. 제출 이후 Teamspace 설정이 바뀌면 `configurationChanged`를 반환한다.
+등록 직전 목록과 연결 버전을 확인한다. 같은 경로의 훅이 있으면 확인 결과만 반환한다. 새 훅의 Push·Merge Request·Pipeline·Deployment와 SSL 검증을 켜고 `created`로 반환한다. 기존 훅의 `deploymentEvents`가 `false`이거나 확인할 수 없으면 `review`가 표시된다. 쓰기 응답을 확인할 수 없으면 `unknown`으로 반환하고 이후에는 목록을 조회해 확인한다. 재시작 후에도 미확인 시도를 기억한다. 목록에 계속 나타나지 않으면 GitLab에서 해당 저장소 설정을 확인한다. 제출 이후 Donefac 설정이 바뀌면 `configurationChanged`를 반환한다.
 
 최근 전송 조회는 `{expectedVersion,repositoryId,hookId,managementToken?}`을 받는다. 현재 HTTPS 수신 주소에 정확히 일치하는 저장소의 훅을 다시 확인한 뒤 GitLab 17.3 이상에서 제공하는 전송 이력의 첫 페이지를 최대 20건 읽는다. 응답의 `attempts`는 전송 ID, 이벤트 유형, HTTP 상태 `status`, 전송 시각 `sentAt`과 소요 밀리초 `durationMs`를 담는다. HTTP 응답이 없으면 상태는 `null`이며, GitLab이 시각·소요 시간을 제공하지 않으면 해당 값도 `null`이다. 원래 등록 주소가 다른 전송이나 해석할 수 없는 행이 있거나 다음 페이지가 있으면 `partial`을 표시한다. `localReceipt`는 해당 저장소 전체의 최근 인증 수신 요약이다. [GitLab 프로젝트 웹훅 전송 이력 API](https://docs.gitlab.com/api/project_webhooks/#list-project-webhook-events)
 
@@ -876,7 +876,7 @@ GitLab 인스턴스·저장소·이벤트·수신 주소 범위에서 `webhook-i
 
 ### 이관한 Jira 키로 연결
 
-`jiraRoutes`는 `{repositoryId, projectId, jiraInstanceKey}`의 배열이다. 허용한 GitLab 저장소당 Jira 원본 하나와 대상 Teamspace 프로젝트 하나를 지정한다. PATCH와 미리보기에서 전체 배열을 보내며 빈 배열로 매핑을 해제한다. 필드를 생략하면 같은 주소와 허용 저장소의 저장된 매핑을 사용한다. 처음 설정하는 저장소는 현재 Teamspace 키로 연결한다.
+`jiraRoutes`는 `{repositoryId, projectId, jiraInstanceKey}`의 배열이다. 허용한 GitLab 저장소당 Jira 원본 하나와 대상 Donefac 프로젝트 하나를 지정한다. PATCH와 미리보기에서 전체 배열을 보내며 빈 배열로 매핑을 해제한다. 필드를 생략하면 같은 주소와 허용 저장소의 저장된 매핑을 사용한다. 처음 설정하는 저장소는 현재 Donefac 키로 연결한다.
 
 매핑한 저장소는 지정한 프로젝트의 현재 키와 지정한 Jira 원본의 이관 키를 대소문자 구분 없이 찾는다. 지정한 프로젝트에서 이동한 이력이 있는 활성 티켓은 그 프로젝트에 있을 때의 키와 현재 키로 연결한다. 현재 프로젝트만 같은 다른 티켓은 지정한 프로젝트의 이동 이력이 있어야 이 범위에 들어간다. Jira 키를 사용하면 연결 후보와 저장 링크에 `originalJiraKey`를 기록한다. 한 객체가 동일 티켓의 현재 키와 원래 키를 함께 포함하면 링크를 한 건 저장한다. 서로 다른 티켓을 가리키는 키는 보류하고 미리보기의 저장소별 `ambiguousKeys`에 최대 20개를 표시한다.
 
@@ -974,7 +974,7 @@ CI 작업 조회와 같은 업무·저장소·파이프라인 검증 및 상태 
 
 브라우저의 `POST /api/issues/:id/gitlab-branch/preview`에 `{expectedSettingsVersion,repositoryId,branch,ref?,accessToken?}`을 보낸다. 저장한 GitLab 설정의 버전과 저장소 ID를 사용한다. `ref`를 생략하면 기본 브랜치를 사용하며 브랜치 이름이나 전체 커밋 SHA를 지정할 수 있다. 조회 토큰을 별도로 입력하면 해당 요청에서만 사용한다. 같은 이름의 브랜치가 아직 없으면 응답의 `state`는 `ready`이고 `target`, `previewId`, `expiresAt`을 반환한다. `target`에는 저장소 ID·경로, 브랜치 이름, 기준 참조와 고정 SHA, 확인한 GitLab 주소가 담긴다. 같은 이름이 이미 있으면 `existing`과 현재 SHA를 반환한다. [GitLab Branches API](https://docs.gitlab.com/api/branches/)
 
-`POST /api/issues/:id/gitlab-branch/apply`에 `{previewId,writeToken}`을 보낸다. 같은 작업자와 티켓의 위치, 설정, 브랜치 이름을 확인하고 고정한 SHA에서 생성한다. 입력한 API 쓰기 토큰은 해당 요청에서만 사용한다. 생성하고 현재 티켓에 연결한 첫 결과는 `201` 및 `{state: 'created',target,link,observedSha}`다. 같은 요청의 확인 결과는 `200`이며 `found`와 연결을 반환한다. 외부 생성 결과가 불명확하면 `pending`, GitLab 생성 후 Teamspace 연결이 보류되면 `link_needed`를 반환한다.
+`POST /api/issues/:id/gitlab-branch/apply`에 `{previewId,writeToken}`을 보낸다. 같은 작업자와 티켓의 위치, 설정, 브랜치 이름을 확인하고 고정한 SHA에서 생성한다. 입력한 API 쓰기 토큰은 해당 요청에서만 사용한다. 생성하고 현재 티켓에 연결한 첫 결과는 `201` 및 `{state: 'created',target,link,observedSha}`다. 같은 요청의 확인 결과는 `200`이며 `found`와 연결을 반환한다. 외부 생성 결과가 불명확하면 `pending`, GitLab 생성 후 Donefac 연결이 보류되면 `link_needed`를 반환한다.
 
 `POST /api/issues/:id/gitlab-branch/reconcile`에 `{expectedSettingsVersion,repositoryId,branch,accessToken?}`을 보낸다. 기록된 시도와 GitLab의 현재 이름·SHA를 조회한다. 검토한 SHA와 일치하면 연결하고 `found`를 반환한다. 접속이 끊겼을 때도 생성 시도를 물리 DB에서 찾고 조회로만 확인한다. 미확인 시도에서 다른 SHA는 `conflict`, 아직 GitLab에서 찾을 수 없으면 `pending`이다. 시도 자체가 없으면 `404`와 `attempt_missing`을 반환하므로 다시 미리본다. 프로젝트 이동 후에도 동일한 활성 티켓 ID에서 명시적으로 연결을 확인할 수 있다. 티켓 자동 전이는 기존의 인증된 이벤트와 활성 규칙을 따른다.
 
@@ -988,7 +988,7 @@ CI 작업 조회와 같은 업무·저장소·파이프라인 검증 및 상태 
 
 응답은 `linkId`, `repositoryId`, `sourceBranch`, `sourceSha`, `defaultBranch`, `targetBranch`, `targetSha`, `openMergeRequests`, `hasMore`, `newMergeRequestUrl`, `suggestedTitle`, `checkedAt`, `branchRevision`을 반환한다. 열린 MR마다 전역 `id`, 저장소 안의 `iid`, `title`, `targetBranch`, `webUrl`을 제공한다. 열린 MR이 없고 추가 페이지가 없으며 현재 커밋이 서로 다른 출발·대상 브랜치를 확인하면 `newMergeRequestUrl`에 GitLab 생성 화면 주소를 반환한다. 저장된 티켓 키와 제목은 복사용 `suggestedTitle`로 제공한다. 요청 중 연결·업무·브랜치가 바뀌면 `409`, 활성 연결·출발 브랜치·직접 입력한 대상을 찾지 못하면 `404`를 반환한다.
 
-같은 경로의 `POST`에 `{mergeRequestId,mergeRequestIid,targetBranch,branchRevision}`을 보내면 열린 MR을 티켓에 연결한다. `GET`에서 확인한 전역 ID, 저장소 내 IID, 대상 브랜치와 버전을 보낸다. 서버는 저장한 읽기 자격 증명으로 MR의 현재 상태와 양쪽 저장소·브랜치를 대조하고 Teamspace 연결과 이력을 함께 저장한다. 새 연결은 `201`, 이미 연결된 항목은 `200`으로 `GitlabLink`를 반환한다. 연결 기준이 바뀌거나 첫 연결 전에 MR의 열림 상태나 브랜치가 달라지면 다시 확인을 요구한다. [GitLab MR 단건 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request)
+같은 경로의 `POST`에 `{mergeRequestId,mergeRequestIid,targetBranch,branchRevision}`을 보내면 열린 MR을 티켓에 연결한다. `GET`에서 확인한 전역 ID, 저장소 내 IID, 대상 브랜치와 버전을 보낸다. 서버는 저장한 읽기 자격 증명으로 MR의 현재 상태와 양쪽 저장소·브랜치를 대조하고 Donefac 연결과 이력을 함께 저장한다. 새 연결은 `201`, 이미 연결된 항목은 `200`으로 `GitlabLink`를 반환한다. 연결 기준이 바뀌거나 첫 연결 전에 MR의 열림 상태나 브랜치가 달라지면 다시 확인을 요구한다. [GitLab MR 단건 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request)
 
 ### MR 병합 상태
 
@@ -1002,13 +1002,13 @@ CI 작업 조회와 같은 업무·저장소·파이프라인 검증 및 상태 
 
 `reviewerSource`는 검토자 API로 확인한 `reviewers`, MR에 포함된 배정만 확인한 `merge_request`, 두 출처 모두 확인할 수 없는 `unavailable`이다. 배정만 확인한 경우 각 검토 상태는 `unknown`이다. 승인 응답은 승인자를 최대 50명까지 담은 `approvers`와 `hasMore`를 포함한다. `required`와 `remaining`은 GitLab이 유효한 두 값을 제공할 때만 숫자다. 승인 API를 사용할 수 없으면 `approvals`는 `null`이다. [GitLab 승인 상태 API](https://docs.gitlab.com/api/merge_request_approvals/#retrieve-approval-state-for-a-merge-request)
 
-조회 전후 MR의 확인 가능한 커밋·수정 시각·상태·검토자 배정, Teamspace의 연결 설정·업무 위치·저장된 링크를 비교한다. 이 중 하나가 바뀌면 `409`로 조회를 다시 요청하게 한다. 응답은 `Cache-Control: no-store`를 적용하고 조회 결과는 열린 검토 화면에서만 사용한다.
+조회 전후 MR의 확인 가능한 커밋·수정 시각·상태·검토자 배정, Donefac의 연결 설정·업무 위치·저장된 링크를 비교한다. 이 중 하나가 바뀌면 `409`로 조회를 다시 요청하게 한다. 응답은 `Cache-Control: no-store`를 적용하고 조회 결과는 열린 검토 화면에서만 사용한다.
 
 ### 연결된 MR 최신 파이프라인
 
 브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/merge-request-pipeline`는 저장한 MR 연결의 저장소와 전역 ID·IID를 대조한 뒤 GitLab의 `head_pipeline`을 읽는다. 응답에는 MR 연결의 `linkId`, `repositoryId`, `mergeRequestIid`, `checkedAt`이 포함된다. `kind: pipeline`이면 `pipeline`에 실행 저장소 ID·파이프라인 ID·전체 SHA·상태·확인된 원본 주소·수정 시각을 반환한다. 파이프라인이 없으면 `no_pipeline`, GitLab에서 정보를 제공하지 않으면 `pipeline_unavailable`, 현재 연결에 실행 저장소가 없으면 `repository_not_connected`를 반환한다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request), [GitLab 파이프라인 조회](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline)
 
-`GET /api/issues/:id/gitlab-links/:linkId/merge-request-pipeline-jobs`는 같은 기준으로 현재 실행을 검증하고 `jobs`를 추가한다. 작업 응답의 저장소와 파이프라인 ID는 실제 실행을 가리킨다. 조회는 MR의 소스 또는 대상 중 연결에 포함된 저장소에서만 수행한다. 파이프라인 자체 SHA와 MR 소스 HEAD를 각각 확인하고, 조회 중 MR의 HEAD나 지정한 실행 또는 Teamspace 연결이 바뀌면 `409`로 다시 확인하게 한다. 두 경로는 `Cache-Control: no-store`를 적용하는 조회 경로다.
+`GET /api/issues/:id/gitlab-links/:linkId/merge-request-pipeline-jobs`는 같은 기준으로 현재 실행을 검증하고 `jobs`를 추가한다. 작업 응답의 저장소와 파이프라인 ID는 실제 실행을 가리킨다. 조회는 MR의 소스 또는 대상 중 연결에 포함된 저장소에서만 수행한다. 파이프라인 자체 SHA와 MR 소스 HEAD를 각각 확인하고, 조회 중 MR의 HEAD나 지정한 실행 또는 Donefac 연결이 바뀌면 `409`로 다시 확인하게 한다. 두 경로는 `Cache-Control: no-store`를 적용하는 조회 경로다.
 
 두 조회에서 `kind: pipeline`이면 연결 검토에 사용할 `revision`도 반환한다. `POST /api/issues/:id/gitlab-links/:linkId/merge-request-pipeline`에 `{repositoryId,pipelineId,sha,revision}`을 보내면 MR과 파이프라인을 다시 조회해 현재 티켓에 연결한다. 요청의 `repositoryId`는 실행 저장소다. 동일한 실행을 처음 연결하면 `201`, 이미 연결했으면 `200`과 저장된 `GitlabLink`를 반환한다. 검토한 MR HEAD·파이프라인 또는 로컬 연결 근거가 달라지면 `409`를 반환한다. 성공한 새 연결은 티켓에 기록되며 상태는 별도의 단건 검토와 티켓 저장으로 변경한다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request) · [GitLab 병합 결과 파이프라인](https://docs.gitlab.com/ci/pipelines/merged_results_pipelines/)
 
@@ -1020,7 +1020,7 @@ CI 작업 조회와 같은 업무·저장소·파이프라인 검증 및 상태 
 
 브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/merge-request-changed-files`는 현재 티켓의 MR 연결을 확인한 뒤 저장된 읽기 자격 증명으로 25개씩 최대 두 페이지를 요청한다. `linkId`, `repositoryId`, `mergeRequestIid`, `checkedAt`, `files`, `hasMore`를 반환한다. 파일에는 `oldPath`, `newPath`, `change`, `generated`, `diffLimited`가 들어간다. `change`는 `added`, `modified`, `renamed`, `deleted` 중 하나다. 응답 범위는 파일 경로와 상태이며 본문 변경 사항은 GitLab의 변경 화면에서 읽는다. [GitLab MR 변경 파일 API](https://docs.gitlab.com/api/merge_requests/#list-merge-request-diffs)
 
-조회 앞뒤의 MR 커밋 및 비교 범위와 Teamspace의 현재 연결을 대조한다. 도중에 바뀌면 `409`를 반환한다. `hasMore`는 조회 범위 밖에 파일이 있다는 근거가 있을 때 표시한다. 연결이 제공하는 API가 `405`나 `501`을 반환하면 `501`로 안내한다. 브라우저 응답에 `Cache-Control: no-store`를 적용한다.
+조회 앞뒤의 MR 커밋 및 비교 범위와 Donefac의 현재 연결을 대조한다. 도중에 바뀌면 `409`를 반환한다. `hasMore`는 조회 범위 밖에 파일이 있다는 근거가 있을 때 표시한다. 연결이 제공하는 API가 `405`나 `501`을 반환하면 `501`로 안내한다. 브라우저 응답에 `Cache-Control: no-store`를 적용한다.
 
 파일의 `diffAnchor`는 GitLab 변경 화면에서 해당 파일로 이동하는 경로 기반 앵커다. 선택한 MR의 현재 변경 화면을 열며 파일별 링크를 만들 때 별도 GitLab 요청을 보내지 않는다. [GitLab 파일 앵커 구현](https://gitlab.com/gitlab-org/gitlab/-/blob/master/lib/gitlab/diff/file.rb)
 
@@ -1030,7 +1030,7 @@ CI 작업 조회와 같은 업무·저장소·파이프라인 검증 및 상태 
 
 각 토론에서 표시할 수 있는 미해결 댓글 하나의 `noteId`, `author`, `excerpt`, `excerptTruncated`, `filePath`, `line`, `lineSide`를 반환한다. 발췌는 최대 300자의 평문이고 본문의 주소는 `[링크]`로 표시한다. 파일 위치와 작성자는 확인할 수 있을 때 제공한다. 개별 댓글, 시스템·내부·기밀 댓글은 조회 화면에서 제외한다. 화면에서 연결한 MR 주소에 숫자 댓글 ID를 붙여 GitLab 원문을 연다. [GitLab 댓글 주소](https://docs.gitlab.com/cli/mr/note/update/)
 
-조회 전후의 MR 변경과 Teamspace 연결 변경을 확인하고 변경이 감지되면 `409`를 반환한다. 토론 조회 권한 또는 API가 없으면 화면에 조회 불가를 표시한다. 응답은 `Cache-Control: no-store`를 적용한다.
+조회 전후의 MR 변경과 Donefac 연결 변경을 확인하고 변경이 감지되면 `409`를 반환한다. 토론 조회 권한 또는 API가 없으면 화면에 조회 불가를 표시한다. 응답은 `Cache-Control: no-store`를 적용한다.
 
 ## 상태별 담당자 자동 배정
 
@@ -1103,7 +1103,7 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 | 요청 | 동작 |
 | --- | --- |
 | `GET /api/migrations/options?packageId=…&packageId=…` | 분석 패키지의 프로젝트·작성자·상태·유형·필드 매핑과 확인한 Jira·Confluence 추가 대상 |
-| `GET /api/migrations/identity-roster` | 사용자 매핑 후보 검토에 사용할 현재 Teamspace 팀원 목록 |
+| `GET /api/migrations/identity-roster` | 사용자 매핑 후보 검토에 사용할 현재 Donefac 팀원 목록 |
 | `POST /api/migrations/mapping/export` | `{configuration}`으로 다시 사용할 수 있는 이관 매핑 JSON 반환 |
 | `POST /api/migrations/mapping/import` | `{mapping}`의 원본과 현재 워크스페이스를 대조해 `{options, configuration}` 반환 |
 | `POST /api/migrations/preview` | `configuration`으로 프로젝트 생성 또는 업무·문서 추가 계획과 보존·누락 진단 검토 |
@@ -1152,7 +1152,7 @@ Jira 설명의 ADF 텍스트에 붙은 절대 `/browse/{issueKey}` 링크는 설
 
 Jira 설명의 ADF 링크·카드, 위키 링크, 검색 결과의 렌더링 HTML에 들어 있는 Confluence 절대 주소도 검사한다. 같은 이관에서 설정한 서버·설치 경로와 페이지를 대조하고, 절이 있으면 해당 페이지의 고유한 제목이나 앵커를 추가로 확인한다. 매핑이 없거나 모호한 주소, 확인할 수 없는 절, 원본 댓글·버전을 지정한 주소는 유효한 원본 링크로 유지한다. 따로 이관한 뒤에도 저장된 Markdown 설명에 남은 일반 페이지·절 주소를 클릭해 현재 문서를 찾을 수 있다. [저장된 티켓 설명의 Confluence 주소](#저장된-티켓-설명의-confluence-주소)
 
-이관 매핑 파일의 형식은 `teamspace-migration-mapping`, 버전은 `1`, 최대 크기는 16MiB다. 파일의 `packages`에는 당시 분석 ID와 원본 제품·인스턴스 식별값·내보내기 형식·SHA-256을 저장한다. 복원 시 네 원본 속성이 일치하는 현재 분석 패키지를 찾는다. 당시 ID가 같은 원본을 가리키면 이를 사용하고, 새 ID로 다시 분석했으면 일치 항목이 하나여야 한다. 패키지·매핑·제외 항목의 ID는 현재 분석 결과로 바꾼다. `mappedUsers`에는 매핑된 팀원 ID와 공백 제거·소문자 변환한 이메일의 SHA-256을 기록한다. 현재 팀원과 유일하게 일치해야 매핑을 복원한다. 기존 프로젝트 추가 설정은 현재 확인한 대상과 연결이 일치해야 복원한다.
+이관 매핑 파일의 형식은 `donefac-migration-mapping`, 버전은 `1`, 최대 크기는 16MiB다. 파일의 `packages`에는 당시 분석 ID와 원본 제품·인스턴스 식별값·내보내기 형식·SHA-256을 저장한다. 복원 시 네 원본 속성이 일치하는 현재 분석 패키지를 찾는다. 당시 ID가 같은 원본을 가리키면 이를 사용하고, 새 ID로 다시 분석했으면 일치 항목이 하나여야 한다. 패키지·매핑·제외 항목의 ID는 현재 분석 결과로 바꾼다. `mappedUsers`에는 매핑된 팀원 ID와 공백 제거·소문자 변환한 이메일의 SHA-256을 기록한다. 현재 팀원과 유일하게 일치해야 매핑을 복원한다. 기존 프로젝트 추가 설정은 현재 확인한 대상과 연결이 일치해야 복원한다.
 
 두 브라우저 관리 경로는 파일 생성과 매핑 대조를 처리한다. 실제 이관은 복원 후 새 미리보기를 만들고 확인 항목을 검토한 뒤 적용한다. 원본 ID, 내부 주소, 대상 프로젝트명과 팀원 이메일 해시가 포함될 수 있으므로 파일은 팀 내부에서 보관한다.
 
@@ -1184,7 +1184,7 @@ Confluence 저장 본문의 승인된 이름 참조는 `×`, `±`, `°`, `²` �
 
 ### 기존 프로젝트에 새 Jira 업무 추가
 
-선택한 패키지의 업무가 같은 Jira 인스턴스와 하나의 원본 프로젝트에 속하고, 원본이 기존 Teamspace 프로젝트에 연결되어 있으면 옵션에 `appendTarget`과 현재 상태·유형·필드가 포함된다. `configuration.appendTo`에 `{projectId,statuses,issueTypes,fields}`를 설정한다. 각 매핑의 키는 옵션 ID이며 값은 대상 프로젝트의 상태·업무 유형·필드 ID다. 필드 값을 `null`로 지정하면 해당 값은 원본에 보관한다. 기존 프로젝트의 설정과 기존 티켓 데이터를 보존한다.
+선택한 패키지의 업무가 같은 Jira 인스턴스와 하나의 원본 프로젝트에 속하고, 원본이 기존 Donefac 프로젝트에 연결되어 있으면 옵션에 `appendTarget`과 현재 상태·유형·필드가 포함된다. `configuration.appendTo`에 `{projectId,statuses,issueTypes,fields}`를 설정한다. 각 매핑의 키는 옵션 ID이며 값은 대상 프로젝트의 상태·업무 유형·필드 ID다. 필드 값을 `null`로 지정하면 해당 값은 원본에 보관한다. 기존 프로젝트의 설정과 기존 티켓 데이터를 보존한다.
 
 `counts.issues`는 새 업무 수, `retainedIssues`와 `retainedRecords`는 이전 이관으로 이미 처리해 원본으로 보관하는 업무와 관련 기록 수다. 휴지통이나 영구 삭제한 업무의 원본 ID도 중복 생성 방지에 사용한다. 새 업무는 현재 연결 가능한 부모나 관계를 참조할 수 있다. 적용은 대상의 설정 버전, 다음 업무 번호와 원본 연결을 다시 확인한다. 형식 37 자체 백업은 추가 이관의 대상과 매핑을 보존한다.
 
@@ -1192,9 +1192,9 @@ Confluence 저장 본문의 승인된 이름 참조는 `×`, `±`, `°`, `²` �
 
 ### 이미 이관한 Jira 업무에 원본 변경분 반영
 
-위 설정에 `appendTo.refreshExisting: true`를 지정하면 같은 프로젝트에 연결된 기존 티켓도 검토한다. 새 패키지의 실제 수정 시각이 직전 원본 기록보다 늦을 때 제목·설명·유형·상태·우선순위·담당자·요청자·라벨·시작일·종료일·마감일·예상 작업량·계획 작업 시간·상위 업무 중 확인 가능한 값을 비교한다. 원본에서 생략한 필드나 Teamspace에서 별도로 편집한 필드는 현재 값이 유지된다. 사용자·상태·유형을 반영할 때는 검토한 매핑을 사용한다.
+위 설정에 `appendTo.refreshExisting: true`를 지정하면 같은 프로젝트에 연결된 기존 티켓도 검토한다. 새 패키지의 실제 수정 시각이 직전 원본 기록보다 늦을 때 제목·설명·유형·상태·우선순위·담당자·요청자·라벨·시작일·종료일·마감일·예상 작업량·계획 작업 시간·상위 업무 중 확인 가능한 값을 비교한다. 원본에서 생략한 필드나 Donefac에서 별도로 편집한 필드는 현재 값이 유지된다. 사용자·상태·유형을 반영할 때는 검토한 매핑을 사용한다.
 
-`preview.issueRefresh`는 Teamspace 업무 키, 원래 Jira 업무 키와 각 필드의 현재 값·원본 값·반영 여부를 보여준다. `updatedIssues`, `updatedFields`, `conflictingFields`, `skippedIssueUpdates`에서 반영·충돌·건너뛴 업무 건수를 확인한다. 한 요청은 기존 티켓 1,000개와 비교에 쓰는 데이터 64MiB까지 지원한다. 워크플로 전이와 필수 필드를 검증하고, 적용 전 티켓이 수정되면 새 미리보기가 필요하다. 새 티켓 추가와 기존 티켓 갱신은 하나의 이관으로 적용할 수 있다. 형식 39 자체 백업은 변경분 이관 설정과 필드별 비교 기준을 보존한다.
+`preview.issueRefresh`는 Donefac 업무 키, 원래 Jira 업무 키와 각 필드의 현재 값·원본 값·반영 여부를 보여준다. `updatedIssues`, `updatedFields`, `conflictingFields`, `skippedIssueUpdates`에서 반영·충돌·건너뛴 업무 건수를 확인한다. 한 요청은 기존 티켓 1,000개와 비교에 쓰는 데이터 64MiB까지 지원한다. 워크플로 전이와 필수 필드를 검증하고, 적용 전 티켓이 수정되면 새 미리보기가 필요하다. 새 티켓 추가와 기존 티켓 갱신은 하나의 이관으로 적용할 수 있다. 형식 39 자체 백업은 변경분 이관 설정과 필드별 비교 기준을 보존한다.
 
 충돌한 필드의 원본 값이 더 새로운 내보내기에 그대로 들어 있어도 현재 값과 마지막 반영 값을 다시 비교한다. 형식 98 백업은 마지막으로 반영한 기본 필드의 원본 검증값을 함께 보존한다.
 
@@ -1216,7 +1216,7 @@ Jira Software의 `Epic Link` 유형이 확인된 REST와 RSS XML, 관리자 XML�
 
 ### 이미 이관한 Jira 업무에 사용자 정의 필드 변경분 반영
 
-`appendTo.refreshCustomFields: true`를 지정하고 `appendTo.fields`에서 원본 속성을 기존 Teamspace 필드 ID에 연결한다. 기본 필드 옵션과 개별 또는 함께 적용할 수 있다. 원본 속성의 식별자와 기존 매핑을 확인한 뒤 새 값을 이전 이관 기준 및 현재 값과 비교한다. 생략한 원본 값, 팀이 수정한 값, 이관 기준이나 현재 표시 조건을 확인할 수 없는 값은 보존한다.
+`appendTo.refreshCustomFields: true`를 지정하고 `appendTo.fields`에서 원본 속성을 기존 Donefac 필드 ID에 연결한다. 기본 필드 옵션과 개별 또는 함께 적용할 수 있다. 원본 속성의 식별자와 기존 매핑을 확인한 뒤 새 값을 이전 이관 기준 및 현재 값과 비교한다. 생략한 원본 값, 팀이 수정한 값, 이관 기준이나 현재 표시 조건을 확인할 수 없는 값은 보존한다.
 
 미리보기의 `issueRefresh[].customFields`는 현재 필드 이름·현재 값·원본 값·반영 여부를 반환한다. `updatedCustomFields`와 `conflictingCustomFields`에서 반영하고 보존할 필드 수를 확인한다. 같은 티켓의 기본 필드 및 사용자 정의 필드는 하나의 검증된 편집으로 저장된다. 형식 43 자체 백업은 기본 필드와 독립적으로 다음 비교에 사용할 사용자 정의 필드의 기준을 보존한다.
 
@@ -1242,7 +1242,7 @@ Jira Software의 `Epic Link` 유형이 확인된 REST와 RSS XML, 관리자 XML�
 
 ### 기존 Jira 작업 시간 수정분 검토
 
-`appendTo.refreshWorklogs: true`를 지정하면 이전에 이관한 작업 기록의 작업일·초 단위 시간·메모를 검토한다. 같은 Jira 인스턴스의 고정 작업 기록 ID와 업무·프로젝트·작성자 매핑을 대조한다. 마지막으로 반영한 원본보다 정확히 새로운 수정 시각을 가진 경우, 현재 값이 마지막 반영값과 일치하면 같은 Teamspace 기록에 적용한다. 원본에 명시된 빈 메모는 비우기로 검토하고, 메모를 생략했거나 변환 근거가 부족하면 현재 메모를 사용한다. 댓글 및 새 작업 시간 추가 옵션과 함께 사용할 수 있다.
+`appendTo.refreshWorklogs: true`를 지정하면 이전에 이관한 작업 기록의 작업일·초 단위 시간·메모를 검토한다. 같은 Jira 인스턴스의 고정 작업 기록 ID와 업무·프로젝트·작성자 매핑을 대조한다. 마지막으로 반영한 원본보다 정확히 새로운 수정 시각을 가진 경우, 현재 값이 마지막 반영값과 일치하면 같은 Donefac 기록에 적용한다. 원본에 명시된 빈 메모는 비우기로 검토하고, 메모를 생략했거나 변환 근거가 부족하면 현재 메모를 사용한다. 댓글 및 새 작업 시간 추가 옵션과 함께 사용할 수 있다.
 
 `jiraWorklogReview`의 `recordId`로 검토 중인 원본을 열 수 있다. `decision`의 `apply`는 반영 대상, `confirm`은 같은 값이 담긴 최신 원본의 수정 시각 확인, `local-conflict`는 팀에서 수정하거나 삭제한 기록, `archive-only`는 확정 근거가 부족한 원본이다. 행에는 사유와 확인한 현재·원본 값이 들어 있다. 한 요청에 변경과 최신 원본 확인을 1,000건까지 포함할 수 있다. 미리보기와 영수증의 `updatedJiraWorklogs`, `confirmedJiraWorklogs`, `conflictingJiraWorklogs`, `archivedJiraWorklogCorrections`에서 각 건수를 확인한다.
 
@@ -1256,25 +1256,25 @@ Jira Software의 `Epic Link` 유형이 확인된 REST와 RSS XML, 관리자 XML�
 
 ### 기존 Jira 업무 사이의 관계 추가
 
-`appendTo.refreshRelations: true`를 지정하면 같은 Jira 인스턴스에서 이관한 기존 티켓 두 건에 새 원본 업무 관계를 추가한다. 두 원본 프로젝트를 서로 다른 Teamspace 프로젝트에 이관한 경우에도 한쪽이 선택한 대상 프로젝트에 속하고 양쪽 원본 매핑이 확인되면 적용할 수 있다. REST·검색 XML의 방향 표기와 관리자 XML의 양쪽 ID를 해석한다. 관계만 있는 관리자 XML은 추가 이관 대상의 원본 프로젝트를 유일하게 확인할 수 있을 때 검토한다. [Jira Data Center 관계 API](https://developer.atlassian.com/server/jira/platform/rest/v10006/api-group-issuelink/) · [Jira 관계 방향 모델](https://developer.atlassian.com/cloud/jira/platform/issue-linking-model/)
+`appendTo.refreshRelations: true`를 지정하면 같은 Jira 인스턴스에서 이관한 기존 티켓 두 건에 새 원본 업무 관계를 추가한다. 두 원본 프로젝트를 서로 다른 Donefac 프로젝트에 이관한 경우에도 한쪽이 선택한 대상 프로젝트에 속하고 양쪽 원본 매핑이 확인되면 적용할 수 있다. REST·검색 XML의 방향 표기와 관리자 XML의 양쪽 ID를 해석한다. 관계만 있는 관리자 XML은 추가 이관 대상의 원본 프로젝트를 유일하게 확인할 수 있을 때 검토한다. [Jira Data Center 관계 API](https://developer.atlassian.com/server/jira/platform/rest/v10006/api-group-issuelink/) · [Jira 관계 방향 모델](https://developer.atlassian.com/cloud/jira/platform/issue-linking-model/)
 
-`counts.newJiraRelations`와 `counts.skippedJiraRelations`는 기존 업무 사이에 추가할 관계와 보관할 원본 관계 건수다. `jiraRelationRefresh`에는 추가할 관계를 최대 20건 표시한다. 각 행은 원본 `recordId`, Teamspace의 `sourceKey`·`targetKey`, 원본 `type`을 담는다. 서로 다른 Teamspace 프로젝트를 잇는 행에는 `sourceProjectName`과 `targetProjectName`도 포함된다. 현재 연결과 동일함을 확인한 관계, 이미 적용한 원본, 양쪽 출처가 불분명하거나 서로 모순된 관계는 건너뛴다. 원본은 이관 기록에서 조회한다.
+`counts.newJiraRelations`와 `counts.skippedJiraRelations`는 기존 업무 사이에 추가할 관계와 보관할 원본 관계 건수다. `jiraRelationRefresh`에는 추가할 관계를 최대 20건 표시한다. 각 행은 원본 `recordId`, Donefac의 `sourceKey`·`targetKey`, 원본 `type`을 담는다. 서로 다른 Donefac 프로젝트를 잇는 행에는 `sourceProjectName`과 `targetProjectName`도 포함된다. 현재 연결과 동일함을 확인한 관계, 이미 적용한 원본, 양쪽 출처가 불분명하거나 서로 모순된 관계는 건너뛴다. 원본은 이관 기록에서 조회한다.
 
 적용은 관련 업무·연결·원본의 변경 여부를 확인한다. 두 티켓의 변경 이력, 관계, 영수증과 원본 연결 ID(`jiraRelationId`)를 함께 저장한다. 프로젝트 간 관계의 양쪽 대상은 영수증의 `projectIds`에 포함된다. 형식 66 백업은 적용한 원본 관계 ID를 보존한다. 전체 이관 검증의 `targetContent.issueRelations`는 관계만 적용한 영수증의 연결도 집계하고 해시를 계산한다. 차단 관계의 간트 선후행은 티켓에서 방향을 검토한 뒤 별도로 저장한다.
 
 ### 기존 프로젝트에 새 Confluence 문서 추가
 
-선택한 페이지가 같은 Confluence 인스턴스와 한 원본 공간에 속하고, 해당 공간이 기존 Teamspace 프로젝트에 연결되어 있으면 `appendPagesTarget`에 대상 프로젝트와 원본 공간이 포함된다. `configuration.appendPagesTo`에 `{projectId}`를 지정한다. 한 미리보기는 Jira 또는 Confluence 중 하나의 추가 이관을 처리한다.
+선택한 페이지가 같은 Confluence 인스턴스와 한 원본 공간에 속하고, 해당 공간이 기존 Donefac 프로젝트에 연결되어 있으면 `appendPagesTarget`에 대상 프로젝트와 원본 공간이 포함된다. `configuration.appendPagesTo`에 `{projectId}`를 지정한다. 한 미리보기는 Jira 또는 Confluence 중 하나의 추가 이관을 처리한다.
 
 `counts.documents`는 새 문서 수, `retainedPages`와 `retainedRecords`는 이전에 이관한 페이지와 함께 제출해 원본으로 보관하는 기록 수다. 이미 이관한 문서의 현재 제목·본문과 휴지통 상태를 보존한다. 새 문서는 같은 공간과 프로젝트에서 확인한 기존 문서를 상위 문서나 본문 참조에 쓸 수 있다. 적용 직전에 원본 연결과 대상 문서의 현재 프로젝트를 확인한다. 형식 38 자체 백업은 추가 이관의 대상을 보존한다.
 
-현재 페이지 본문의 앵커는 대상이 유일한 제목 절을 확인했을 때 Teamspace 문서 절 링크로 바꾼다. 대상을 확인하기 어려운 링크는 읽을 수 있는 원본 표기를 남기고 `SECTION_LINK_UNRESOLVED`로 표시한다. 기존 문서의 절을 가리키는 계획은 적용 시 그 절이 남아 있는지 다시 확인한다.
+현재 페이지 본문의 앵커는 대상이 유일한 제목 절을 확인했을 때 Donefac 문서 절 링크로 바꾼다. 대상을 확인하기 어려운 링크는 읽을 수 있는 원본 표기를 남기고 `SECTION_LINK_UNRESOLVED`로 표시한다. 기존 문서의 절을 가리키는 계획은 적용 시 그 절이 남아 있는지 다시 확인한다.
 
 ### 이미 이관한 Confluence 문서에 원본 변경분 반영
 
 `appendPagesTo.refreshExisting: true`를 지정하면 현재 프로젝트에 연결된 기존 문서의 제목·본문·라벨·상위 문서를 비교한다. 제목과 본문은 일반적으로 더 높은 원본 버전이나 확인 가능한 최신 수정 시각을 사용한다. 팀이 편집한 필드, 내보내기에서 생략한 본문, 참조나 첨부를 확인할 수 없는 본문은 현재 값을 보존한다.
 
-명시적인 Confluence XML 상위 페이지나 최상위 정보가 있는 경우 `documentRefresh[].fields`의 `parentId`에서 위치를 비교한다. 상위 페이지는 같은 원본 공간의 기존 Teamspace 문서 또는 같은 적용에서 생성할 문서여야 한다. 원본 위치가 모호하거나 빠진 경우에는 현재 위치를 유지한다. 같은 원본 버전에서 위치만 바뀌면 확인 가능한 최신 수정 시각과 일관된 제목·본문 근거를 사용한다. 적용 전에 관련 문서 버전과 최종 트리의 순환을 확인한다. 형식 99 백업은 두 번째 내보내기 이후에도 마지막으로 반영한 위치를 대조할 근거를 보존한다.
+명시적인 Confluence XML 상위 페이지나 최상위 정보가 있는 경우 `documentRefresh[].fields`의 `parentId`에서 위치를 비교한다. 상위 페이지는 같은 원본 공간의 기존 Donefac 문서 또는 같은 적용에서 생성할 문서여야 한다. 원본 위치가 모호하거나 빠진 경우에는 현재 위치를 유지한다. 같은 원본 버전에서 위치만 바뀌면 확인 가능한 최신 수정 시각과 일관된 제목·본문 근거를 사용한다. 적용 전에 관련 문서 버전과 최종 트리의 순환을 확인한다. 형식 99 백업은 두 번째 내보내기 이후에도 마지막으로 반영한 위치를 대조할 근거를 보존한다.
 
 체크리스트가 포함된 원본 전체가 코드 블록으로 저장된 경우, 같은 원본 버전과 제목·본문을 다시 제공해도 복구를 검토할 수 있다. 저장된 코드 블록이 당시 원문과 일치하고 정상 변환이 가능하면 `documentRefresh`의 본문 행과 `CONFLUENCE_REFRESH_CHECKLIST_RESTORED` 확인 항목에 나타난다. 적용하면 해당 문서의 새 저장본과 이관 기준이 만들어진다.
 
@@ -1294,9 +1294,9 @@ Jira Software의 `Epic Link` 유형이 확인된 REST와 RSS XML, 관리자 XML�
 
 `appendPagesTo.refreshHistory: true`를 지정하면 같은 원본 인스턴스와 공간에서 기존 문서로 확인된 페이지에 새 원본 댓글과 과거 저장본을 추가한다. 원본 파일에 현재 페이지나 공간 객체가 빠진 경우에는 기존 이관 기록으로 소유 페이지와 공간을 확인한다. 제목·본문, 첨부 옵션과 개별 또는 함께 적용할 수 있다. 현재 문서 버전과 팀에서 작성한 댓글을 보존한다. 이미 이관한 원본 댓글 ID와 문서의 원본 버전은 삭제 이력이 있더라도 알아본다. 소유 페이지, 본문, 버전이나 첨부를 확인할 수 없는 자료는 영수증에 원문으로 보관한다.
 
-미리보기와 영수증의 `newConfluenceComments`, `newConfluenceRevisions`에 추가 건수가 들어간다. 문서 이력과 고정 저장본 목록에서 과거 원본 저장본의 `confluenceSourceVersion`을 읽을 수 있다. 원본 저장본에서 복구하면 새 Teamspace 문서 버전이 생성된다. 형식 42 자체 백업은 추가 이관 설정과 원본 버전 표시를 보존한다.
+미리보기와 영수증의 `newConfluenceComments`, `newConfluenceRevisions`에 추가 건수가 들어간다. 문서 이력과 고정 저장본 목록에서 과거 원본 저장본의 `confluenceSourceVersion`을 읽을 수 있다. 원본 저장본에서 복구하면 새 Donefac 문서 버전이 생성된다. 형식 42 자체 백업은 추가 이관 설정과 원본 버전 표시를 보존한다.
 
-처음 이관하거나 기존 문서에 추가할 새 댓글의 원문 위치는 같은 XML 패키지의 댓글 속성과 소유 페이지에 있는 `ac:inline-comment-marker`로 확인한다. `confluenceInlineCommentsAnchored`에는 Teamspace 문장 댓글로 옮길 수량이, `confluenceInlineCommentsUnresolved`에는 위치 속성을 읽었으나 하나의 정확한 본문 범위를 확정하지 못해 일반 댓글로 옮길 수량이 들어간다. 원본 댓글 속성의 소유권이나 값이 불명확한 경우는 분석 진단에서 확인한다. 변경분에서는 현재 저장 본문 또는 같은 적용에서 반영할 본문과 대조하고, 적용 전 본문이 달라지면 `409`를 반환한다. 연결된 댓글의 `documentSource`는 일반 문장 댓글 조회와 자체 백업에서 읽을 수 있다.
+처음 이관하거나 기존 문서에 추가할 새 댓글의 원문 위치는 같은 XML 패키지의 댓글 속성과 소유 페이지에 있는 `ac:inline-comment-marker`로 확인한다. `confluenceInlineCommentsAnchored`에는 Donefac 문장 댓글로 옮길 수량이, `confluenceInlineCommentsUnresolved`에는 위치 속성을 읽었으나 하나의 정확한 본문 범위를 확정하지 못해 일반 댓글로 옮길 수량이 들어간다. 원본 댓글 속성의 소유권이나 값이 불명확한 경우는 분석 진단에서 확인한다. 변경분에서는 현재 저장 본문 또는 같은 적용에서 반영할 본문과 대조하고, 적용 전 본문이 달라지면 `409`를 반환한다. 연결된 댓글의 `documentSource`는 일반 문장 댓글 조회와 자체 백업에서 읽을 수 있다.
 
 같은 원본 페이지의 직접 답글 관계는 상위 댓글의 고정 원문을 확인해 `parentCommentId`로 보존한다. 댓글·이력 추가 이관에서는 상위 댓글 객체가 ZIP에 없을 때 같은 인스턴스와 소유 페이지의 이전 이관 기록에서 활성 댓글을 대조한다. 미리보기와 영수증에 `confluenceInlineRepliesLinked`, `confluenceInlineRepliesUnresolved`가 표시된다. 상위 댓글이 확인된 뒤 삭제되거나 연결을 확인할 수 없게 되면 적용 전체를 중단하고 `409`를 반환한다. 답글과 상위 댓글의 관계는 기존 댓글 조회, 휴지통과 자체 백업을 사용한다.
 
@@ -1316,7 +1316,7 @@ Jira Software의 `Epic Link` 유형이 확인된 REST와 RSS XML, 관리자 XML�
 
 `integrity`의 `records`와 `boundAttachments`는 보존 원본 수와 대상 첨부 버전 ID가 연결된 원본 수의 이관 당시 기준(`expected`)과 검사값(`observed`)이다. `packages`는 이름·수량·원본 집합 SHA-256을 패키지별로 대조한다. `verified`는 저장된 원본 기준과 일치, `mismatch`는 불일치, `counts-only`는 당시 수량만 비교 가능, `unavailable`은 당시 기준을 읽을 수 없는 상태다. `unmatchedRecords`와 `columnMismatches`는 출처를 확인할 수 없는 기록과 저장 식별 정보 불일치를 보여준다. 원본 무결성 `verified`와 현재 대상·파일 상태는 독립된 결과다.
 
-`primaryRecords`는 패키지마다 `packageId`, 원본 종류 `kind` (`issue` 또는 `page`), 연결 상태별 `counts`, `invalidTargets`, `dispositionSha256`을 반환한다. Jira 업무와 Confluence 현재 페이지의 원본 행을 각각 센다. 여러 원본 행이 같은 Teamspace 대상을 가리켜도 각 원본 행을 해당 패키지에서 센다. 대상 종류가 다르거나 종류·ID 중 하나만 저장됐거나, 제외한 원본에 연결이 남으면 `invalidTargets`에 집계한다. 대상이 연결된 각 행의 원본 ID와 저장된 Jira 원래 키가 같은 대상으로 이어지는지, 인덱스가 참조하는 영수증이 그 연결을 입증하는지도 대조한다. 인덱스 오류는 원본 행당 한 번 집계한다. `dispositionSha256`으로 같은 원본의 대상·상태와 인덱스 오류를 비교할 수 있다. 이 항목에는 원래 키, 제목, 본문이 들어가지 않는다.
+`primaryRecords`는 패키지마다 `packageId`, 원본 종류 `kind` (`issue` 또는 `page`), 연결 상태별 `counts`, `invalidTargets`, `dispositionSha256`을 반환한다. Jira 업무와 Confluence 현재 페이지의 원본 행을 각각 센다. 여러 원본 행이 같은 Donefac 대상을 가리켜도 각 원본 행을 해당 패키지에서 센다. 대상 종류가 다르거나 종류·ID 중 하나만 저장됐거나, 제외한 원본에 연결이 남으면 `invalidTargets`에 집계한다. 대상이 연결된 각 행의 원본 ID와 저장된 Jira 원래 키가 같은 대상으로 이어지는지, 인덱스가 참조하는 영수증이 그 연결을 입증하는지도 대조한다. 인덱스 오류는 원본 행당 한 번 집계한다. `dispositionSha256`으로 같은 원본의 대상·상태와 인덱스 오류를 비교할 수 있다. 이 항목에는 원래 키, 제목, 본문이 들어가지 않는다.
 
 `primaryRecords[].hierarchy`는 현재 연결되었거나 휴지통에 있는 업무·페이지의 직접 상위 항목을 검증한다. 같은 원본 인스턴스에서 해당 대상에 마지막으로 적용한 상위 항목을 기준으로 `matched`, `changed`, `unavailable`, `invalid` 건수와 `sha256`을 반환한다. `changed`는 현재 상위 항목과 적용 기준의 차이, `unavailable`은 기준의 부재 또는 충돌이다. `invalid`는 저장 열과 대상 데이터가 다르거나 직접 상위 항목을 확인할 수 없는 경우다. 휴지통에 보관된 항목은 상위 항목이 다른 프로젝트로 이동했더라도 보관 당시의 상위 ID를 비교한다. 대조 목록에 `packageId`와 `finding=changed-parent` 또는 `finding=invalid-parent`를 보내면 해당 원본만 조회한다.
 
@@ -1381,7 +1381,7 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 직접 지정, 선택 업무 이동, 상위·하위 이동에 `rescheduleSuccessors: true`를 함께 보내면 각 프로젝트의 직접·간접 후행을 검토한다. 이 옵션만 켠 경우 직접 지정은 현재 값과 같은 날짜 쌍도 기준으로 계산하고, 이동은 이동 일수로 날짜가 달라진 업무를 기준으로 삼는다. 기준 날짜를 고정하고 공통 후행은 모든 연결 조건을 적용해 한 번 계산한다. `changes`에는 날짜가 달라지는 업무를 반환하며, 후행 조정으로 날짜가 달라진 업무는 `followUpIssueIds`에도 기록한다. 1,000개 변경 한도는 모든 프로젝트의 기준과 후행 변경을 합산한다. 적용 시 검토한 후행 업무와 연결, 프로젝트 규칙을 함께 확인한다.
 
-`rescheduleSuccessors: true`와 `includeTeamBlockers: true`를 함께 보내면 세 요청 형식 모두에서 프로젝트 간 차단을 포함한다. `includeTeamBlockers: true`만 보내면 `400`을 반환한다. 실제 날짜가 바뀐 업무에서 시작해 프로젝트 내 선후행 연결과 열린 Teamspace·확인된 Jira 차단을 따라간다. 직접 지정하거나 이동해 계산한 기준 날짜는 고정한다. 계획으로 들어오는 범위 밖 선행에는 저장된 날짜를 사용한다. 프로젝트 간 차단은 후행 프로젝트 달력의 FS·0근무일 조건을 사용한다. 옵션을 켜면 `changes`에 각 업무의 `projectId`가 포함된다.
+`rescheduleSuccessors: true`와 `includeTeamBlockers: true`를 함께 보내면 세 요청 형식 모두에서 프로젝트 간 차단을 포함한다. `includeTeamBlockers: true`만 보내면 `400`을 반환한다. 실제 날짜가 바뀐 업무에서 시작해 프로젝트 내 선후행 연결과 열린 Donefac·확인된 Jira 차단을 따라간다. 직접 지정하거나 이동해 계산한 기준 날짜는 고정한다. 계획으로 들어오는 범위 밖 선행에는 저장된 날짜를 사용한다. 프로젝트 간 차단은 후행 프로젝트 달력의 FS·0근무일 조건을 사용한다. 옵션을 켜면 `changes`에 각 업무의 `projectId`가 포함된다.
 
 프로젝트 간 검토는 기준과 후행을 합해 1,000개 업무, 워크스페이스는 전체 업무 10,000개와 연결 50,000개까지 지원한다. 순환이나 필수 날짜 누락, 고정 일정과의 충돌 또는 계산 범위 한도는 `blocking`에 표시하며 적용 ID를 발급하지 않는다. 적용 직전에 해당 업무·들어오는 연결·열린 차단과 각 프로젝트의 달력·워크플로·업무 양식을 대조한다. 검토 조건이 달라지면 `409`를 반환한다. 프로젝트 간 날짜와 적용 결과 및 되돌리기 기록은 기존 수동 변경 요청에서 함께 저장한다.
 
@@ -1395,11 +1395,11 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 ### 수동 날짜 변경의 프로젝트 간 차단 경고
 
-수동 일정, 날짜 일괄 편집, 일정 붙여넣기, 업무 행 편집은 열린 프로젝트 간 차단 관계에서 선행 종료일 또는 후행 시작일이 바뀌는 경우를 검토한다. 방향이 확인된 Jira 관계를 포함하고, 같은 방향에 Teamspace 관계가 있으면 한 건으로 합친다. 같은 미리보기에서 양쪽을 바꾸면 두 제안 날짜를 사용한다. 후행 업무 달력의 FS·0근무일 조건에 어긋나거나 필요한 날짜가 비어 있으면 `teamBlockerWarnings`와 `warnings`에 표시한다. 일반 날짜 변경에서는 경고를 검토한 뒤 그대로 적용할 수 있다. 업무 버전, 활성 관계 또는 후행 달력이 달라지면 새 미리보기를 요구한다. 검토 당시 관계가 없었어도 새로 해당하는 관계가 생기면 적용은 `409`를 반환한다.
+수동 일정, 날짜 일괄 편집, 일정 붙여넣기, 업무 행 편집은 열린 프로젝트 간 차단 관계에서 선행 종료일 또는 후행 시작일이 바뀌는 경우를 검토한다. 방향이 확인된 Jira 관계를 포함하고, 같은 방향에 Donefac 관계가 있으면 한 건으로 합친다. 같은 미리보기에서 양쪽을 바꾸면 두 제안 날짜를 사용한다. 후행 업무 달력의 FS·0근무일 조건에 어긋나거나 필요한 날짜가 비어 있으면 `teamBlockerWarnings`와 `warnings`에 표시한다. 일반 날짜 변경에서는 경고를 검토한 뒤 그대로 적용할 수 있다. 업무 버전, 활성 관계 또는 후행 달력이 달라지면 새 미리보기를 요구한다. 검토 당시 관계가 없었어도 새로 해당하는 관계가 생기면 적용은 `409`를 반환한다.
 
 ### 프로젝트 간 날짜와 차단 관계 함께 적용
 
-`POST /api/schedule/team-blocker-edit/preview`에 `{source:{id,expectedVersion,dates?},target:{id,expectedVersion,dates?},rescheduleSuccessors?}`를 보낸다. `dates`에 바꿀 `startDate`와 `endDate`만 넣는다. 날짜는 `YYYY-MM-DD` 또는 `null`이며 빠진 칸은 현재 값을 쓴다. 서로 다른 프로젝트의 열린 업무를 검토하며, 같은 방향의 기존 Teamspace 관계나 확인된 Jira 차단이 있으면 `409`를 반환한다. `changes`와 `warnings`에 변경 날짜와 대상 달력의 FS·0근무일 조건, 관련 연결의 경고를 반환한다.
+`POST /api/schedule/team-blocker-edit/preview`에 `{source:{id,expectedVersion,dates?},target:{id,expectedVersion,dates?},rescheduleSuccessors?}`를 보낸다. `dates`에 바꿀 `startDate`와 `endDate`만 넣는다. 날짜는 `YYYY-MM-DD` 또는 `null`이며 빠진 칸은 현재 값을 쓴다. 서로 다른 프로젝트의 열린 업무를 검토하며, 같은 방향의 기존 Donefac 관계나 확인된 Jira 차단이 있으면 `409`를 반환한다. `changes`와 `warnings`에 변경 날짜와 대상 달력의 FS·0근무일 조건, 관련 연결의 경고를 반환한다.
 
 `rescheduleSuccessors: true`는 새 차단 대상을 시작으로 프로젝트 내부 연결과 열린 프로젝트 간 차단을 따라 후행 날짜를 검토한다. 제안한 관계를 FS·0근무일로 계산하고, 바꿀 날짜를 직접 지정한 업무는 고정한다. 자동 조정한 후행 업무의 ID는 `followUpIssueIds`에 들어 있다. 순환이나 필수 날짜 누락, 고정 일정 충돌 또는 계산 범위 초과는 `errors`에 반환하며 적용 ID를 발급하지 않는다. 옵션을 생략하거나 `false`로 보내면 두 업무의 날짜와 차단 관계를 검토한다.
 
@@ -1407,7 +1407,7 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 ## 마지막 일정 변경 되돌리기
 
-브라우저의 일정 적용 요청은 `X-Teamspace-Schedule-Undo-Scope`에 적용을 시작한 화면을 보낸다. 값은 `team`, `project:<프로젝트 ID>` 또는 기준 티켓의 `issue:<업무 ID>`다. ID는 URI 구성 요소로 인코딩한다. 티켓 범위는 해당 티켓에서 검토한 일정과 연결 편집에 사용한다.
+브라우저의 일정 적용 요청은 `X-Donefac-Schedule-Undo-Scope`에 적용을 시작한 화면을 보낸다. 값은 `team`, `project:<프로젝트 ID>` 또는 기준 티켓의 `issue:<업무 ID>`다. ID는 URI 구성 요소로 인코딩한다. 티켓 범위는 해당 티켓에서 검토한 일정과 연결 편집에 사용한다.
 
 `GET /api/schedule/undo/latest?scope=team`으로 전체 프로젝트 간트의 마지막 변경을 읽는다. 프로젝트와 티켓은 각각 `scope=project&id=<ID>` 또는 `scope=issue&id=<ID>`를 사용한다. 작업자와 화면이 일치하는 최근 7일의 마지막 변경을 `{undo:{undoId,appliedAt,issueCount,dependencyChanges,planCount,relationChanges?}}`로 반환한다. 대상이 바뀌었거나 이미 되돌렸으면 `{undo:null}`을 반환한다. 한 단계 되돌리기여서 이전 변경으로 자동 이동하지 않는다.
 
@@ -1421,9 +1421,9 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 ## 프로젝트 간 후행 일정 검토
 
-브라우저의 `POST /api/schedule/team-follow-up-preview`에 `/api/schedule/team-blockers`에서 확인한 `{relationId,expectedVersion}` 또는 `{relations:[{relationId,expectedVersion}]}`을 보낸다. 배열에는 같은 선행 업무에서 출발하는 관계를 중복 없이 1~100개 넣는다. 각 관계의 두 업무는 서로 다른 프로젝트에 있어야 하고 현재 진행 대상이어야 한다. 차단은 선행 종료 이후 첫 후행 프로젝트 근무일을 계산하며, 선택한 대상에서 이어지는 프로젝트 내부 연결과 열린 Teamspace 차단, 직접 고른 Jira 이관 관계를 확인한다. 여러 갈래에서 같은 후행 업무에 도달하면 조건을 합쳐 한 번 계산한다. 전체 업무 10,000개와 연결 50,000개 이하에서 후행 업무 최대 1,000개를 계산한다.
+브라우저의 `POST /api/schedule/team-follow-up-preview`에 `/api/schedule/team-blockers`에서 확인한 `{relationId,expectedVersion}` 또는 `{relations:[{relationId,expectedVersion}]}`을 보낸다. 배열에는 같은 선행 업무에서 출발하는 관계를 중복 없이 1~100개 넣는다. 각 관계의 두 업무는 서로 다른 프로젝트에 있어야 하고 현재 진행 대상이어야 한다. 차단은 선행 종료 이후 첫 후행 프로젝트 근무일을 계산하며, 선택한 대상에서 이어지는 프로젝트 내부 연결과 열린 Donefac 차단, 직접 고른 Jira 이관 관계를 확인한다. 여러 갈래에서 같은 후행 업무에 도달하면 조건을 합쳐 한 번 계산한다. 전체 업무 10,000개와 연결 50,000개 이하에서 후행 업무 최대 1,000개를 계산한다.
 
-선행 업무의 날짜도 바꾸려면 `anchorChange: {id,expectedVersion,startDate,endDate}`를 함께 보낸다. `id`와 내부 `expectedVersion`은 선택한 관계의 선행 업무에 해당한다. 날짜는 `YYYY-MM-DD` 또는 `null`을 사용한다. 입력한 날짜를 고정하고, 선행 업무로 들어오는 연결과 선행 업무부터 이어지는 모든 프로젝트 내부 연결·열린 Teamspace 차단 및 선택한 Jira 관계를 검사한다. 이 경우 선행 업무를 포함해 최대 1,000개를 계산한다. 날짜가 바뀐 선행 업무는 후행 업무와 함께 `changes`에 들어간다. 선행 업무 버전이 바뀌면 미리보기와 적용은 `409` 및 `details.reason: "stale_team_follow_up_source"`와 현재 `currentVersion`, `startDate`, `endDate`를 반환한다.
+선행 업무의 날짜도 바꾸려면 `anchorChange: {id,expectedVersion,startDate,endDate}`를 함께 보낸다. `id`와 내부 `expectedVersion`은 선택한 관계의 선행 업무에 해당한다. 날짜는 `YYYY-MM-DD` 또는 `null`을 사용한다. 입력한 날짜를 고정하고, 선행 업무로 들어오는 연결과 선행 업무부터 이어지는 모든 프로젝트 내부 연결·열린 Donefac 차단 및 선택한 Jira 관계를 검사한다. 이 경우 선행 업무를 포함해 최대 1,000개를 계산한다. 날짜가 바뀐 선행 업무는 후행 업무와 함께 `changes`에 들어간다. 선행 업무 버전이 바뀌면 미리보기와 적용은 `409` 및 `details.reason: "stale_team_follow_up_source"`와 현재 `currentVersion`, `startDate`, `endDate`를 반환한다.
 
 미리보기의 `teamFollowUp`에는 선택한 관계 ID·버전, 양쪽 업무 ID와 계산에 사용할 `sourceEndDate`가 포함된다. 배열 요청에서는 이 필드가 선택한 첫 관계를 가리키고, `relations`에 전체 선택의 `{relationId,expectedVersion,targetIssueId}`가 들어간다. `sourceSchedule`은 서버에 저장된 선행 업무의 `version`, `startDate`, `endDate`를 제공한다. `changes`는 각 업무의 `projectId`와 날짜 전후 값을, `warnings`는 마감 초과 등을, `blocking`은 적용 전에 해결할 항목을 표시한다. 저장은 모든 선택 관계의 버전과 현재 대상, 관련 업무의 소속·버전, 참여 프로젝트의 달력·워크플로·양식 및 현재 연결을 다시 검사한다.
 
@@ -1431,7 +1431,7 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 검토 범위에 들어온 업무에 방향을 확인한 추가 Jira 선행 연결이 있으면 완료 후 시작 제약으로 계산한다. 범위 밖 원인 업무는 저장한 일정으로 계산하고, 필요한 종료일이 비어 있으면 `blocking`에 표시한다. 미리보기 뒤 원인 일정이나 이관 근거가 바뀌면 적용할 때 새 미리보기를 요구한다.
 
-`POST /api/schedule/team-follow-up-apply`에 `{previewId}`를 보내면 한 트랜잭션으로 일정을 적용한다. `GET /api/schedule/team-follow-up-result/:previewId`는 같은 작업자에게 미적용 상태 또는 저장한 `{undoId,updated,warnings}`를 돌려준다. 미리보기는 30분, 적용 결과는 7일간 보관한다. `/api/schedule/undo`에 `undoId`를 보내 여러 프로젝트의 변경 날짜를 함께 복원할 수 있다. 원인 티켓에서는 `X-Teamspace-Schedule-Undo-Scope: issue:<원인 업무 ID>` 헤더로 적용과 되돌리기를 요청한다. 원인 날짜를 그대로 두고 후행만 변경해도 `GET /api/schedule/undo/latest?scope=issue&id=…`로 같은 티켓의 마지막 변경을 찾을 수 있다.
+`POST /api/schedule/team-follow-up-apply`에 `{previewId}`를 보내면 한 트랜잭션으로 일정을 적용한다. `GET /api/schedule/team-follow-up-result/:previewId`는 같은 작업자에게 미적용 상태 또는 저장한 `{undoId,updated,warnings}`를 돌려준다. 미리보기는 30분, 적용 결과는 7일간 보관한다. `/api/schedule/undo`에 `undoId`를 보내 여러 프로젝트의 변경 날짜를 함께 복원할 수 있다. 원인 티켓에서는 `X-Donefac-Schedule-Undo-Scope: issue:<원인 업무 ID>` 헤더로 적용과 되돌리기를 요청한다. 원인 날짜를 그대로 두고 후행만 변경해도 `GET /api/schedule/undo/latest?scope=issue&id=…`로 같은 티켓의 마지막 변경을 찾을 수 있다.
 
 ## 선택 업무의 날짜 일괄 편집
 
@@ -1457,7 +1457,7 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 `rescheduleSuccessors: true`를 보내면 각 프로젝트에서 변경한 시작일·종료일을 기준으로 직접·간접 후행 업무를 계산한다. 변경한 날짜를 고정하고 후행의 근무일 기간을 보존한다. 조정한 업무 ID는 `followUpIssueIds`에 포함되며 그 업무와 검토된 연결도 적용 시 검증한다. 변경할 업무는 합계 1,000개까지다.
 
-`rescheduleSuccessors: true`와 함께 `includeTeamBlockers: true`를 보내면 프로젝트 내부 연결과 열린 Teamspace·확인된 Jira 차단을 따라 다른 프로젝트의 후행도 검토한다. 프로젝트 간 차단은 후행 프로젝트 달력의 FS·0근무일 조건으로 계산한다. 검토 범위 밖에서 들어오는 선행은 저장된 날짜를 사용하며, 같은 후행에 모이는 조건은 함께 계산한다. 미리보기의 `changes[].projectId`에서 각 업무의 소속을 확인한다. 프로젝트 간 차단 포함만 요청하면 `400`을 반환한다. 이 옵션을 생략하거나 `false`로 보내면 기존 검토 범위를 사용한다. 적용 때 검토한 프로젝트 간 업무·관계·프로젝트 설정이 바뀌었으면 `409`를 반환한다.
+`rescheduleSuccessors: true`와 함께 `includeTeamBlockers: true`를 보내면 프로젝트 내부 연결과 열린 Donefac·확인된 Jira 차단을 따라 다른 프로젝트의 후행도 검토한다. 프로젝트 간 차단은 후행 프로젝트 달력의 FS·0근무일 조건으로 계산한다. 검토 범위 밖에서 들어오는 선행은 저장된 날짜를 사용하며, 같은 후행에 모이는 조건은 함께 계산한다. 미리보기의 `changes[].projectId`에서 각 업무의 소속을 확인한다. 프로젝트 간 차단 포함만 요청하면 `400`을 반환한다. 이 옵션을 생략하거나 `false`로 보내면 기존 검토 범위를 사용한다. 적용 때 검토한 프로젝트 간 업무·관계·프로젝트 설정이 바뀌었으면 `409`를 반환한다.
 
 `POST /api/schedule/bulk-dates/apply`에 검토한 `{previewId}`를 보낸다. 작업자, 선택·연결 업무의 버전과 소속, 각 대상 프로젝트의 연결·달력·워크플로·양식 버전을 확인한다. 다른 변경이 있으면 전체 적용을 보류한다. 유효한 요청은 모든 프로젝트의 변경 날짜와 적용 결과를 같은 트랜잭션에 저장한다. 미리보기는 30분 동안 유효하며 같은 ID의 성공 결과는 7일 안에 다시 읽을 수 있다. 응답의 `undoId`를 `POST /api/schedule/undo`로 보내 이 요청이 변경한 날짜를 함께 복원한다. 같은 작업공간의 재시작과 물리 백업은 적용 결과와 되돌리기 기록을 유지하며 자체 JSON 복원은 해당 기록을 초기화한다.
 
@@ -1491,7 +1491,7 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 날짜를 바꾸면서 `rescheduleSuccessors: true`를 보내면 기준 업무와 선택한 연결 업무의 입력 날짜를 고정하고 연결 변경 후의 선후행 관계로 후행 일정을 계산한다. 날짜 입력 없이 연결만 바꿀 때는 추가·수정한 연결의 후행 업무부터 계산한다. 바뀌는 직접·간접 후행 업무도 `changes`에 포함된다. 모든 조건을 이미 충족하는 후행 업무는 날짜를 유지한다. 종료일이 목표 마감일을 넘으면 `warnings`에 표시하고, 필요한 날짜나 기존 근무일 기간을 계산할 수 없거나 고정 일정과 충돌하면 `errors`에 표시한다. 적용은 날짜가 바뀌지 않는 후행 업무 및 별도 선행 업무에 대한 변경도 검사한다. 생략하거나 `false`를 보내면 직접 지정한 날짜와 연결만 검토한다.
 
-`includeTeamBlockers: true`를 보내려면 `rescheduleSuccessors: true`도 필요하다. 함께 보내지 않으면 `400`을 반환하며, 후행 검토만 요청한 경우 같은 프로젝트 범위에서 계산한다. 두 옵션을 켜면 실제로 바꾼 시작일·종료일과 추가·수정할 연결의 후행 업무를 기준으로 열린 Teamspace·확인된 Jira 차단과 최종 프로젝트 내부 연결을 함께 검토한다. 검토에 입력한 시작일·종료일은 저장값과 같아도 고정하며 함께 지정한 목표 마감일을 보존한다. 해제할 연결은 최종 그래프에서 제거한다. 연결 해제만 요청하면 관계 변경만 검토한다. 프로젝트 간 차단은 후행 프로젝트 달력의 완료 후 시작(FS)·0근무일로 계산한다. 응답의 `changes[].projectId`는 변경할 업무의 소속을 표시하고, 자동으로 조정한 업무는 `followUpIssueIds`에 기록한다. 적용 전에 도달한 업무·들어오는 선행·관계·프로젝트 규칙을 다시 확인하며 상태, 달력 또는 관계가 바뀌면 `409`를 반환한다.
+`includeTeamBlockers: true`를 보내려면 `rescheduleSuccessors: true`도 필요하다. 함께 보내지 않으면 `400`을 반환하며, 후행 검토만 요청한 경우 같은 프로젝트 범위에서 계산한다. 두 옵션을 켜면 실제로 바꾼 시작일·종료일과 추가·수정할 연결의 후행 업무를 기준으로 열린 Donefac·확인된 Jira 차단과 최종 프로젝트 내부 연결을 함께 검토한다. 검토에 입력한 시작일·종료일은 저장값과 같아도 고정하며 함께 지정한 목표 마감일을 보존한다. 해제할 연결은 최종 그래프에서 제거한다. 연결 해제만 요청하면 관계 변경만 검토한다. 프로젝트 간 차단은 후행 프로젝트 달력의 완료 후 시작(FS)·0근무일로 계산한다. 응답의 `changes[].projectId`는 변경할 업무의 소속을 표시하고, 자동으로 조정한 업무는 `followUpIssueIds`에 기록한다. 적용 전에 도달한 업무·들어오는 선행·관계·프로젝트 규칙을 다시 확인하며 상태, 달력 또는 관계가 바뀌면 `409`를 반환한다.
 
 날짜 제안으로 시작일 또는 종료일을 바꿀 때는 `reviewIncomingTeamBlockers: true`를 보낸다. 서버는 일반 날짜 변경의 차단 경고와 함께 시작일 또는 종료일을 바꾼 각 입력 업무로 들어오는 열린 프로젝트 간 차단 관계를 검증한다. 프로젝트 달력으로 FS·0근무일 조건을 확인하며, 선행 조건 충돌은 `errors`, 필요한 날짜가 미정인 관계는 `warnings`에 표시한다. 적용 시 선행 업무 버전과 관계의 방향·출처·버전을 비교한다. 확인한 관계가 없어도 새 관계가 생기면 적용은 `409`를 반환한다.
 
@@ -1513,7 +1513,7 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 두 요청 모두 `rescheduleSuccessors: true`를 받는다. 실제로 변경한 시작일·종료일과 추가·수정한 선후행 관계가 영향을 주는 같은 프로젝트의 직접·간접 후행 업무를 계산한다. 계산은 해제할 연결을 제외한 최종 그래프를 사용한다. 직접 바꾼 시작일·종료일이 있는 업무는 제안 날짜를 고정한다. 나머지 업무는 기존 근무일 기간을 유지해 조건을 충족하는 데 필요한 만큼 늦춘다. 계산한 변경도 `changes`에 포함하고 해당 업무 ID를 `followUpIssueIds`에 담는다. 바뀌는 업무의 한도는 직접 변경과 후행 조정을 합쳐 1,000개다. 계산에 필요한 날짜가 없거나 고정 일정이 충돌하면 `errors`에 이유를 표시한다.
 
-공통 기준과 순차 방식 모두 `includeTeamBlockers: true`를 `rescheduleSuccessors: true`와 함께 보낼 수 있다. 프로젝트 간 차단만 요청하면 `400`을 반환한다. 두 옵션을 보내면 같은 프로젝트의 제안 연결과 열린 Teamspace·확인된 Jira 차단을 함께 검토하고 각 후행 업무의 달력으로 날짜를 계산한다. 실제로 추가·수정하는 연결과 달라진 시작일·종료일이 후행 검토의 시작점이며, 해제할 연결은 먼저 최종 그래프에서 뺀다. 변경 행에는 실제 `projectId`를 반환한다. 외부 프로젝트의 연결·업무 상태 또는 달력·워크플로·양식이 바뀌면 적용은 `409`로 보류된다.
+공통 기준과 순차 방식 모두 `includeTeamBlockers: true`를 `rescheduleSuccessors: true`와 함께 보낼 수 있다. 프로젝트 간 차단만 요청하면 `400`을 반환한다. 두 옵션을 보내면 같은 프로젝트의 제안 연결과 열린 Donefac·확인된 Jira 차단을 함께 검토하고 각 후행 업무의 달력으로 날짜를 계산한다. 실제로 추가·수정하는 연결과 달라진 시작일·종료일이 후행 검토의 시작점이며, 해제할 연결은 먼저 최종 그래프에서 뺀다. 변경 행에는 실제 `projectId`를 반환한다. 외부 프로젝트의 연결·업무 상태 또는 달력·워크플로·양식이 바뀌면 적용은 `409`로 보류된다.
 
 응답의 `dependencyChanges`에는 변경할 연결의 `before`와 `after`가 담긴다. 추가의 `before`와 해제의 `after`는 `null`이다. 유지할 기존 연결은 `unchanged` 건수와 `retainedDependencies`에 기록한다. 수정·해제에서 같은 방향의 연결을 찾지 못한 업무 쌍은 `missingDependencies`에 담는다. 업무 위치·버전이 일치하지 않거나 새 연결 때문에 순환이 생기면 `errors`와 빈 `previewId`를 반환한다. 날짜와 연결의 실질 변경이 모두 없으면 적용 ID 없이 검토 결과를 반환한다.
 
@@ -1521,7 +1521,7 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 ## 차단 관계의 선후행 일괄 연결
 
-브라우저의 `GET /api/schedule/blocker-links?projectId=…&offset=0`은 같은 프로젝트 안의 방향이 확인된 차단 관계를 25개씩 조회한다. 결과는 `{items,offset,total}`이다. 각 항목은 관계 `id`, `version`, 차단하는 `sourceIssueId`, 차단되는 `targetIssueId`를 담는다. 검증한 이관 관계는 `origin: 'jira'`를 포함한다. 같은 방향에 Teamspace 관계와 Jira 관계가 있으면 Teamspace 관계가 우선한다.
+브라우저의 `GET /api/schedule/blocker-links?projectId=…&offset=0`은 같은 프로젝트 안의 방향이 확인된 차단 관계를 25개씩 조회한다. 결과는 `{items,offset,total}`이다. 각 항목은 관계 `id`, `version`, 차단하는 `sourceIssueId`, 차단되는 `targetIssueId`를 담는다. 검증한 이관 관계는 `origin: 'jira'`를 포함한다. 같은 방향에 Donefac 관계와 Jira 관계가 있으면 Donefac 관계가 우선한다.
 
 `GET /api/schedule/blocker-links?scope=team&offset=0`은 모든 프로젝트에서 양쪽 업무가 같은 프로젝트에 속한 차단 관계를 조회한다. 팀 응답의 각 행에는 소속 `projectId`가 포함된다.
 
@@ -1565,7 +1565,7 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 브라우저의 `POST /api/planning-items/:id/schedule-preview`에 `{expectedPlanVersion, days, workingDays, includeLinked}`를 보낸다. `days`는 절댓값이 1~3,650인 정수다. `workingDays`가 참이면 프로젝트 달력을 적용한다. `includeLinked`가 참이면 현재 연결된 전체 업무를 대상으로 기존 일정 중 이동할 날짜를 계산한다. 프로젝트 업무 10,000개나 연결 업무 1,000개를 초과하면 `413`을 반환한다. 응답은 계획 날짜의 `plan.from`과 `plan.to`, 업무 `changes`, 제외 업무 `skipped`, 선후행 `warnings`, 적용 차단 사유 `blocking`을 담는다. 적용 가능한 변경이 있으면 30분 동안 사용할 `previewId`를 발급한다.
 
-연결 업무의 날짜를 옮기는 요청에서 `warnings`는 변경에 걸린 열린 프로젝트 간 차단 관계도 포함한다. Teamspace 관계와 확인된 Jira 관계를 읽고 후행 프로젝트의 달력으로 검토한다. 미리보기 이후 관련 관계·업무·달력이 달라지면 적용 요청에 `409`를 반환한다.
+연결 업무의 날짜를 옮기는 요청에서 `warnings`는 변경에 걸린 열린 프로젝트 간 차단 관계도 포함한다. Donefac 관계와 확인된 Jira 관계를 읽고 후행 프로젝트의 달력으로 검토한다. 미리보기 이후 관련 관계·업무·달력이 달라지면 적용 요청에 `409`를 반환한다.
 
 `POST /api/planning-items/:id/schedule-apply`는 `{previewId}`를 받아 미리보기를 만든 작업자와 계획, 검토 이후 바뀐 연관 자료를 확인한다. 일정·변경 이력·되돌리기·적용 결과를 원자적으로 저장한다. 응답은 `{plan, undoId, updated, warnings}`다. 같은 ID의 적용 결과는 7일간 다시 받을 수 있다. `POST /api/schedule/undo`에 `{undoId}`를 보내면 검토 대상의 날짜를 함께 복원하며 복원된 `plan`도 응답에 포함한다. 이 작업의 미리보기·적용 결과·되돌리기 기록은 자체 백업 복원 시 초기화한다.
 

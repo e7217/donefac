@@ -22,7 +22,7 @@ const secret = `synthetic-move-portable-${randomUUID()}`;
 const repository = 423;
 
 async function open(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-project-move-portable-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-project-move-portable-'));
   const service = createApp({ dataDir: directory, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {
@@ -275,7 +275,7 @@ test('a moved current key does not disambiguate a different Jira issue in the ro
   const { project: source, issue: imported, jiraKey } = await importJiraProject(call, instanceKey, 'KEYFROM');
   const target = await call<Project>('/projects', 201, 'POST', { key: 'ORIG', name: '이관 키와 충돌하는 도착 프로젝트' });
   const native = await call<Issue>('/issues', 201, 'POST', {
-    projectId: source.id, status: imported.status, type: imported.type, title: '이동할 Teamspace 업무',
+    projectId: source.id, status: imported.status, type: imported.type, title: '이동할 Donefac 업무',
   });
   const targetSchema = await call<ProjectIssueSchema>(`/projects/${target.id}/issue-schema`);
   const path = `/issues/${native.id}/project-move`;

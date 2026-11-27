@@ -5,7 +5,7 @@ import type { Favorite, FavoriteResourceType, FeatureProps } from '../../shared/
 import { api, ApiError } from '../lib/api';
 import { FavoriteButton, FavoritesView } from './Favorites';
 
-const FAVORITES_CHANGED = 'teamspace:favorites-changed';
+const FAVORITES_CHANGED = 'donefac:favorites-changed';
 
 type Session = { actorId: string; pending: Set<string>; reader: AbortController | null };
 type ListState = { session: Session; favorites: Favorite[]; pending: Set<string>; ready: boolean; loading: boolean; error: string };
@@ -60,16 +60,16 @@ export function FavoritesProvider({ actorId, notify, children }: Pick<FeaturePro
     };
     const timer = window.setTimeout(refresh, 0);
     window.addEventListener('focus', refresh);
-    window.addEventListener('teamspace:trash-changed', refresh);
-    window.addEventListener('teamspace:workspace-imported', refresh);
+    window.addEventListener('donefac:trash-changed', refresh);
+    window.addEventListener('donefac:workspace-imported', refresh);
     window.addEventListener(FAVORITES_CHANGED, change);
     return () => {
       clearTimeout(timer);
       activeSession.current = null;
       session.reader?.abort();
       window.removeEventListener('focus', refresh);
-      window.removeEventListener('teamspace:trash-changed', refresh);
-      window.removeEventListener('teamspace:workspace-imported', refresh);
+      window.removeEventListener('donefac:trash-changed', refresh);
+      window.removeEventListener('donefac:workspace-imported', refresh);
       window.removeEventListener(FAVORITES_CHANGED, change);
     };
   }, [actorId, load]);

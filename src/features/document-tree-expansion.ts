@@ -20,7 +20,7 @@ function revealPath(collapsed: ReadonlySet<string>, ancestors: readonly { id: st
 
 export function useDocumentTreeExpansion(actorId: string, restoreGeneration: string | undefined,
   selectedDocumentId: string | null, ancestors: readonly { id: string }[]) {
-  const key = `teamspace:document-tree-expansion:${JSON.stringify([actorId, restoreGeneration ?? null])}`;
+  const key = `donefac:document-tree-expansion:${JSON.stringify([actorId, restoreGeneration ?? null])}`;
   // Keep the reveal stable while snapshots refresh or unrelated document data changes.
   const selection = JSON.stringify([selectedDocumentId, ancestors.map(page => page.id)]);
   const [view, setView] = useState<TreeExpansion>(() => ({

@@ -300,7 +300,7 @@ export class SavedViewService {
           throw error;
         }
         if (preview.revision !== revision) return staleJiraPreview();
-        if (preview.requiresProjectOrderAcceptance && !acceptProjectOrder) return fail('Jira 정렬 대신 Teamspace 프로젝트 순서를 사용하는 데 동의해주세요.');
+        if (preview.requiresProjectOrderAcceptance && !acceptProjectOrder) return fail('Jira 정렬 대신 Donefac 프로젝트 순서를 사용하는 데 동의해주세요.');
         return create(req, project.id, name, { layout, filters: preview.filters, ...(preview.sort ? { sort: preview.sort } : {}) }, actorId);
       });
       res.status(201).json(view);

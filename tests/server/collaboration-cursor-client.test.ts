@@ -139,7 +139,7 @@ test('schema 17 pending text rejoins its retained epoch and stays recoverable ac
   source.getXmlFragment('default').push([paragraph]);
   const update = encodeBytes(Y.encodeStateAsUpdate(source));
   source.destroy();
-  const oldKey = `teamspace:collaboration-pending:${self.actorId}:${snapshot.id}:${epoch}:17:fixture`;
+  const oldKey = `donefac:collaboration-pending:${self.actorId}:${snapshot.id}:${epoch}:17:fixture`;
   const oldCache = JSON.stringify({ epoch, schemaVersion: 17, update, pending: true, updatedAt: '2026-11-25T00:00:00Z' });
   storage.set(oldKey, oldCache);
   const joined = new CollaborationClient({ enabled: true, epoch, schemaVersion: COLLABORATION_SCHEMA, document: snapshot }, self.actorId, () => {}, () => {});

@@ -22,8 +22,8 @@ test('공동 편집의 이동한 블록을 지웠다가 복구하면 두 사용�
   try {
     const enabled = await request.post(`/api/documents/${document.id}/collaboration/enable`, { data: { expectedVersion: document.version } });
     expect(enabled.status(), await enabled.text()).toBe(200);
-    await page.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), workspace.users[0].id);
-    await peerContext.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), workspace.users[1].id);
+    await page.addInitScript(actor => localStorage.setItem('donefac.actor', actor), workspace.users[0].id);
+    await peerContext.addInitScript(actor => localStorage.setItem('donefac.actor', actor), workspace.users[1].id);
     const peer = await peerContext.newPage();
     const route = `/#/${project.id}/documents/${document.id}`;
     await page.setViewportSize({ width: 360, height: 820 });
@@ -117,7 +117,7 @@ test('공동 편집의 이동 기록이 가득 차면 새 블록 입력을 건�
     expect((await receipt).type).toBe('ack');
     socket.terminate();
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/documents/${document.id}`);
     const body = page.locator('.docs-live-prose');
     const blocks = body.locator(':scope > p');

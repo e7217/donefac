@@ -15,7 +15,7 @@ import type { Issue, Milestone, Project, ScheduleBaseline, User, WorkCalendar, W
 
 type Export = WorkspaceSnapshot & { schemaVersion: number; comments: unknown[]; revisions: unknown[]; attachments: unknown[]; attachmentContents: unknown[]; trashEntries?: unknown[] };
 async function fixture(withSeed = true) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-schedule-artifacts-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-schedule-artifacts-'));
   const service = createApp({ dataDir: dir, seed: withSeed }); const server = service.app.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
   return {
@@ -125,7 +125,7 @@ test('current backup round-trips historical rows and calendar snapshots, bumps r
 });
 
 test('pure validation accepts missing historical IDs but rejects cross-project current IDs; capture audit rollback leaves no baseline', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-artifact-pure-')), store = new Store(dir); seed(store); const service = new ScheduleArtifactService(store);
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-artifact-pure-')), store = new Store(dir); seed(store); const service = new ScheduleArtifactService(store);
   try {
     const projects = store.all<Project>('projects'), users = store.all<User>('users'), issues = store.all<Issue>('issues');
     const calendar: WorkCalendar = defaultWorkCalendar('project-neo');

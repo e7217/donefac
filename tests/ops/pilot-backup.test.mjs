@@ -16,13 +16,13 @@ const { createApp } = await tsImport('../../server/app.ts', import.meta.url);
 const { AttachmentFiles } = await tsImport('../../server/attachments.ts', import.meta.url);
 const { Store } = await tsImport('../../server/store.ts', import.meta.url);
 const actor = 'user-seo';
-const dbFile = 'teamspace.sqlite';
+const dbFile = 'donefac.sqlite';
 const keyFile = '.credential-key';
 const journalFile = '.attachments-import.json';
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
 function tempDirectory(t) {
-  const root = mkdtempSync(join(tmpdir(), 'teamspace-pilot-backup-test-'));
+  const root = mkdtempSync(join(tmpdir(), 'donefac-pilot-backup-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return root;
 }
@@ -218,7 +218,7 @@ test('cold backup rejects preexisting missing or wrong referenced bytes without 
     assert.deepEqual(readFileSync(join(source, dbFile)), databaseBytes);
     confirmDamage(source, file, changed);
   }
-  assert.ok(!readdirSync(f.root).some(name => name.startsWith('.teamspace-backup-')));
+  assert.ok(!readdirSync(f.root).some(name => name.startsWith('.donefac-backup-')));
 });
 
 test('cold restore rejects damaged references even when the outer backup manifest matches the damaged copy', async t => {
@@ -246,7 +246,7 @@ test('cold restore rejects damaged references even when the outer backup manifes
     assert.deepEqual(readFileSync(join(payload, dbFile)), databaseBytes);
     confirmDamage(payload, file, changed);
   }
-  assert.ok(!readdirSync(f.root).some(name => name.startsWith('.teamspace-restore-')));
+  assert.ok(!readdirSync(f.root).some(name => name.startsWith('.donefac-restore-')));
 });
 
 test('cold backup validates the attachment directory selected by native import recovery before and after SQLite commit', async t => {
@@ -360,7 +360,7 @@ test('cold backup and restore require a matching key even if the backup manifest
   assert.throws(() => new Store(source), mismatch);
   refuses('backup', source, join(root, 'rejected-backup'), mismatch);
   assert.deepEqual(readFileSync(keyPath), wrongKey);
-  assert.ok(!readdirSync(root).some(name => name.startsWith('.teamspace-backup-')));
+  assert.ok(!readdirSync(root).some(name => name.startsWith('.donefac-backup-')));
 
   writeFileSync(keyPath, originalKey);
   succeeds('backup', source, backup);
@@ -380,7 +380,7 @@ test('cold backup and restore require a matching key even if the backup manifest
   refuses('restore', backup, join(root, 'rejected-restore'), mismatch);
   assert.deepEqual(readFileSync(backupKey), wrongKey);
   assert.equal(readFileSync(manifestPath, 'utf8'), manifestText);
-  assert.ok(!readdirSync(root).some(name => name.startsWith('.teamspace-restore-')));
+  assert.ok(!readdirSync(root).some(name => name.startsWith('.donefac-restore-')));
 });
 
 test('older workspaces without stored credentials can generate a fresh key', async t => {

@@ -119,10 +119,10 @@ export function IssuePriorityLabelFilters({ issues, value, onApply }: {
       event.preventDefault();
       event.returnValue = '';
     }
-    window.addEventListener('teamspace:navigate', guard);
+    window.addEventListener('donefac:navigate', guard);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', guard);
+      window.removeEventListener('donefac:navigate', guard);
       window.removeEventListener('beforeunload', unload);
     };
   }, [discard]);

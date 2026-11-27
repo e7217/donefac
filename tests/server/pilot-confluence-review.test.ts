@@ -3,8 +3,8 @@ import { Readable } from 'node:stream';
 import { test } from 'node:test';
 import { readPilotConfluenceReview, type PilotConfluenceReview } from '../../server/pilot-confluence-review.js';
 
-const originalRestrictions = { TEAMSPACE_PILOT_CONFLUENCE_RESTRICTIONS: 'stdin' };
-const reviewEnv = { TEAMSPACE_PILOT_CONFLUENCE_REVIEW: 'stdin' };
+const originalRestrictions = { DONEFAC_PILOT_CONFLUENCE_RESTRICTIONS: 'stdin' };
+const reviewEnv = { DONEFAC_PILOT_CONFLUENCE_REVIEW: 'stdin' };
 const versionOneReview: PilotConfluenceReview = {
   packageId: '00000000-0000-4000-8000-000000000001',
   archiveSha256: 'a'.repeat(64),

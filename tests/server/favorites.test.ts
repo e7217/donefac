@@ -14,7 +14,7 @@ const favoritePath = (type: Favorite['resourceType'], id: string) => `/favorites
 type Backup = WorkspaceSnapshot & { schemaVersion: number; favorites?: FavoriteRecord[] };
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-favorites-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-favorites-'));
   async function start() {
     const runtime = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false, recurringIssueWorker: false });
     const server = runtime.app.listen(0, '127.0.0.1');

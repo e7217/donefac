@@ -98,10 +98,10 @@ function useIntakeMutation(actorId: string, projectId: string, notify: FeaturePr
       event.preventDefault();
       event.returnValue = '';
     };
-    window.addEventListener('teamspace:navigate', beforeNavigation);
+    window.addEventListener('donefac:navigate', beforeNavigation);
     window.addEventListener('beforeunload', beforeUnload);
     return () => {
-      window.removeEventListener('teamspace:navigate', beforeNavigation);
+      window.removeEventListener('donefac:navigate', beforeNavigation);
       window.removeEventListener('beforeunload', beforeUnload);
     };
   });

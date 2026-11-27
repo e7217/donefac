@@ -17,7 +17,7 @@ const reminderKinds: ReadonlySet<string> = new Set(ISSUE_DEADLINE_REMINDER_KINDS
 type Backup = WorkspaceSnapshot & { schemaVersion: number; teamNotifications: TeamNotification[]; deadlineReminderPreferences: DeadlineReminderPreferenceRecord[] };
 
 async function fixture(t: TestContext, initialInstant: string, worker = true) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-deadline-route-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-deadline-route-'));
   let instant = initialInstant;
   async function start() {
     const app = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: worker,
@@ -60,7 +60,7 @@ async function fixture(t: TestContext, initialInstant: string, worker = true) {
   }
   async function observeWorker(actorId: string, kind: string) {
     // Observe persisted effects without an inbox request participating in delivery.
-    const reader = new DatabaseSync(join(dataDir, 'teamspace.sqlite'), { readOnly: true });
+    const reader = new DatabaseSync(join(dataDir, 'donefac.sqlite'), { readOnly: true });
     try {
       const query = reader.prepare('SELECT id FROM team_notifications WHERE recipient_id=? AND kind=?');
       const expires = Date.now() + 3_000;

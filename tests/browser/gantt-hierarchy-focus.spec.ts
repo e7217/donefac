@@ -101,7 +101,7 @@ test('360px 프로젝트 간트에서 검색 밖의 하위 일정을 고치고 �
     const view = await f.view(`${f.prefix} 원래 보기`);
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     const hash = `#/${f.project.id}/gantt?savedView=${view.id}`;
     await page.goto(`/${hash}`);
     const g = gantt(page);
@@ -210,7 +210,7 @@ test('360px 하위 업무 전체 이동을 최신 구성으로 다시 검토하�
     const members = [parent, child, nested];
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     await page.goto(`/#/${f.project.id}/gantt`);
     const g = gantt(page);
     const openMove = g.panel.getByRole('button', { name: '상위·하위 일정 함께 이동', exact: true });
@@ -341,7 +341,7 @@ test('전체 프로젝트 간트에서 하위 업무 일정과 원래 보기 사
     const foreign = await f.issue('선택한 팀 업무 다른 프로젝트', { projectId: f.otherProject.id, assigneeId: f.actor.id });
     await f.link(predecessor, parent);
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
     const hash = `#/${f.project.id}/gantt?scope=team&ganttProject=${f.project.id}&ganttAssignee=${f.actor.id}&ganttUnscheduled=1`;
     await page.goto(`/${hash}`);
     await expect(page.getByRole('heading', { name: '전체 프로젝트 간트', exact: true })).toBeVisible();

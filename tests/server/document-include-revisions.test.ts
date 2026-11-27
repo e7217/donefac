@@ -31,7 +31,7 @@ function version(id: string, number: number, documentId = 'source'): DocRevision
 }
 
 test('revision selection pages contain only summaries and exact reads follow trash lifecycle', async t => {
-  const scratch = mkdtempSync(join(tmpdir(), 'teamspace-include-revisions-'));
+  const scratch = mkdtempSync(join(tmpdir(), 'donefac-include-revisions-'));
   const store = new Store(scratch);
   const app = express();
   registerDocumentIncludeRevisionRoutes(app, store);
@@ -96,7 +96,7 @@ test('revision selection pages contain only summaries and exact reads follow tra
 });
 
 test('version-specific links download the saved file through trash and backup without sharing archived files across documents', async t => {
-  const scratch = mkdtempSync(join(tmpdir(), 'teamspace-revision-files-'));
+  const scratch = mkdtempSync(join(tmpdir(), 'donefac-revision-files-'));
   const runtime = createApp({ dataDir: scratch, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   t.after(async () => {

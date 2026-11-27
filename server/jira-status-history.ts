@@ -310,7 +310,7 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport, issueIds?:
             (!fallback || typeof appendProject === 'string' && observedInProject(issue, appendProject, context.receipt))) {
           const snapshots = sourceIssues.all(issue.id, sourceImportId, source.instanceKey, packageSha256,
             issue.id, issue.id, Number(fallback), appendProject || issue.projectId) as unknown as ArchiveRow[];
-          // A standalone archive row cannot establish that the Jira issue was adopted into this Teamspace issue.
+          // A standalone archive row cannot establish that the Jira issue was adopted into this Donefac issue.
           const ownerVerified = snapshots.length > 0 && snapshots.every(({ json }) => {
             const snapshot = readArchive(json);
             if (!snapshot || snapshot.excluded || context.excluded.has(`${sourcePackage.stagingId}/${snapshot.record.id}`) ||

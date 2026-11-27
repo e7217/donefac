@@ -23,7 +23,7 @@ const schemaPath = `/projects/${projectId}/issue-schema`;
 type Backup = { schemaVersion: number; issueChangeHistory?: IssueChangeHistoryEntry[] };
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-issue-change-history-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-issue-change-history-'));
   async function start() {
     const service = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false });
     const server = service.app.listen(0, '127.0.0.1');
@@ -153,7 +153,7 @@ test('bulk and Gantt mutations record committed before and after values, roll ba
     issues: [first, second].map(({ id, version }) => ({ id, expectedVersion: version })), changes: { priority: 'high' },
   });
   assert.ok(bulk.previewId);
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     db.exec(`CREATE TRIGGER reject_second_field_change BEFORE UPDATE ON issues
       WHEN json_extract(NEW.json, '$.title') = '합성 일괄 변경 두 번째 업무'

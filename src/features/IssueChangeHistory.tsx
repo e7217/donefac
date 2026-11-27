@@ -56,8 +56,8 @@ export function IssueChangeHistory({ issueId, issueVersion }: { issueId: string;
       setResult(null);
       setRequest({ issueVersion });
     }
-    window.addEventListener('teamspace:workspace-imported', reloadAfterImport);
-    return () => window.removeEventListener('teamspace:workspace-imported', reloadAfterImport);
+    window.addEventListener('donefac:workspace-imported', reloadAfterImport);
+    return () => window.removeEventListener('donefac:workspace-imported', reloadAfterImport);
   }, [issueVersion]);
 
   return <section className="issue-field-history" aria-label="필드 변경 기록">

@@ -44,7 +44,7 @@ yarn-error.log*
 # OS metadata
 .DS_Store
 
-# Teamspace runtime state
+# Donefac runtime state
 /data/
 /test-results/
 /playwright-report/

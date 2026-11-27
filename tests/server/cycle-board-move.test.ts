@@ -18,7 +18,7 @@ const byId = (snapshot: WorkspaceSnapshot, issue: Issue) => snapshot.issues.find
 type RejectedMove = { details?: { reason: string; currentVersion?: string; currentIssueVersion?: number; currentCycleVersion?: number } };
 
 async function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-cycle-board-move-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-cycle-board-move-'));
   async function start() {
     const app = createApp({ dataDir: dir, outboundWorker: false, deadlineReminderWorker: false });
     const server = app.app.listen(0, '127.0.0.1');
@@ -229,7 +229,7 @@ test('cycle board rolls back membership, rank and side effects if the receipt ca
   const moving = await f.issue('동시에 순위를 바꿀 업무');
   const command = moveInput(await f.order(), moving, null, target, anchor, 'before');
   const before = await f.workspace();
-  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     database.exec(`CREATE TRIGGER fail_cycle_board_receipt BEFORE INSERT ON cycle_board_move_requests
       BEGIN SELECT RAISE(ABORT, 'synthetic cycle board receipt failure'); END`);

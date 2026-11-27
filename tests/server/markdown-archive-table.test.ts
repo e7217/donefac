@@ -9,7 +9,7 @@ test('archived HTML tables preserve deeper editable headings and section identif
   const path = 'documents/tables.md';
   const archive = zip([
     { path: 'manifest.json', bytes: Buffer.from(JSON.stringify({
-      format: 'teamspace-document-markdown', schemaVersion: 1, source: 'saved', attachments: [],
+      format: 'donefac-document-markdown', schemaVersion: 1, source: 'saved', attachments: [],
       documents: [{ id: 'table-doc', title: '표', path, parentId: null }],
     })) },
     { path, bytes: Buffer.from('<table>\n<tbody>\n<tr><td><h4>4단계</h4><h5>5단계</h5><h6>6단계</h6></td></tr>\n</tbody>\n</table>\n') },
@@ -27,7 +27,7 @@ test('archived HTML tables preserve deeper editable headings and section identif
   assert.deepEqual(plan.warnings, []);
 });
 
-test('malformed and unsafe HTML tables in a Teamspace archive remain literal and produce a review warning', async () => {
+test('malformed and unsafe HTML tables in a Donefac archive remain literal and produce a review warning', async () => {
   const documents = [
     {
       id: 'bad-grid', title: '범위가 잘못된 표', path: 'documents/bad-grid.md',
@@ -40,7 +40,7 @@ test('malformed and unsafe HTML tables in a Teamspace archive remain literal and
   ];
   const archive = zip([
     { path: 'manifest.json', bytes: Buffer.from(JSON.stringify({
-      format: 'teamspace-document-markdown', schemaVersion: 1, source: 'saved', attachments: [],
+      format: 'donefac-document-markdown', schemaVersion: 1, source: 'saved', attachments: [],
       documents: documents.map(({ id, title, path }) => ({ id, title, path, parentId: null })),
     })) },
     ...documents.map(({ title, path, table }) => ({ path, bytes: Buffer.from(`# ${title}\n\n표 앞 문장\n\n${table}\n\n표 뒤 문장\n`) })),
@@ -48,7 +48,7 @@ test('malformed and unsafe HTML tables in a Teamspace archive remain literal and
   const plan = await prepareMarkdownArchive(archive, {
     actorId: 'user-min', projectId: null, parentId: null, timestamp: '2026-11-23T00:00:00.000Z',
   });
-  assert.equal(plan.format, 'teamspace');
+  assert.equal(plan.format, 'donefac');
   assert.equal(plan.documents.length, 2);
   assert.deepEqual(plan.attachments, []);
   for (const { path, title, table } of documents) {

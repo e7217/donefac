@@ -37,7 +37,7 @@ export function renderPilotAccessPage({ authenticated, error, returnFragment = '
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>팀 접속 | Teamspace</title>
+  <title>팀 접속 | Donefac</title>
   <style nonce="${nonce}">
     * { box-sizing: border-box; }
     body {
@@ -98,7 +98,7 @@ export function renderPilotAccessPage({ authenticated, error, returnFragment = '
 </head>
 <body>
   <main>
-    <p class="brand">Teamspace</p>
+    <p class="brand">Donefac</p>
     <h1>팀 접속</h1>${content}
   </main>${authenticated ? '' : `
   <script nonce="${nonce}">

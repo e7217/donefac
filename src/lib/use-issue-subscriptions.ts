@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
 
-export const ISSUE_SUBSCRIPTIONS_CHANGED = 'teamspace:issue-subscriptions-changed';
+export const ISSUE_SUBSCRIPTIONS_CHANGED = 'donefac:issue-subscriptions-changed';
 
 const emptyIds: ReadonlySet<string> = new Set();
 type SubscriptionSnapshot = { actorId: string; ids?: ReadonlySet<string>; failed: boolean };
@@ -40,16 +40,16 @@ export function useIssueSubscriptions(actorId: string) {
     };
     reload();
     window.addEventListener(ISSUE_SUBSCRIPTIONS_CHANGED, reload);
-    window.addEventListener('teamspace:trash-changed', reload);
-    window.addEventListener('teamspace:workspace-imported', imported);
+    window.addEventListener('donefac:trash-changed', reload);
+    window.addEventListener('donefac:workspace-imported', imported);
     window.addEventListener('focus', refreshOnFocus);
     document.addEventListener('visibilitychange', refreshOnFocus);
     return () => {
       request.current?.abort();
       request.current = null;
       window.removeEventListener(ISSUE_SUBSCRIPTIONS_CHANGED, reload);
-      window.removeEventListener('teamspace:trash-changed', reload);
-      window.removeEventListener('teamspace:workspace-imported', imported);
+      window.removeEventListener('donefac:trash-changed', reload);
+      window.removeEventListener('donefac:workspace-imported', imported);
       window.removeEventListener('focus', refreshOnFocus);
       document.removeEventListener('visibilitychange', refreshOnFocus);
     };

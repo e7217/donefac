@@ -14,7 +14,7 @@ type Scope = { actorId: string; documentId: string; parentId: string };
 type ReplyAttempt = { requestId: string; expectedResolutionVersion: number };
 type CachedReply = { draft: CommentDraft; attempt?: ReplyAttempt; rejected?: true };
 type ReplyEditor = Scope & CachedReply & { error: string };
-const CACHE_PREFIX = 'teamspace:document-selection-comment-draft:reply:';
+const CACHE_PREFIX = 'donefac:document-selection-comment-draft:reply:';
 const UNKNOWN_RESULT = '답글 등록 결과를 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.';
 const REJECTED_REPLAY = '현재 답글을 확인한 뒤 새로 등록할 내용을 수정해 주세요.';
 const cachePrefix = (actorId: string, documentId: string) => `${CACHE_PREFIX}${encodeURIComponent(actorId)}:${encodeURIComponent(documentId)}:`;
@@ -69,10 +69,10 @@ export function useDocumentCommentReply(actorId: string, documentId: string | un
       setBusy(false);
       setRestoredAttempts(null);
     }
-    window.addEventListener('teamspace:workspace-imported', clear);
+    window.addEventListener('donefac:workspace-imported', clear);
     return () => {
       clearTimeout(timer);
-      window.removeEventListener('teamspace:workspace-imported', clear);
+      window.removeEventListener('donefac:workspace-imported', clear);
     };
   }, [prefix, assignEditor, reportStorageProblem]);
 

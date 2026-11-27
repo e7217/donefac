@@ -23,7 +23,7 @@ const apiProject = `/forge/api/v4/projects/${repositoryId}`;
 type NativeBackup = { schemaVersion: number; exportedAt: string; gitlabMergeRequestObservations?: GitlabMergeRequestReadObservation[] };
 
 test('scoped MR reads establish a monotone baseline that survives restart and validated native restore', async t => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-gitlab-mr-observation-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-gitlab-mr-observation-'));
   let baseUrl = '';
   const repoUrl = () => `${baseUrl}/team/product`;
   const mergeRequestUrl = (number = iid) => `${repoUrl()}/-/merge_requests/${number}`;

@@ -211,7 +211,7 @@ export class TrashItemsService {
     const completed = this.store.db.prepare('DELETE FROM trash_file_cleanup WHERE file_id=?');
     for (const { id } of pending) {
       try { this.files.remove(id); completed.run(id); }
-      catch { console.error('[teamspace attachments] deferred trash cleanup:', id); }
+      catch { console.error('[donefac attachments] deferred trash cleanup:', id); }
     }
   }
 

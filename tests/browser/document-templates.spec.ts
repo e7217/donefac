@@ -90,7 +90,7 @@ test('360px 내장 템플릿의 문서 생성 응답을 잃어도 한 번만 만
   const createdDocuments = () => workspace(request).then(snapshot => snapshot.documents.filter(document => document.title === title));
 
   try {
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     page.on('dialog', dialog => void dialog.accept());
     await page.goto(`/#/${project.id}/documents/${parent.id}`);
     const { dialog, title: titleInput, submit } = await openNew(page);
@@ -171,7 +171,7 @@ test('빈 문서 공간에서 저장한 문서가 목록에 나타날 때까지 
   let showCreatedDocument = false;
 
   try {
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.route('**/api/workspace', async route => {
       const response = await route.fetch();
       const snapshot = await response.json() as WorkspaceSnapshot;
@@ -234,7 +234,7 @@ test('360px에서 원본이 삭제된 템플릿의 본문 이미지와 첨부를
     const source = await json<DocPage>(await request.patch(`/api/documents/${original.id}`, { data: {
       expectedVersion: original.version, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION, content,
     } }));
-    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), actor.id);
+    await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), actor.id);
     await page.goto(`/#/${project.id}/documents/${source.id}`);
     await page.getByRole('button', { name: '팀 템플릿으로 저장', exact: true }).click();
     const manager = captureDialog(page);
@@ -337,7 +337,7 @@ test('360px에서 저장한 문서 템플릿으로 독립 초안을 만들고 �
     const source = await json<DocPage>(await request.patch(`/api/documents/${original.id}`, { data: {
       expectedVersion: original.version, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION, content,
     } }));
-    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), actor.id);
+    await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), actor.id);
     await page.goto(`/#/${project.id}/documents/${source.id}`);
     const open = page.getByRole('button', { name: '팀 템플릿으로 저장', exact: true });
     await open.click();

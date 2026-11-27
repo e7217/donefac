@@ -46,27 +46,27 @@ function CalloutHeader({ attrs, children }: { attrs: AnnotationAttrs; children?:
 }
 
 export function ReadonlyCallout({ attrs, children }: { attrs: AnnotationAttrs; children: ReactNode }) {
-  return <aside className="document-callout" data-teamspace-node="callout" data-callout-variant={calloutVariant(attrs)} data-callout-title={textAttr(attrs.title)}>
+  return <aside className="document-callout" data-donefac-node="callout" data-callout-variant={calloutVariant(attrs)} data-callout-title={textAttr(attrs.title)}>
     <CalloutHeader attrs={attrs} />
-    <div className="document-callout-content" data-teamspace-callout-content="">{children}</div>
+    <div className="document-callout-content" data-donefac-callout-content="">{children}</div>
   </aside>;
 }
 
 export function ReadonlyStatusBadge({ attrs }: { attrs: AnnotationAttrs }) {
   const label = textAttr(attrs.label);
-  return <span className="document-status-badge" data-teamspace-node="statusBadge" data-status-tone={statusTone(attrs)} data-status-label={label}>{label}</span>;
+  return <span className="document-status-badge" data-donefac-node="statusBadge" data-status-tone={statusTone(attrs)} data-status-label={label}>{label}</span>;
 }
 
 function CalloutNodeView({ node, getPos, editor }: NodeViewProps) {
   const open = useContext(AnnotationContext);
   const { attrs } = node;
-  return <NodeViewWrapper as="aside" className="document-callout" data-teamspace-node="callout"
+  return <NodeViewWrapper as="aside" className="document-callout" data-donefac-node="callout"
     data-callout-variant={calloutVariant(attrs)} data-callout-title={textAttr(attrs.title)}>
     <CalloutHeader attrs={attrs}>
       {open && <button className="document-callout-edit" type="button" aria-label="안내 상자 설정" title="안내 상자 설정"
         onClick={event => open(editor, 'callout', event.currentTarget, { getPos, attrs })}><Pencil size={14} aria-hidden="true" /></button>}
     </CalloutHeader>
-    <NodeViewContent className="document-callout-content" data-teamspace-callout-content="" />
+    <NodeViewContent className="document-callout-content" data-donefac-callout-content="" />
   </NodeViewWrapper>;
 }
 
@@ -76,7 +76,7 @@ function StatusBadgeNodeView({ node, getPos, editor }: NodeViewProps) {
   const label = textAttr(attrs.label);
   const tone = statusTone(attrs);
   return <NodeViewWrapper as="span" className="document-status-node" contentEditable={false}
-    data-teamspace-node="statusBadge" data-status-tone={tone} data-status-label={label}>
+    data-donefac-node="statusBadge" data-status-tone={tone} data-status-label={label}>
     {open ? <button className="document-status-badge" type="button" data-status-tone={tone} aria-label={`상태 배지 설정 · ${label}`}
       title="상태 배지 설정" onClick={event => {
         event.preventDefault();

@@ -44,7 +44,7 @@ test('360px에서 라벨로 가려진 문서 경로를 열고 상위 문서로 �
     const query = new URLSearchParams({ label: documentLabelKey(filter) });
     const address = (document: DocPage) => `#/${project.id}/documents/${document.id}?${query}`;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
     await page.goto(`/${address(leaf)}`);
     const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
     await expect(title).toHaveValue(leaf.title);
@@ -321,7 +321,7 @@ test('360px에서 같은 제목의 상위 문서를 경로로 구분해 이동�
     const firstChoice = `${firstPath} · ${firstParent.id}`;
     const secondPath = `${secondBranch.title} / ${repeatedTitle}`;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
     await page.goto(`/#/${source.id}/documents/${original.id}`);
     await page.getByRole('button', { name: '문서 이동', exact: true }).click();
     const move = page.getByRole('dialog', { name: '문서 이동', exact: true });
@@ -401,7 +401,7 @@ test('다른 사용자가 문서를 옮겨도 공동 편집 연결과 열린 초
       openedConnections++;
       socket.on('close', () => { closedConnections++; });
     });
-    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), author.id);
+    await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), author.id);
     await page.goto(`/#/${source.id}/documents/${document.id}`);
     const liveStatus = page.locator('.docs-collaboration-state');
     const editor = page.locator('.docs-live-prose');

@@ -35,7 +35,7 @@ type JobFixture = { id: number; name: string; stage: string; allow_failure: bool
 
 async function fixture(t: TestContext) {
   const calls: { method?: string; url: URL; credential?: string | string[] }[] = [];
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-gitlab-pipeline-jobs-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-gitlab-pipeline-jobs-'));
   let baseUrl = '';
   let pipeline = { id: pipelineId, iid: localIid, project_id: repositoryId, status: 'running', sha, updated_at: updatedAt,
     ref: 'main', yaml_errors: null as string | null };

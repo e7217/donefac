@@ -191,7 +191,7 @@ test('360px 간트에서 동료가 저장한 종료일과 내 시작일을 골�
     };
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     const confirmations: string[] = [];
     page.on('dialog', async dialog => {
       confirmations.push(dialog.message());
@@ -364,7 +364,7 @@ test('360px 간트의 공통 기준 연결에서 고른 기준의 날짜만 저�
     const excludedEnd = '2026-11-25';
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/gantt`);
     const search = page.getByLabel('간트 업무 검색', { exact: true });
     await expect(search).toBeVisible({ timeout: 35_000 });
@@ -514,7 +514,7 @@ test('360px 간트에서 선택한 업무 순서를 지켜 선후행 연결을 �
     };
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/gantt`);
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });
     const chartRows = chart.locator('.gantt-row[data-issue-id]');
@@ -649,7 +649,7 @@ test('360px 간트에서 순차 연결과 프로젝트 간 후행 일정을 한 
     const expectedAcrossProjects = [...expected, { issue: remote, start: '2030-01-18', end: '2030-01-21' }];
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/gantt`);
     const search = page.getByLabel('간트 업무 검색', { exact: true });
     await expect(search).toBeVisible({ timeout: 35_000 });
@@ -809,7 +809,7 @@ test('360px 간트에서 기존 선후행 연결의 간격만 바꾸고 선택�
     const includedEnd = '2026-11-25';
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/gantt`);
     const search = page.getByLabel('간트 업무 검색', { exact: true });
     await expect(search).toBeVisible({ timeout: 35_000 });

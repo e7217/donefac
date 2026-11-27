@@ -45,7 +45,7 @@ async function fixture(request: APIRequestContext) {
 }
 
 async function openGantt(page: Page, f: Awaited<ReturnType<typeof fixture>>, date: string, team = false) {
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.actor.id);
   await page.setViewportSize({ width: 360, height: 820 });
   await page.goto(`/#/${f.project.id}/gantt?ganttDate=${date}&ganttScale=day${team ? '&scope=team' : ''}`);
   const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });

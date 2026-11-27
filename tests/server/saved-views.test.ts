@@ -9,7 +9,7 @@ import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { GitlabLink, Issue, IssueViewSortRule, PlanningItem, PlanningKind, Priority, SavedView, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(directory?: string) {
-  const dir = directory || mkdtempSync(join(tmpdir(), 'teamspace-views-'));
+  const dir = directory || mkdtempSync(join(tmpdir(), 'donefac-views-'));
   const runtime = createApp({dataDir:dir});
   const server = runtime.app.listen(0, '127.0.0.1');
   await new Promise<void>(resolve => server.once('listening', resolve));

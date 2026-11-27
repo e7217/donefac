@@ -4,8 +4,8 @@ import Workspace from '../src/Workspace';
 import '../app/globals.css';
 
 const root = document.getElementById('root');
-if (!root) throw new Error('Teamspace root element is missing.');
-const pilotAccess = document.querySelector<HTMLMetaElement>('meta[name="teamspace-pilot-access"]')?.content === 'enabled';
+if (!root) throw new Error('Donefac root element is missing.');
+const pilotAccess = document.querySelector<HTMLMetaElement>('meta[name="donefac-pilot-access"]')?.content === 'enabled';
 
 createRoot(root).render(
   <StrictMode>

@@ -21,7 +21,7 @@ const unusedComponent = { id: '4203', name: '미배정 선택지' };
 const titles = ['이름이 바뀐 Jira 선택지', 'Jira에서 비운 선택', '필드가 빠진 응답', '불완전한 컴포넌트 응답', '팀이 수정한 선택'];
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-jira-components-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-jira-components-'));
   const service = createApp({ dataDir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {
@@ -69,7 +69,7 @@ async function fixture(t: TestContext) {
 }
 
 function removeProjectionFromStagedPackage(dataDir: string, pkg: LegacyPackageSummary) {
-  const db = new DatabaseSync(join(dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(dataDir, 'donefac.sqlite'));
   try {
     const removed = db.prepare(`DELETE FROM legacy_records WHERE package_id=? AND
       ((kind='field' AND source_id=?) OR (kind='option' AND json_extract(json,'$.containerId')=?))`)

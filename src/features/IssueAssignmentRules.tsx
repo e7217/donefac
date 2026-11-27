@@ -137,10 +137,10 @@ function ProjectAssignmentRules({ data, projectId, actorId, notify, openIssue }:
       setRuns(null);
       void load();
     };
-    window.addEventListener('teamspace:workspace-imported', imported);
+    window.addEventListener('donefac:workspace-imported', imported);
     return () => {
       pending.current?.abort();
-      window.removeEventListener('teamspace:workspace-imported', imported);
+      window.removeEventListener('donefac:workspace-imported', imported);
     };
   }, [load, resetEditor]);
 
@@ -165,10 +165,10 @@ function ProjectAssignmentRules({ data, projectId, actorId, notify, openIssue }:
       event.preventDefault();
       event.returnValue = '';
     };
-    window.addEventListener('teamspace:navigate', navigate);
+    window.addEventListener('donefac:navigate', navigate);
     window.addEventListener('beforeunload', beforeUnload);
     return () => {
-      window.removeEventListener('teamspace:navigate', navigate);
+      window.removeEventListener('donefac:navigate', navigate);
       window.removeEventListener('beforeunload', beforeUnload);
     };
   }, [dirty, notify, resetEditor]);

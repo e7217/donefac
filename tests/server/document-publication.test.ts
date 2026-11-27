@@ -35,13 +35,13 @@ type Action = 'request' | 'publish' | 'approve' | 'request_changes' | 'withdraw'
 const content = (text: string): RichContent => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
 
 async function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-document-publication-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-document-publication-'));
   const service = createApp({ dataDir: dir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   service.attachWebSocket(server);
   await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const database = new DatabaseSync(join(dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(dir, 'donefac.sqlite'));
   database.exec('PRAGMA foreign_keys=ON');
   const call = async <T = unknown>(path: string, method = 'GET', body?: unknown, actor = 'user-min', headers: Record<string, string> = {}) => {
     const response = await fetch(`${base}/api${path}`, {

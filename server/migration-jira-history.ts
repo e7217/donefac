@@ -161,7 +161,7 @@ function readJiraStatusTransitions(record: LegacyRecord): { position: number; fr
   });
 }
 
-/** Read status fields supplied by Jira, independent of Teamspace's current workflow. */
+/** Read status fields supplied by Jira, independent of Donefac's current workflow. */
 export function jiraStatusTransitions(record: LegacyRecord) {
   return isRestrictedJiraStatusHistory(record) ? [] : readJiraStatusTransitions(record);
 }

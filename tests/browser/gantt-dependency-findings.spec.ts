@@ -259,7 +259,7 @@ test('360px 팀 간트에서 가려진 프로젝트 간 차단의 날짜 충돌�
     const relation = await block(source, target), missingRelation = await block(source, missing);
     const ignored = [await block(completed, target), await block(source, outside)];
     const route = `#/${receiving.id}/gantt?${new URLSearchParams({ scope: 'team', ganttProject: receiving.id, ganttQ: prefix })}`;
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/${route}`);
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });
     const row = (issue: Issue) => chart.locator(`[data-issue-id="${issue.id}"]`);
@@ -284,7 +284,7 @@ test('360px 팀 간트에서 가려진 프로젝트 간 차단의 날짜 충돌�
     await expectCounts(1);
     await expect(conflict).toContainText(source.title);
     await expect(conflict).toContainText(target.title);
-    await expect(conflict.getByText('프로젝트 간 차단 · Teamspace', { exact: true })).toBeVisible();
+    await expect(conflict.getByText('프로젝트 간 차단 · Donefac', { exact: true })).toBeVisible();
     for (const label of ['선행 종료일', '현재 후행 시작일', '후행 시작일 가능일']) {
       await expect(conflict.getByText(label, { exact: true })).toBeVisible();
     }

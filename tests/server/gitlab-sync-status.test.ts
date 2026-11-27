@@ -17,7 +17,7 @@ const activityPath = `${integration}/sync`;
 const deploymentPath = `${integration}/deployments/sync`;
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-gitlab-sync-status-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-gitlab-sync-status-'));
   async function start() {
     const app = createApp({ dataDir, outboundWorker: false });
     const listener = app.app.listen(0, '127.0.0.1');
@@ -55,7 +55,7 @@ async function fixture(t: TestContext) {
     snapshot: async () => (await call<WorkspaceSnapshot>('/api/workspace')).data,
     async restart() { await app.close(); app = await start(); },
     persisted() {
-      const database = new DatabaseSync(join(dataDir, 'teamspace.sqlite'), { readOnly: true });
+      const database = new DatabaseSync(join(dataDir, 'donefac.sqlite'), { readOnly: true });
       try { return JSON.stringify(database.prepare('SELECT json FROM gitlab_manual_sync_status').all()); }
       finally { database.close(); }
     },

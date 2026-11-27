@@ -123,7 +123,7 @@ async function jiraFixture(t, { unavailableHistory = false, searchDrift = false,
 }
 
 async function invocation(t, options) {
-  const directory = await mkdtemp(join(tmpdir(), 'teamspace-jira-collector-'));
+  const directory = await mkdtemp(join(tmpdir(), 'donefac-jira-collector-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const config = join(directory, 'source.json');
   const output = join(directory, 'export.zip');
@@ -196,7 +196,7 @@ function assertPrivateOutput(result) {
   }
 }
 
-test('Jira pilot collection downloads paged and bound originals into a private Teamspace package', async t => {
+test('Jira pilot collection downloads paged and bound originals into a private Donefac package', async t => {
   const other = await serve(t, ({ json }) => json({}));
   const sameHostDestinationPath = `${context}/pages/viewpage.action`;
   const sameHostDestination = `${sameHostDestinationPath}?pageId=700`;
@@ -446,7 +446,7 @@ test('Jira project plan covers every visible tuple above 500 and collects a sele
   const { scopeSha256, ...inventory } = JSON.parse(planBytes);
   assert.match(scopeSha256, /^[0-9a-f]{64}$/u);
   assert.deepEqual(inventory, {
-    format: 'teamspace-jira-collection-plan', version: 1, batchSize: 100,
+    format: 'donefac-jira-collection-plan', version: 1, batchSize: 100,
     batches: Array.from({ length: 6 }, (_, index) => rows.slice(index * 100, (index + 1) * 100)),
   });
   assert.deepEqual(JSON.parse(planned.stdout), { issueCount: 501, batchCount: 6, sha256: planSha256 });

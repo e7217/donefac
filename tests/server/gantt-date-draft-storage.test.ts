@@ -77,8 +77,8 @@ test('Gantt draft storage namespaces scopes, actors and restore generations and 
     assert.ok(key.startsWith(GANTT_DATE_DRAFT_PREFIX));
     writeGanttDateDrafts(storage, key, new Map([[draft.id, draft]]));
   }
-  storage.setItem('teamspace:actor', 'actor-a');
+  storage.setItem('donefac:actor', 'actor-a');
   clearGanttDateDrafts(storage);
   assert.equal(storage.length, 1);
-  assert.equal(storage.getItem('teamspace:actor'), 'actor-a');
+  assert.equal(storage.getItem('donefac:actor'), 'actor-a');
 });

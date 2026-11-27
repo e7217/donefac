@@ -108,11 +108,11 @@ function ProjectRecurringIssues({ actorId, data, projectId, notify, refresh, ope
       resetEditor();
       reload();
     };
-    window.addEventListener('teamspace:workspace-imported', imported);
+    window.addEventListener('donefac:workspace-imported', imported);
     return () => {
       operation.current?.abort();
       operation.current = null;
-      window.removeEventListener('teamspace:workspace-imported', imported);
+      window.removeEventListener('donefac:workspace-imported', imported);
     };
   }, [reload, resetEditor]);
 
@@ -136,10 +136,10 @@ function ProjectRecurringIssues({ actorId, data, projectId, notify, refresh, ope
       event.preventDefault();
       event.returnValue = '';
     };
-    window.addEventListener('teamspace:navigate', guard);
+    window.addEventListener('donefac:navigate', guard);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', guard);
+      window.removeEventListener('donefac:navigate', guard);
       window.removeEventListener('beforeunload', unload);
     };
   }, [dirty, notify, resetEditor, uncertain]);

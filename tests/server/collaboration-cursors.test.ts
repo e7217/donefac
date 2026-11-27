@@ -73,7 +73,7 @@ class CursorSocket {
 }
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-collaboration-cursors-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-collaboration-cursors-'));
   const service = createApp({ dataDir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   service.attachWebSocket(server);

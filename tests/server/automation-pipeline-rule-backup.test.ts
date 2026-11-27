@@ -12,7 +12,7 @@ import type { AutomationRule, AutomationRun, GitlabLink, GitlabSettings } from '
 type Backup = { schemaVersion: number; automationRules: AutomationRule[]; automationRuns: AutomationRun[]; gitlabLinks: GitlabLink[] };
 
 test('native backup retains pipeline rule filters and decision metadata and restores rules disabled', async t => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-pipeline-rule-backup-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-pipeline-rule-backup-'));
   const runtime = createApp({ dataDir, seed: true, outboundWorker: false, deadlineReminderWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   t.after(async () => {

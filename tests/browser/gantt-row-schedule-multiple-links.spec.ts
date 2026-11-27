@@ -71,7 +71,7 @@ async function state(request: APIRequestContext, issue: Issue) {
 
 async function openRow(page: Page, anchor: Issue, actorId: string) {
   await page.setViewportSize({ width: 360, height: 820 });
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actorId);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actorId);
   await page.goto(`/#/${anchor.projectId}/gantt`);
   const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
   await expect(search).toBeVisible({ timeout: 35_000 });

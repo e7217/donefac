@@ -41,7 +41,7 @@ test('360px 업무 댓글에서 작성자가 충돌을 확인하고 같은 저�
     const comment = await addComment(request, author, 'issue', issue.id, '긴급 연락 전에 확인할 내용');
     const otherComment = await addComment(request, reviewer, 'issue', issue.id, '다른 팀원이 작성한 동료 의견');
     const path = `/api/comments/${comment.id}`;
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
     await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
     const panel = page.getByRole('dialog', { name: issue.title, exact: true });
     const article = panel.locator(`#issue-comment-${comment.id}`);
@@ -147,7 +147,7 @@ test('360px 문서의 전체 댓글과 발췌 댓글, 답글을 수정하고 원
     const resolved = await json<Comment>(await request.patch(`${path}/selection-comments/${root.id}/resolution`, {
       headers: actor(author), data: { state: 'resolved', expectedVersion: 0 },
     }));
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
     await page.goto(`${url}?comment=${reply.id}`);
     const rootArticle = page.locator(`#document-comment-${root.id}`);
     const replyArticle = rootArticle.locator(`#document-comment-${reply.id}`);

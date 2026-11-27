@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { isIssueRelationDirection, isIssueRelationType, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, type TeamspaceIssueRelation } from '../shared/issue-relations.js';
+import { isIssueRelationDirection, isIssueRelationType, isRelationId, isDonefacIssueRelation, issueRelationEndpoints, type DonefacIssueRelation } from '../shared/issue-relations.js';
 import type { Issue, IssueRelation, IssueRelationView, TeamScheduleBlocker } from '../shared/types.js';
 import { creationRequestFingerprint, creationRequestId } from './creation-request.js';
-import { findTeamspaceIssueRelation, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
+import { findDonefacIssueRelation, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
 import type { SourcePreservationService } from './source-preservation.js';
 import type { Store } from './store.js';
 import { workspaceRestoreGeneration } from './workspace-revisions.js';
@@ -51,7 +51,7 @@ export function listIssueRelations(store: Store, issueId: string, allowedProject
   return rows.map(row => JSON.parse(row.json) as IssueRelation);
 }
 
-function teamspaceBlockers(store: Store, { targetIds, issueIds, allowedProjects = null, crossProjectOnly = false, sameProjectOnly = false, limit }: {
+function donefacBlockers(store: Store, { targetIds, issueIds, allowedProjects = null, crossProjectOnly = false, sameProjectOnly = false, limit }: {
   targetIds?: readonly string[]; issueIds?: readonly string[]; allowedProjects?: readonly string[] | null;
   crossProjectOnly?: boolean; sameProjectOnly?: boolean; limit?: number;
 }): TeamScheduleBlocker[] {
@@ -67,7 +67,7 @@ function teamspaceBlockers(store: Store, { targetIds, issueIds, allowedProjects 
     FROM issue_relations AS relation
     JOIN issues AS source ON source.id=relation.source_issue_id
     JOIN issues AS target ON target.id=relation.target_issue_id
-    WHERE json_extract(relation.json, '$.origin')='teamspace' AND json_extract(relation.json, '$.type')='blocks'
+    WHERE json_extract(relation.json, '$.origin')='donefac' AND json_extract(relation.json, '$.type')='blocks'
       AND source.id<>target.id ${targetSql} ${incidentSql}
       AND (?=0 OR source.project_id<>target.project_id)
       AND (?=0 OR source.project_id=target.project_id)
@@ -78,9 +78,9 @@ function teamspaceBlockers(store: Store, { targetIds, issueIds, allowedProjects 
       scope, scope, scope, limit ?? -1) as TeamScheduleBlocker[];
 }
 
-export function directTeamspaceBlockers(store: Store, targetIds: readonly string[], allowedProjects: readonly string[] | null = null,
+export function directDonefacBlockers(store: Store, targetIds: readonly string[], allowedProjects: readonly string[] | null = null,
   limit?: number): TeamScheduleBlocker[] {
-  return teamspaceBlockers(store, { targetIds, allowedProjects, limit });
+  return donefacBlockers(store, { targetIds, allowedProjects, limit });
 }
 
 function mergeBlockers(native: TeamScheduleBlocker[], imported: TeamScheduleBlocker[], limit = Infinity): TeamScheduleBlocker[] {
@@ -122,7 +122,7 @@ export class IssueRelationsService {
       return view;
     });
     if (!relations.some(relation => relation.origin === undefined)) return relations;
-    const native = relations.filter(isTeamspaceIssueRelation)
+    const native = relations.filter(isDonefacIssueRelation)
       .filter(relation => relation.type === 'blocks')
       .map(({ id, sourceIssueId, targetIssueId, version }) => ({ id, sourceIssueId, targetIssueId, version }));
     const imported = this.sources.jiraIssueBlockers({ issueIds: [issueId], allowedProjects });
@@ -137,7 +137,7 @@ export class IssueRelationsService {
 
   directBlockers(targetIds: readonly string[], allowedProjects: readonly string[] | null = null, limit?: number): TeamScheduleBlocker[] {
     if (!targetIds.length || allowedProjects?.length === 0 || limit === 0) return [];
-    const native = directTeamspaceBlockers(this.store, targetIds, allowedProjects, limit);
+    const native = directDonefacBlockers(this.store, targetIds, allowedProjects, limit);
     if (limit !== undefined && native.length >= limit) return native;
     const targets = new Set(targetIds);
     const imported = this.sources.jiraIssueBlockers({ issueIds: targetIds, allowedProjects })
@@ -147,12 +147,12 @@ export class IssueRelationsService {
 
   teamScheduleBlockers(issueIds?: readonly string[]): TeamScheduleBlocker[] {
     const scope = { crossProjectOnly: true, issueIds };
-    return mergeBlockers(teamspaceBlockers(this.store, scope), this.sources.jiraIssueBlockers(scope));
+    return mergeBlockers(donefacBlockers(this.store, scope), this.sources.jiraIssueBlockers(scope));
   }
 
   localScheduleBlockers(allowedProjects: readonly string[] | null): TeamScheduleBlocker[] {
     const scope = { allowedProjects, sameProjectOnly: true };
-    return mergeBlockers(teamspaceBlockers(this.store, scope), this.sources.jiraIssueBlockers(scope));
+    return mergeBlockers(donefacBlockers(this.store, scope), this.sources.jiraIssueBlockers(scope));
   }
 
   create(issueId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): { relation: IssueRelation; created: boolean } {
@@ -181,7 +181,7 @@ export class IssueRelationsService {
       }
       const staleSource = source.version !== expectedSourceVersion;
       if (staleSource || target.version !== expectedTargetVersion) {
-        const existing = findTeamspaceIssueRelation(this.store, { sourceIssueId, targetIssueId, type: 'blocks' });
+        const existing = findDonefacIssueRelation(this.store, { sourceIssueId, targetIssueId, type: 'blocks' });
         if (existing) return { relation: existing, created: false };
         throw new IssueRelationError(409, `${staleSource ? '차단하는 업무' : '차단되는 업무'}가 변경되었습니다. 최신 업무를 확인해 주세요.`, {
           currentVersion: staleSource ? source.version : target.version,
@@ -201,7 +201,7 @@ export class IssueRelationsService {
     this.requireIssue(originalIssueId);
     const conflictingOriginal = this.store.db.prepare(`SELECT 1 FROM issue_relations
       WHERE source_issue_id=? AND target_issue_id<>?
-        AND json_extract(json,'$.origin')='teamspace' AND json_extract(json,'$.type')='duplicates' LIMIT 1`)
+        AND json_extract(json,'$.origin')='donefac' AND json_extract(json,'$.type')='duplicates' LIMIT 1`)
       .get(issueId, originalIssueId);
     if (conflictingOriginal) throw new IssueRelationError(409, '이미 다른 업무가 이 중복 업무의 원본으로 지정되어 있습니다.');
 
@@ -210,7 +210,7 @@ export class IssueRelationsService {
       SELECT ?
       UNION
       SELECT relation.target_issue_id FROM issue_relations AS relation JOIN originals ON relation.source_issue_id=originals.id
-      WHERE json_extract(relation.json,'$.origin')='teamspace' AND json_extract(relation.json,'$.type')='duplicates'
+      WHERE json_extract(relation.json,'$.origin')='donefac' AND json_extract(relation.json,'$.type')='duplicates'
     ) SELECT 1 FROM originals WHERE id=? LIMIT 1`).get(originalIssueId, issueId);
     if (cycle) throw new IssueRelationError(409, '중복 업무 관계가 순환하므로 원본으로 지정할 수 없습니다.');
     return this.createInTransaction(issueId, { otherIssueId: originalIssueId, type: 'duplicates', direction: 'outgoing' }, audit, notifyChange);
@@ -227,10 +227,10 @@ export class IssueRelationsService {
     const issue = this.requireIssue(issueId);
     const other = this.requireIssue(otherId);
     const endpoints = issueRelationEndpoints(issue.id, other.id, type, direction);
-    const existing = findTeamspaceIssueRelation(this.store, { ...endpoints, type });
+    const existing = findDonefacIssueRelation(this.store, { ...endpoints, type });
     if (existing) return { relation: existing, created: false };
 
-    const relation: TeamspaceIssueRelation = { id: randomUUID(), ...endpoints, origin: 'teamspace', type, version: 1, createdAt: new Date().toISOString() };
+    const relation: DonefacIssueRelation = { id: randomUUID(), ...endpoints, origin: 'donefac', type, version: 1, createdAt: new Date().toISOString() };
     this.store.db.prepare('INSERT INTO issue_relations(id,source_issue_id,target_issue_id,json) VALUES(?,?,?,?)')
       .run(relation.id, relation.sourceIssueId, relation.targetIssueId, JSON.stringify(relation));
     recordIssueRelationVersion(this.store, relation.version);
@@ -258,9 +258,9 @@ export class IssueRelationsService {
         this.recordRelationUpdate(receipt, relation.version);
         return relation;
       }
-      if (findTeamspaceIssueRelation(this.store, { ...endpoints, type })) throw new IssueRelationError(409, '같은 업무 관계가 이미 있습니다.');
+      if (findDonefacIssueRelation(this.store, { ...endpoints, type })) throw new IssueRelationError(409, '같은 업무 관계가 이미 있습니다.');
 
-      const updated: TeamspaceIssueRelation = { ...relation, ...endpoints, type, version: nextIssueRelationVersion(relation.version) };
+      const updated: DonefacIssueRelation = { ...relation, ...endpoints, type, version: nextIssueRelationVersion(relation.version) };
       this.store.db.prepare('UPDATE issue_relations SET source_issue_id=?,target_issue_id=?,json=? WHERE id=?')
         .run(updated.sourceIssueId, updated.targetIssueId, JSON.stringify(updated), updated.id);
       recordIssueRelationVersion(this.store, updated.version);
@@ -321,12 +321,12 @@ export class IssueRelationsService {
     if (!relation || (relation.sourceIssueId !== issueId && relation.targetIssueId !== issueId)) {
       throw new IssueRelationError(404, '업무 관계를 찾을 수 없습니다.');
     }
-    if (!isTeamspaceIssueRelation(relation)) throw new IssueRelationError(409, '이관한 업무 관계는 읽기 전용입니다.');
+    if (!isDonefacIssueRelation(relation)) throw new IssueRelationError(409, '이관한 업무 관계는 읽기 전용입니다.');
     const other = this.requireIssue(relation.sourceIssueId === issueId ? relation.targetIssueId : relation.sourceIssueId);
     return { issue, other, relation };
   }
 
-  private recordActivity(issue: Issue, other: Issue, relation: TeamspaceIssueRelation, action: RelationChange, audit: Audit) {
+  private recordActivity(issue: Issue, other: Issue, relation: DonefacIssueRelation, action: RelationChange, audit: Audit) {
     const [outgoing, incoming] = labels[relation.type];
     const [source, target] = relation.sourceIssueId === issue.id ? [issue, other] : [other, issue];
     audit(source.id, action, `${outgoing} · ${target.key}`);

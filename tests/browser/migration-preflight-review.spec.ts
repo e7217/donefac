@@ -85,7 +85,7 @@ test('360px에서 제한된 Jira 원본의 검토 보고서를 저장하고 그 
 
     const exported = await downloadReport(page, review, blocked.id);
     expect(JSON.parse(exported)).toMatchObject({
-      format: 'teamspace-migration-preflight', version: 1, status: 'blocked', mode: 'new',
+      format: 'donefac-migration-preflight', version: 1, status: 'blocked', mode: 'new',
       preview: { id: blocked.id, canApply: false },
       packages: [{ id: source.id, product: 'jira', format: 'jira-json', sha256: source.sha256 }],
       diagnostics: expect.arrayContaining([{ severity: 'error', code: 'RESTRICTED_CONTENT', count: 1 }]),

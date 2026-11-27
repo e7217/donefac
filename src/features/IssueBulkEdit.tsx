@@ -214,11 +214,11 @@ export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: 
   }, []);
 
   useEffect(() => {
-    window.addEventListener('teamspace:workspace-imported', reset);
+    window.addEventListener('donefac:workspace-imported', reset);
     return () => {
       pending.current?.abort();
       pending.current = null;
-      window.removeEventListener('teamspace:workspace-imported', reset);
+      window.removeEventListener('donefac:workspace-imported', reset);
     };
   }, [reset]);
 
@@ -243,10 +243,10 @@ export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: 
       event.preventDefault();
       event.returnValue = '';
     };
-    window.addEventListener('teamspace:navigate', guard);
+    window.addEventListener('donefac:navigate', guard);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', guard);
+      window.removeEventListener('donefac:navigate', guard);
       window.removeEventListener('beforeunload', unload);
     };
   }, [active, applyUncertain, dirty, notify, reportScoped, reset, team]);

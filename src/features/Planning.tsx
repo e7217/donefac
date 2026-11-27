@@ -68,7 +68,7 @@ function ProjectPlanning(props: PlanningProps) {
   const visible = items.filter(item => (showArchived || item.status !== 'archived') && (!query || `${item.name} ${item.description}`.toLowerCase().includes(query.toLowerCase())));
   const currentId = creating ? null : selection.id;
   const current = items.find(item => item.id === currentId);
-  const canLeave = () => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }));
+  const canLeave = () => window.dispatchEvent(new Event('donefac:navigate', { cancelable: true }));
   function changeSelection(id: string | null, nextKind: PlanningKind) {
     let nextRouteId = routeId;
     if (onSelectPlanning && routeId !== id) {
@@ -197,8 +197,8 @@ function PlanningEditor({ data, projectId, actorId, kind, item, existingId, refr
       }
     };
     const unload = (event: BeforeUnloadEvent) => { if (pendingRef.current || dirtyRef.current) { event.preventDefault(); event.returnValue = ''; } };
-    window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
-    return () => { window.removeEventListener('teamspace:navigate', guard); window.removeEventListener('beforeunload', unload); };
+    window.addEventListener('donefac:navigate', guard); window.addEventListener('beforeunload', unload);
+    return () => { window.removeEventListener('donefac:navigate', guard); window.removeEventListener('beforeunload', unload); };
   }, [notify, baseline]);
   const field = PLAN_ID_FIELDS[kind];
   const linked = data.issues.filter(issue => issue[field] === existingId && issue.projectId === projectId);

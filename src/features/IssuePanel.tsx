@@ -435,8 +435,8 @@ function IssuePanelContent(props: IssuePanelProps) {
       const target = (event as CustomEvent<{ issueId: string }>).detail;
       if (!event.defaultPrevented && target?.issueId === issueId && !switchTab('details')) event.preventDefault();
     };
-    window.addEventListener('teamspace:focus-issue-comment', focusCommentTab);
-    return () => window.removeEventListener('teamspace:focus-issue-comment', focusCommentTab);
+    window.addEventListener('donefac:focus-issue-comment', focusCommentTab);
+    return () => window.removeEventListener('donefac:focus-issue-comment', focusCommentTab);
   }, [issueId, switchTab]);
   useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
   if (loadedVersion !== issue?.version) {
@@ -544,8 +544,8 @@ function IssuePanelContent(props: IssuePanelProps) {
           !linkedDocumentGuard.current.dirty && !linkedDocumentGuard.current.pending && !linkedDocumentGuard.current.uncertain) return;
       event.preventDefault(); event.returnValue = '';
     };
-    window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', leave);
-    return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', leave); };
+    window.addEventListener('donefac:navigate', navigate); window.addEventListener('beforeunload', leave);
+    return () => { window.removeEventListener('donefac:navigate', navigate); window.removeEventListener('beforeunload', leave); };
   }, [issue, notify, tab, projectMove, rowScheduleEdit, teamFollowUp, linkedDocumentCreation, closeProjectMove, closeRowScheduleEdit, closeTeamFollowUp,
     closeLinkedDocumentCreation, scheduleSaveReview, saveRecovery, closeScheduleSaveReview, discardCommentEdit, hasCommentEditDraft, isCommentEditPending, storeCommentDraft]);
   useEffect(() => {
@@ -567,13 +567,13 @@ function IssuePanelContent(props: IssuePanelProps) {
     };
     loadComments();
     window.addEventListener(COMMENT_LIST_CHANGED, loadComments);
-    window.addEventListener('teamspace:trash-changed', loadComments);
-    window.addEventListener('teamspace:workspace-imported', loadComments);
+    window.addEventListener('donefac:trash-changed', loadComments);
+    window.addEventListener('donefac:workspace-imported', loadComments);
     return () => {
       activeRequest?.abort();
       window.removeEventListener(COMMENT_LIST_CHANGED, loadComments);
-      window.removeEventListener('teamspace:trash-changed', loadComments);
-      window.removeEventListener('teamspace:workspace-imported', loadComments);
+      window.removeEventListener('donefac:trash-changed', loadComments);
+      window.removeEventListener('donefac:workspace-imported', loadComments);
     };
   }, [issueId, props.actorId, commentActivation]);
   const closeButton = useRef<HTMLButtonElement>(null);
@@ -1004,7 +1004,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     savingRef.current = true; setSaving(true); setError(null);
     try {
       await remove(`/issues/${issueId}?expectedVersion=${draft?.version ?? issue.version}`);
-      window.dispatchEvent(new Event('teamspace:trash-changed'));
+      window.dispatchEvent(new Event('donefac:trash-changed'));
       dirtyRef.current = false;
       storeCommentDraft(emptyCommentDraft());
       discardCommentEdit();
@@ -1539,8 +1539,8 @@ function IssuePanelContent(props: IssuePanelProps) {
       <SourceOrigins resourceType="issue" resourceId={issue.id} />
     </> : <>
       <IssueChangeHistory issueId={issue.id} issueVersion={issue.version} />
-      <section className="issue-activity-list" aria-label="Teamspace 변경 이력">
-        <h3 className="issue-history-heading">Teamspace 변경 이력</h3>
+      <section className="issue-activity-list" aria-label="Donefac 변경 이력">
+        <h3 className="issue-history-heading">Donefac 변경 이력</h3>
         {activities.length ? activities.map(activity => {
           const user = data.users.find(candidate => candidate.id === activity.actorId);
           return <article key={activity.id}>
@@ -1548,7 +1548,7 @@ function IssuePanelContent(props: IssuePanelProps) {
             <div><p><strong>{user?.name || '시스템'}</strong> · {activity.detail || activity.action}</p>
               <time dateTime={activity.createdAt}>{new Date(activity.createdAt).toLocaleString('ko-KR')}</time></div>
           </article>;
-        }) : <p>아직 Teamspace 변경 이력이 없습니다.</p>}
+        }) : <p>아직 Donefac 변경 이력이 없습니다.</p>}
       </section>
       <IssueJiraStatusHistory issueId={issue.id} />
     </>}</div>

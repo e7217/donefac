@@ -59,7 +59,7 @@ test('360px 티켓 댓글 초안을 다시 열고 응답이 끊긴 등록을 한
   const confirmations: string[] = [];
   page.on('dialog', async dialog => { confirmations.push(dialog.message()); await dialog.dismiss(); });
   try {
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
     await page.goto(url);
     const panel = page.getByRole('dialog', { name: issue.title, exact: true });
     const field = panel.getByRole('textbox', { name: '댓글 내용', exact: true });
@@ -109,7 +109,7 @@ test('360px 업무 댓글에서 동명이인을 이메일로 구분하고 멘션
     headers: actor(author), data: { projectId: project.id, title: `${name} 업무`, assigneeId: recipient.id },
   }), 201);
   try {
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), author.id);
     await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
     const panel = page.getByRole('dialog', { name: issue.title, exact: true });
     const field = panel.getByRole('textbox', { name: '댓글 내용', exact: true });
@@ -183,7 +183,7 @@ test('360px에서 문서 댓글 초안의 멘션과 문장 댓글 재시도를 �
   }), 201);
   try {
     await page.addInitScript(id => {
-      if (!localStorage.getItem('teamspace.actor')) localStorage.setItem('teamspace.actor', id);
+      if (!localStorage.getItem('donefac.actor')) localStorage.setItem('donefac.actor', id);
     }, author.id);
     await page.goto(`/#/${project.id}/documents/${doc.id}`);
     const editor = page.locator('.docs-prose');

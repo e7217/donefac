@@ -242,7 +242,7 @@ test('stored GitLab URLs through the 4,000-character link limit remain intact fo
 });
 
 test('HTTP search resolves stored GitLab activity with its existing response shape and ordinary text limit', async t => {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-gitlab-search-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-gitlab-search-'));
   const runtime = createApp({ dataDir: directory, outboundWorker: false, deadlineReminderWorker: false, recurringIssueWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   await once(server, 'listening');

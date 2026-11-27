@@ -49,7 +49,7 @@ const test = base.extend<{ outbound: OutboundFixture }>({
 test('한 번 발급한 웹훅 키를 확인하고 활성화하면 실제 서명 전송·이력·최신 키 교체가 동작한다', async ({ page, context, outbound: f }) => {
   test.setTimeout(60_000);
   const actorId = f.workspace.users[0].id;
-  await context.addInitScript(value => localStorage.setItem('teamspace.actor', value), actorId);
+  await context.addInitScript(value => localStorage.setItem('donefac.actor', value), actorId);
   await page.goto(`/#/${f.project.id}/development`);
   const settings = page.getByRole('region', { name: '외부 웹훅 설정', exact: true });
   await settings.getByRole('button', { name: '엔드포인트 만들기', exact: true }).click();
@@ -70,7 +70,7 @@ test('한 번 발급한 웹훅 키를 확인하고 활성화하면 실제 서명
   expect(await secretInput.inputValue() === created.secret).toBe(true);
   expect(await page.evaluate(secret => [...Object.values(localStorage), ...Object.values(sessionStorage)].some(value => value.includes(secret)), created.secret)).toBe(false);
   page.once('dialog', value => value.dismiss());
-  expect(await page.evaluate(() => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })))).toBe(false);
+  expect(await page.evaluate(() => window.dispatchEvent(new Event('donefac:navigate', { cancelable: true })))).toBe(false);
   await expect(dialog).toBeVisible();
   page.once('dialog', value => value.dismiss());
   await dialog.getByRole('button', { name: '확인하고 닫기', exact: true }).click();

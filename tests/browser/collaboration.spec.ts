@@ -29,7 +29,7 @@ const test = base.extend<{ collaborativeDocument: CollaborativeFixture }>({
 });
 
 async function setActor(context: BrowserContext, actorId: string) {
-  await context.addInitScript(value => localStorage.setItem('teamspace.actor', value), actorId);
+  await context.addInitScript(value => localStorage.setItem('donefac.actor', value), actorId);
 }
 async function open(page: Page, document: DocPage) {
   await page.goto(`/#/${document.projectId}/documents/${document.id}`);
@@ -276,7 +276,7 @@ test('360px 공동 편집에서 슬래시 삽입을 취소하거나 동료가 �
     await expect(paragraphs.nth(1)).toHaveText(referenceQuery);
     await chooseReference();
     await expect(reference).toHaveCount(0);
-    const peerReference = peerEditor.locator('[data-teamspace-node="documentReference"]');
+    const peerReference = peerEditor.locator('[data-donefac-node="documentReference"]');
     await expect(peerReference).toHaveCount(1);
     await expect(peerReference).toContainText(target.title);
     await expect(peerEditor).not.toContainText(referenceQuery);
@@ -299,7 +299,7 @@ test('360px 공동 편집에서 슬래시 삽입을 취소하거나 동료가 �
     await typeCommand(paragraphs.last(), listQuery, '업무 목록');
     await list.getByRole('button', { name: '업무 목록 삽입', exact: true }).click();
     await expect(list).toHaveCount(0);
-    await expect(peerEditor.locator('[data-teamspace-node="issueList"]')).toHaveCount(1);
+    await expect(peerEditor.locator('[data-donefac-node="issueList"]')).toHaveCount(1);
     await expect(peerEditor).not.toContainText(listQuery);
     await synced(author);
 

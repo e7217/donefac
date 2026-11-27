@@ -17,7 +17,7 @@ const reviewPath = `${settingsPath}/project-webhook-review`;
 const registerPath = `${settingsPath}/project-webhook-register`;
 const historyPath = `${settingsPath}/project-webhook-history`;
 const contextPath = '/tools/git';
-const publicOrigin = 'https://teamspace.example.test';
+const publicOrigin = 'https://donefac.example.test';
 const receiverUrl = `${publicOrigin}/api${settingsPath}/webhook`;
 const legacySecret = 'synthetic-webhook-shared-secret';
 const signingToken = `whsec_${Buffer.alloc(32, 7).toString('base64')}`;
@@ -74,7 +74,7 @@ async function gitlab(t: TestContext, handler: (call: RemoteCall, response: Serv
 }
 
 async function fixture(t: TestContext) {
-  const directory = await mkdtemp(join(tmpdir(), 'teamspace-gitlab-project-webhooks-'));
+  const directory = await mkdtemp(join(tmpdir(), 'donefac-gitlab-project-webhooks-'));
   const start = () => createApp({ dataDir: directory, outboundWorker: false, gitlabWebhookPublicOrigin: publicOrigin });
   let runtime = start();
   let server = createServer(runtime.app);
@@ -184,7 +184,7 @@ test('webhook review is read-only and a matching one-time credential registers t
   assert.deepEqual(posts[0].body, { ...hookOptions, token: legacySecret });
   assert.deepEqual((await app.call<GitlabWebhookStatus>(`${settingsPath}/webhook-status`)).data.repositories, [{ repositoryId, lastDelivery: null }]);
   assert.deepEqual((await app.call<GitlabSettings>(settingsPath)).data, settings);
-  for (const file of ['teamspace.sqlite', 'teamspace.sqlite-wal']) {
+  for (const file of ['donefac.sqlite', 'donefac.sqlite-wal']) {
     const path = join(app.directory, file);
     if (!existsSync(path)) continue;
     const bytes = readFileSync(path);
@@ -253,13 +253,13 @@ test('a lost register response is reconciled by reviewing remote state without a
   assert.equal(reconciled.data.state, 'configured');
   assert.equal(remoteHooks.length, 1);
   assert.deepEqual(source.calls.filter(call => call.method === 'POST').map(call => call.body), [{ ...hookOptions, signing_token: signingToken }]);
-  for (const file of ['teamspace.sqlite', 'teamspace.sqlite-wal']) {
+  for (const file of ['donefac.sqlite', 'donefac.sqlite-wal']) {
     const path = join(app.directory, file);
     if (existsSync(path)) assert.ok(!readFileSync(path).includes(signingToken), `Stored signing token in ${file}`);
   }
 });
 
-test('an unresolved registration blocks another POST and survives restarting Teamspace', async t => {
+test('an unresolved registration blocks another POST and survives restarting Donefac', async t => {
   let visible = false;
   const source = await gitlab(t, (call, response) => {
     if (call.method === 'GET') return reply(response, visible ? [hook(20)] : [], 200, { 'X-Next-Page': '' });

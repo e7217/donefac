@@ -39,8 +39,8 @@ function ProjectCalendar({ data, projectId, refresh, notify }: FeatureProps) {
       }
     };
     const unload = (event: BeforeUnloadEvent) => { if (savingRef.current || dirtyRef.current) { event.preventDefault(); event.returnValue = ''; } };
-    window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
-    return () => { window.removeEventListener('teamspace:navigate', guard); window.removeEventListener('beforeunload', unload); };
+    window.addEventListener('donefac:navigate', guard); window.addEventListener('beforeunload', unload);
+    return () => { window.removeEventListener('donefac:navigate', guard); window.removeEventListener('beforeunload', unload); };
   }, [baseline, current, notify]);
   function toggleDay(day: number) { setDraft(previous => ({ ...previous, workingWeekdays: previous.workingWeekdays.includes(day) ? previous.workingWeekdays.filter(value => value !== day) : [...previous.workingWeekdays, day].sort() })); }
   async function save(event: FormEvent) {

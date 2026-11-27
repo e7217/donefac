@@ -7,18 +7,18 @@ Linux에 Node.js 24 이상, GNU coreutils, util-linux의 `flock`을 준비한다
 ```bash
 npm ci
 npm run build:pilot
-mkdir -p "$HOME/teamspace-pilot"
-TEAMSPACE_DATA_DIR="$HOME/teamspace-pilot/workspace" npm run start:pilot
+mkdir -p "$HOME/donefac-pilot"
+DONEFAC_DATA_DIR="$HOME/donefac-pilot/workspace" npm run start:pilot
 ```
 
-브라우저는 `http://127.0.0.1:5190`을 연다. 정적 웹, `/api`와 공동 편집 WebSocket을 같은 Node 프로세스와 같은 주소에서 제공한다. 파일럿 프로세스는 데이터 경로 끝에 `.teamspace.lock`을 붙인 형제 파일의 잠금을 실행 동안 유지한다. 같은 데이터를 사용하는 파일럿과 백업 명령은 이 잠금을 공유한다.
+브라우저는 `http://127.0.0.1:5190`을 연다. 정적 웹, `/api`와 공동 편집 WebSocket을 같은 Node 프로세스와 같은 주소에서 제공한다. 파일럿 프로세스는 데이터 경로 끝에 `.donefac.lock`을 붙인 형제 파일의 잠금을 실행 동안 유지한다. 같은 데이터를 사용하는 파일럿과 백업 명령은 이 잠금을 공유한다.
 
 - 빈 데이터에서는 **워크스페이스 설정**에서 첫 팀원을 등록한 뒤 프로젝트를 만든다.
-- 별도의 예시 데이터 디렉터리에서 `TEAMSPACE_PILOT_DEMO=1`을 지정하면 합성 자료로 시작한다.
-- 포트는 `TEAMSPACE_PILOT_PORT`로 바꾼다. 포트 `0`을 지정하면 운영체제가 고른 루프백 포트를 시작 로그에서 확인할 수 있다.
-- 격리 복원 테스트는 `TEAMSPACE_PILOT_OUTBOUND=0`으로 시작한다. 이 값은 보관된 외부 웹훅의 자동 전송을 일시 중지한다.
-- 복원 직후의 티켓 건수와 예약을 대조할 때 `TEAMSPACE_PILOT_RECURRING_ISSUES=0`으로 실행하면 반복 업무의 예약 확인을 일시 중지할 수 있다. 예약 규칙과 실행 기록은 조회할 수 있다.
-- `TEAMSPACE_PILOT_DEADLINE_REMINDERS=0`을 지정하면 마감 알림의 자동 확인을 일시 중지한다. 이미 저장된 알림은 그대로 조회한다.
+- 별도의 예시 데이터 디렉터리에서 `DONEFAC_PILOT_DEMO=1`을 지정하면 합성 자료로 시작한다.
+- 포트는 `DONEFAC_PILOT_PORT`로 바꾼다. 포트 `0`을 지정하면 운영체제가 고른 루프백 포트를 시작 로그에서 확인할 수 있다.
+- 격리 복원 테스트는 `DONEFAC_PILOT_OUTBOUND=0`으로 시작한다. 이 값은 보관된 외부 웹훅의 자동 전송을 일시 중지한다.
+- 복원 직후의 티켓 건수와 예약을 대조할 때 `DONEFAC_PILOT_RECURRING_ISSUES=0`으로 실행하면 반복 업무의 예약 확인을 일시 중지할 수 있다. 예약 규칙과 실행 기록은 조회할 수 있다.
+- `DONEFAC_PILOT_DEADLINE_REMINDERS=0`을 지정하면 마감 알림의 자동 확인을 일시 중지한다. 이미 저장된 알림은 그대로 조회한다.
 
 `npm run test:pilot`은 빈 데이터 디렉터리에서 합성 팀원과 첫 프로젝트를 화면으로 등록한다. 간트에서 선후행이 있는 업무를 만들고 티켓에서 연결 문서를 저장한다. 다른 브라우저에서 읽기 주소를 연 뒤 담당 업무의 상태와 인수인계 댓글을 저장한다. 이 검사는 임시 루프백 파일럿에서 수행한다.
 
@@ -26,14 +26,14 @@ TEAMSPACE_DATA_DIR="$HOME/teamspace-pilot/workspace" npm run start:pilot
 
 기존 HTTPS 리버스 프록시에서 팀 주소의 루트 경로를 같은 호스트의 `http://127.0.0.1:5190`으로 연결한다. 원래 `Host`와 `Origin`을 전달하고 `/api/collaboration`에서 WebSocket 업그레이드를 지원한다. 첨부와 원본 패키지를 올릴 경우 프록시에서 최대 64MiB 요청 본문을 받도록 설정한다. [Nginx WebSocket 프록시 문서](https://nginx.org/en/docs/http/websocket.html)
 
-접속 키를 처음 만들 때는 데이터 디렉터리와 Git 저장소 밖에 별도 파일을 생성한다. `teamspace.example.internal`은 사용할 팀 주소로 바꾼다.
+접속 키를 처음 만들 때는 데이터 디렉터리와 Git 저장소 밖에 별도 파일을 생성한다. `donefac.example.internal`은 사용할 팀 주소로 바꾼다.
 
 ```bash
-mkdir -p "$HOME/teamspace-pilot"
-(umask 077; set -o noclobber; openssl rand -hex 32 > "$HOME/teamspace-pilot/team-access.key")
-TEAMSPACE_DATA_DIR="$HOME/teamspace-pilot/workspace" \
-TEAMSPACE_PILOT_ORIGIN=https://teamspace.example.internal \
-TEAMSPACE_PILOT_ACCESS_FILE="$HOME/teamspace-pilot/team-access.key" npm run start:pilot
+mkdir -p "$HOME/donefac-pilot"
+(umask 077; set -o noclobber; openssl rand -hex 32 > "$HOME/donefac-pilot/team-access.key")
+DONEFAC_DATA_DIR="$HOME/donefac-pilot/workspace" \
+DONEFAC_PILOT_ORIGIN=https://donefac.example.internal \
+DONEFAC_PILOT_ACCESS_FILE="$HOME/donefac-pilot/team-access.key" npm run start:pilot
 ```
 
 팀원은 브라우저에서 HTTPS 주소를 열고 공용 키를 입력한 뒤 앱에서 작업자를 선택한다. 기존 업무나 문서 링크로 들어오면 접속 뒤 같은 위치를 연다. 브라우저 세션은 12시간 유지되며, 파일럿을 재시작하면 다시 접속한다. 편집 화면을 열어 둔 상태에서 접속이 만료되면 사이드바의 **팀 접속**을 새 탭에서 열고 키를 다시 입력할 수 있다. **접속 종료**는 해당 브라우저의 세션과 공동 편집 연결을 종료한다. `/api/v1`은 개인 API 키를 사용하고 GitLab 웹훅은 별도 수신 자격 증명을 사용한다.
@@ -56,13 +56,13 @@ TEAMSPACE_PILOT_ACCESS_FILE="$HOME/teamspace-pilot/team-access.key" npm run star
 
 MR·파이프라인·배포 이벤트에서는 상태 자동화 대상 티켓 수와 변경·차단·보류 건수를 함께 본다. 티켓이 매칭되어도 해당 범위에 활성 규칙이 없거나 더 최근 이벤트가 있으면 그 근거를 표시한다. **최근 전송 확인**에서 같은 메시지의 인증 수신과 상태 자동화 결과를 함께 확인할 수 있다.
 
-Teamspace에서 등록 결과를 확인할 수 없으면 **GitLab 웹훅 수동 등록** 안내를 연다. GitLab 저장소의 **Settings → Webhooks**에서 Teamspace에 표시된 수신 주소를 먼저 대조한다. 같은 주소가 없을 때만 수신 주소를 복사해 안내된 인증 방식으로 웹훅을 추가한다. GitLab에서 저장한 뒤 Teamspace의 **다시 점검**으로 등록과 이벤트 설정을 확인한다. [GitLab 웹훅 만들기](https://docs.gitlab.com/user/project/integrations/webhooks/#create-a-webhook)
+Donefac에서 등록 결과를 확인할 수 없으면 **GitLab 웹훅 수동 등록** 안내를 연다. GitLab 저장소의 **Settings → Webhooks**에서 Donefac에 표시된 수신 주소를 먼저 대조한다. 같은 주소가 없을 때만 수신 주소를 복사해 안내된 인증 방식으로 웹훅을 추가한다. GitLab에서 저장한 뒤 Donefac의 **다시 점검**으로 등록과 이벤트 설정을 확인한다. [GitLab 웹훅 만들기](https://docs.gitlab.com/user/project/integrations/webhooks/#create-a-webhook)
 
 수신이 대기 상태면 **GitLab 프로젝트 웹훅 설정 → 웹훅 설정 점검 → 최근 전송 확인**을 연다. 각 GitLab 전송의 HTTP 상태와 **같은 메시지 인증 수신**을 확인한다. **미확인**은 현재 보관한 인증 수신에서 그 메시지를 찾지 못했다는 뜻이다. **대조 불가**는 GitLab 응답에서 메시지 근거를 확인할 수 없는 경우다. 저장소 전체의 마지막 인증 수신은 목록 아래에 표시된다. 401·403은 수신 인증과 프록시 접근을, 404·리다이렉트는 수신 주소와 프록시 경로를 확인한다. HTTP 응답이 없으면 GitLab의 전송 상세에서 주소·TLS·연결을 확인한다. API 조회는 GitLab 17.3 이상과 웹훅 조회 권한이 필요하다. GitLab에서도 **Settings → Webhooks → Edit → Recent events**를 열 수 있다. [GitLab 전송 이력 API](https://docs.gitlab.com/api/project_webhooks/#list-project-webhook-events) · [GitLab 웹훅 전송 이력 화면](https://docs.gitlab.com/user/project/integrations/webhooks/#view-webhook-request-history)
 
 기존 훅으로 배포를 받으려면 GitLab 프로젝트의 웹훅 설정에서 **Deployment events**를 켠다. 정상 배포 이벤트가 기록되면 수신 확인에 **배포 기록 반영**이 표시된다. **GitLab 배포 기록**에서 저장소를 선택해 환경·상태·시각을 대조하고, 연결된 커밋이나 병합 MR이 있으면 해당 티켓의 배포 목록에서 같은 항목을 확인한다. 새 수신부터 기록한다. [GitLab 배포 이벤트](https://docs.gitlab.com/user/project/integrations/webhook_events/#deployment-events)
 
-기존 배포는 같은 패널의 **배포 이력 동기화**로 가져온다. GitLab이 포함 MR을 제공하면 Teamspace에 연결된 해당 MR의 티켓에서도 그 배포를 연다. 부분 조회 안내가 표시되면 GitLab 저장소의 읽기 권한과 배포 환경의 MR 추적 설정을 확인할 수 있다. [GitLab 배포별 MR 추적](https://docs.gitlab.com/ci/environments/deployments/#track-newly-included-merge-requests-per-deployment)
+기존 배포는 같은 패널의 **배포 이력 동기화**로 가져온다. GitLab이 포함 MR을 제공하면 Donefac에 연결된 해당 MR의 티켓에서도 그 배포를 연다. 부분 조회 안내가 표시되면 GitLab 저장소의 읽기 권한과 배포 환경의 MR 추적 설정을 확인할 수 있다. [GitLab 배포별 MR 추적](https://docs.gitlab.com/ci/environments/deployments/#track-newly-included-merge-requests-per-deployment)
 
 HTTPS 파일럿 검사는 임시 프록시로 네 유형의 합성 웹훅을 전송한다. Signing Token과 Secret Token을 함께 설정한 상태에서 서명과 원문이 일치하는 요청의 인증을 확인하고, 같은 JSON을 다시 직렬화해 바이트가 달라진 요청과 잘못된 서명은 거절되는지 검사한다. [GitLab 서명 검증](https://docs.gitlab.com/user/project/integrations/webhooks/#verify-the-signature)
 
@@ -90,26 +90,26 @@ HTTPS 파일럿 검사는 임시 프록시로 네 유형의 합성 웹훅을 전
 
 업무 상세 또는 문서 **연결** 탭에서 **기존 도구 연결**을 사용한다. Jira는 `/browse/TEAM-17`, Confluence는 `/pages/viewpage.action?pageId=1234`, `/display/TEAM/Release+Notes`, `/spaces/TEAM/pages/1234/Release-Notes`와 Server·Data Center의 짧은 주소 `/x/ZIAB` 같은 브라우저 주소를 받는다. 기존 서버의 `/jira` 또는 `/wiki` 같은 경로도 주소에 포함한다. 예전에 저장한 본문에 짧은 주소가 있으면 그 주소를 **통합 검색**에 붙여넣어 저장된 원본 연결을 찾을 수 있다. [Confluence 주소 형식](https://support.atlassian.com/confluence/kb/the-differences-between-various-url-formats-for-a-confluence-page/)
 
-이관 시 Jira 원본 기본 주소를 지정했다면 `/browse/TEAM-17?focusedCommentId=42#comment-42` 같은 Jira 댓글 주소를 **통합 검색**이나 **전체 검색 결과**에 붙여넣는다. **Jira 댓글 주소**로 표시된 티켓을 열어 이관한 댓글에 초점이 이동하는지 확인한다. 열린 Teamspace 주소를 새로고침해 같은 댓글을 찾는지, 다른 티켓의 댓글 번호로 검색했을 때 결과가 비어 있는지도 대조한다.
+이관 시 Jira 원본 기본 주소를 지정했다면 `/browse/TEAM-17?focusedCommentId=42#comment-42` 같은 Jira 댓글 주소를 **통합 검색**이나 **전체 검색 결과**에 붙여넣는다. **Jira 댓글 주소**로 표시된 티켓을 열어 이관한 댓글에 초점이 이동하는지 확인한다. 열린 Donefac 주소를 새로고침해 같은 댓글을 찾는지, 다른 티켓의 댓글 번호로 검색했을 때 결과가 비어 있는지도 대조한다.
 
 이관 시 Confluence 원본 기본 주소를 지정한 프로젝트에서는 기존 댓글의 고정 주소를 **통합 검색**에 붙여넣는다. **Confluence 댓글 주소**로 표시된 문서를 열면 이관한 댓글 또는 답글에 초점이 이동한다. 원래 제목 주소와 번호 주소를 확인하고, 문서 제목을 바꾸거나 문서를 옮긴 뒤에도 같은 댓글이 열리는지 대조한다.
 
-Jira와 Confluence를 어느 순서로 따로 이관했든, 저장된 Markdown 티켓 설명에서 이관에 사용한 Confluence 서버와 설치 경로의 페이지·절 주소를 클릭하면 확인된 Teamspace 문서가 같은 탭에서 열린다. 작성 중인 티켓을 떠날 때는 기존 안내를 따른다. 해당 서버의 이관 문서나 절을 확인할 수 없으면 **이관된 문서를 확인할 수 없습니다.**가 표시되며 **원본 열기**로 기존 주소를 열 수 있다. 이관 영수증에서 확인할 수 없는 서버·설치 경로와 원본 댓글·버전 등 지원 범위 밖의 주소는 평소처럼 원래 링크로 열린다. [저장된 티켓 설명의 Confluence 주소](API.md#저장된-티켓-설명의-confluence-주소)
+Jira와 Confluence를 어느 순서로 따로 이관했든, 저장된 Markdown 티켓 설명에서 이관에 사용한 Confluence 서버와 설치 경로의 페이지·절 주소를 클릭하면 확인된 Donefac 문서가 같은 탭에서 열린다. 작성 중인 티켓을 떠날 때는 기존 안내를 따른다. 해당 서버의 이관 문서나 절을 확인할 수 없으면 **이관된 문서를 확인할 수 없습니다.**가 표시되며 **원본 열기**로 기존 주소를 열 수 있다. 이관 영수증에서 확인할 수 없는 서버·설치 경로와 원본 댓글·버전 등 지원 범위 밖의 주소는 평소처럼 원래 링크로 열린다. [저장된 티켓 설명의 Confluence 주소](API.md#저장된-티켓-설명의-confluence-주소)
 
 **원본 정보 조회**를 활성화하려면 파일럿 실행 환경에 사용할 기본 주소를 지정한다. 한 제품에 서버 한 곳을 설정하며, 저장한 링크의 서버 주소와 기본 경로가 설정값과 일치할 때 조회한다.
 
 ```bash
-TEAMSPACE_DATA_DIR="$HOME/teamspace-pilot/workspace" \
-TEAMSPACE_JIRA_BASE_URL=https://jira.example.internal/jira \
-TEAMSPACE_CONFLUENCE_BASE_URL=https://wiki.example.internal \
-TEAMSPACE_JIRA_AUTH_FILE=/run/secrets/teamspace-jira-auth \
-TEAMSPACE_CONFLUENCE_AUTH_FILE=/run/secrets/teamspace-confluence-auth \
+DONEFAC_DATA_DIR="$HOME/donefac-pilot/workspace" \
+DONEFAC_JIRA_BASE_URL=https://jira.example.internal/jira \
+DONEFAC_CONFLUENCE_BASE_URL=https://wiki.example.internal \
+DONEFAC_JIRA_AUTH_FILE=/run/secrets/donefac-jira-auth \
+DONEFAC_CONFLUENCE_AUTH_FILE=/run/secrets/donefac-confluence-auth \
 npm run start:pilot
 ```
 
-인증 파일의 한 줄에 `Bearer <토큰>` 또는 `Basic <사용자:암호의 base64>`를 넣고 실행 계정만 읽을 수 있게 권한을 설정한다. 인증 파일은 파일럿의 데이터 디렉터리와 Git 저장소 밖에 둔다. 원본이 익명 읽기를 허용하면 해당 `AUTH_FILE` 설정을 생략한다. Teamspace에서 팀에 공유할 수 있는 범위를 읽는 계정으로 설정한다. [Atlassian 개인 액세스 토큰 지원 버전](https://confluence.atlassian.com/enterprise/using-personal-access-tokens-1026032365.html)
+인증 파일의 한 줄에 `Bearer <토큰>` 또는 `Basic <사용자:암호의 base64>`를 넣고 실행 계정만 읽을 수 있게 권한을 설정한다. 인증 파일은 파일럿의 데이터 디렉터리와 Git 저장소 밖에 둔다. 원본이 익명 읽기를 허용하면 해당 `AUTH_FILE` 설정을 생략한다. Donefac에서 팀에 공유할 수 있는 범위를 읽는 계정으로 설정한다. [Atlassian 개인 액세스 토큰 지원 버전](https://confluence.atlassian.com/enterprise/using-personal-access-tokens-1026032365.html)
 
-조회는 제목·상태·식별자·수정 시각을 화면에 표시한다. Confluence 문서의 본문과 첨부를 옮길 때는 오프라인 이관을 사용한다. 백업에는 연결 주소와 Teamspace 업무·문서 ID를 보존한다.
+조회는 제목·상태·식별자·수정 시각을 화면에 표시한다. Confluence 문서의 본문과 첨부를 옮길 때는 오프라인 이관을 사용한다. 백업에는 연결 주소와 Donefac 업무·문서 ID를 보존한다.
 
 ## 전체 데이터 백업
 
@@ -117,8 +117,8 @@ npm run start:pilot
 
 ```bash
 npm run pilot:backup -- \
-  "$HOME/teamspace-pilot/workspace" \
-  "$HOME/teamspace-pilot/backup-2026-11-19"
+  "$HOME/donefac-pilot/workspace" \
+  "$HOME/donefac-pilot/backup-2026-11-19"
 ```
 
 결과 디렉터리에는 `manifest.json`과 `data/`가 있다. SQLite, 첨부 바이트, 이관 분석 원본, `.credential-key`와 재시작에 필요한 복구 저널을 포함한다. SQLite 검증과 WAL 정리는 복사본에서 수행한다. 파일별 SHA-256과 크기를 기록하고 비어 있는 디렉터리도 보존한다. 활성·휴지통 첨부파일의 모든 버전과 이관 분석 원본은 SQLite에 저장된 크기·해시와도 대조한다. 참조 파일이 누락되거나 손상되면 결과 경로를 만들기 전에 중단한다. 전체 사본에는 연결 자격 정보와 비공개 자료가 포함되므로 백업 경로의 접근 권한을 운영 데이터와 같은 수준으로 관리한다.
@@ -131,10 +131,10 @@ npm run pilot:backup -- \
 
 ```bash
 npm run pilot:restore -- \
-  "$HOME/teamspace-pilot/backup-2026-11-19" \
-  "$HOME/teamspace-pilot/restore-drill"
-TEAMSPACE_DATA_DIR="$HOME/teamspace-pilot/restore-drill" \
-TEAMSPACE_PILOT_PORT=5191 TEAMSPACE_PILOT_OUTBOUND=0 TEAMSPACE_PILOT_RECURRING_ISSUES=0 npm run start:pilot
+  "$HOME/donefac-pilot/backup-2026-11-19" \
+  "$HOME/donefac-pilot/restore-drill"
+DONEFAC_DATA_DIR="$HOME/donefac-pilot/restore-drill" \
+DONEFAC_PILOT_PORT=5191 DONEFAC_PILOT_OUTBOUND=0 DONEFAC_PILOT_RECURRING_ISSUES=0 npm run start:pilot
 ```
 
 복원 리허설은 별도 주소와 새 브라우저 프로필에서 수행한다. 물리 복원은 기존 API 키·연동 설정·공동 편집 세대도 복원한다. 실제 팀 주소로 전환할 때는 이전 브라우저의 미전송 공동 편집과 외부 웹훅 전송 대기를 확인한다. 전체 JSON 내보내기·가져오기는 별도의 데이터 이동 기능이다.
@@ -168,7 +168,7 @@ npm run test:pilot
 ```json
 {
   "baseUrl": "https://jira.example.test/jira",
-  "authFile": "/run/secrets/teamspace-jira-auth",
+  "authFile": "/run/secrets/donefac-jira-auth",
   "projectKey": "TEAM",
   "includeAttachments": true
 }
@@ -180,7 +180,7 @@ npm run pilot:jira:collect -- /absolute/path/jira-config.json /absolute/path/jir
 
 한 번에 500개까지 수집한다. 현재 키를 알고 있는 경우 `projectKey` 대신 `"issueKeys": ["TEAM-11", "TEAM-12"]`처럼 범위를 지정해도 된다. 작업은 Jira Data Center REST v2의 GET 요청만 사용한다. 원래 업무 키·필드 이름과 스키마·댓글·작업 시간·변경 이력을 ZIP에 저장한다. 댓글과 작업 시간은 페이지의 소유 업무·원본 ID·범위 및 겹치는 내장 응답을 대조한다. 첨부는 같은 호스트와 서비스 경로에서 ID를 확인한 파일의 바이트를 가져온다. 첨부 없이 먼저 검토할 때는 `includeAttachments`를 `false`로 지정한다. [Jira 검색 API](https://developer.atlassian.com/server/jira/platform/rest/v10006/api-group-search/) · [Jira 업무 API](https://developer.atlassian.com/server/jira/platform/rest/v11000/api-group-issue/) · [첨부 메타데이터 API](https://developer.atlassian.com/server/jira/platform/rest/v11000/api-group-attachment/)
 
-출력 ZIP은 새 파일로만 저장하며 크기와 SHA-256을 결과에 기록한다. ZIP 한도인 64MiB를 넘으면 업무 키를 나누어 수집한다. 검색 또는 댓글·작업 시간의 페이지 범위가 달라지면 ZIP 발행을 중단한다. 일부 Data Center에서는 이슈 상세의 변경 이력이 일부만 제공되고 별도 페이지 조회를 지원하지 않는다. 이 경우 받은 원본을 저장하고 `incompleteHistories`에 건수를 기록한다. 생략한 첨부, 조회할 수 없는 첨부, 20MiB를 넘긴 첨부는 메타데이터를 보존하고 각각 건수로 표시한다. 수집 결과의 범위는 해당 Jira 계정에서 열람할 수 있는 자료다. 아래 리허설에서 제한 기록·매핑·누락을 확인한다. `npm run test:pilot:jira`는 로컬 모의 Jira와 Teamspace 분석기로 이 흐름을 검사한다.
+출력 ZIP은 새 파일로만 저장하며 크기와 SHA-256을 결과에 기록한다. ZIP 한도인 64MiB를 넘으면 업무 키를 나누어 수집한다. 검색 또는 댓글·작업 시간의 페이지 범위가 달라지면 ZIP 발행을 중단한다. 일부 Data Center에서는 이슈 상세의 변경 이력이 일부만 제공되고 별도 페이지 조회를 지원하지 않는다. 이 경우 받은 원본을 저장하고 `incompleteHistories`에 건수를 기록한다. 생략한 첨부, 조회할 수 없는 첨부, 20MiB를 넘긴 첨부는 메타데이터를 보존하고 각각 건수로 표시한다. 수집 결과의 범위는 해당 Jira 계정에서 열람할 수 있는 자료다. 아래 리허설에서 제한 기록·매핑·누락을 확인한다. `npm run test:pilot:jira`는 로컬 모의 Jira와 Donefac 분석기로 이 흐름을 검사한다.
 
 같은 댓글·작업 시간이 업무 상세와 별도 페이지에 모두 있으면 작성자 식별 근거, 시각, 댓글 본문과 작업 메모, 작업일·초, 확인된 열람 제한을 대조한다. 이미 읽은 본문·메모·작업일·작업 시간이나 확인된 제한이 별도 페이지에서 빠지거나 충돌하면 ZIP 발행을 중단한다. 동일 시간과 합계의 표기 차이는 정규화하며, 작업 시간의 원본 날짜는 함께 확인한다.
 
@@ -232,7 +232,7 @@ npm run pilot:confluence:audit -- /absolute/path/confluence-audit.json /absolute
 
 ZIP을 생략하면 현재 페이지와 제한 확인 결과만 나온다. ZIP을 지정하면 같은 공간의 현재 페이지 누락, 원본 ZIP에만 있는 페이지, 버전·상위 관계·제한 표시 차이, 본문·첨부 근거와 분석 진단을 대조한다. 명령은 Confluence에 메타데이터 읽기 요청만 보내며 ZIP은 로컬에서 분석한다. 출력은 ZIP 해시·크기·건수·판정으로 구성한다. 결과가 `observed` 또는 `matched`면 종료 코드 `0`, 제한·누락·불일치를 검토해야 하면 `2`, 연결이나 ZIP을 검사할 수 없으면 `1`이다.
 
-`matched`는 조회한 페이지의 확인 항목이 일치했다는 뜻이다. 원본 ZIP에만 있는 페이지는 현재 계정에 보이지 않을 수 있다. 공간 권한은 보고서의 `spacePermissions`에 수동 검토로 표시된다. 이관 대상과 원본의 열람 범위, 과거 버전 및 첨부를 확인한 후 아래 리허설에서 적용을 검토한다. `npm run test:pilot:confluence`는 모의 Confluence와 Teamspace 분석기로 이 절차를 검사한다. [Atlassian의 공간 XML 내보내기 안내](https://confluence.atlassian.com/conf711/export-content-to-word-pdf-html-and-xml-1044781118.html)
+`matched`는 조회한 페이지의 확인 항목이 일치했다는 뜻이다. 원본 ZIP에만 있는 페이지는 현재 계정에 보이지 않을 수 있다. 공간 권한은 보고서의 `spacePermissions`에 수동 검토로 표시된다. 이관 대상과 원본의 열람 범위, 과거 버전 및 첨부를 확인한 후 아래 리허설에서 적용을 검토한다. `npm run test:pilot:confluence`는 모의 Confluence와 Donefac 분석기로 이 절차를 검사한다. [Atlassian의 공간 XML 내보내기 안내](https://confluence.atlassian.com/conf711/export-content-to-word-pdf-html-and-xml-1044781118.html)
 
 페이지를 찾아 검토하려면 ZIP을 지정한 실행에 `--findings`를 추가한다.
 
@@ -309,9 +309,9 @@ npm run pilot:rehearsal -- stage /absolute/path/manifest.json /absolute/path/reh
 
 실제 데이터 이관에서 연결된 ZIP을 고르면 매핑과 미리보기의 **ZIP 전체 페이지 제한 확인**에서 형식 3의 합산 결과와 아직 확인할 페이지 수를 볼 수 있다. 아래에서 각 검토의 범위·시각·진단을 확인한다. 공간 권한과 이관 후 팀의 열람 범위는 별도로 검토한다.
 
-`--profile`은 선택 옵션이다. `stage`는 새 디렉터리의 `workspace/.teamspace-rehearsal/`에 `stage.json`과 선택한 Confluence 검토 파일을 저장한다. 옵션 선택에 관계없이 한 파일 64MiB, 최대 20개, 합계 512MiB를 파일럿 시작 전과 실제 읽을 때 검사한다. `review`가 출력한 루프백 주소에서 **워크스페이스 설정 → 실제 데이터 이관**을 열고, 프로젝트·팀원·상태 매핑과 미리보기의 확인 항목을 검토한 뒤 적용한다. 특정 객체의 경고나 오류는 **이관 검토 진단 → 원본 상세 보기**에서 해당 패키지의 본문·메타데이터·관계와 대조한다. 리허설 파일럿은 루프백에만 접속을 받고 명령을 실행한 셸의 외부 연동 자격 증명을 상속하지 않는다.
+`--profile`은 선택 옵션이다. `stage`는 새 디렉터리의 `workspace/.donefac-rehearsal/`에 `stage.json`과 선택한 Confluence 검토 파일을 저장한다. 옵션 선택에 관계없이 한 파일 64MiB, 최대 20개, 합계 512MiB를 파일럿 시작 전과 실제 읽을 때 검사한다. `review`가 출력한 루프백 주소에서 **워크스페이스 설정 → 실제 데이터 이관**을 열고, 프로젝트·팀원·상태 매핑과 미리보기의 확인 항목을 검토한 뒤 적용한다. 특정 객체의 경고나 오류는 **이관 검토 진단 → 원본 상세 보기**에서 해당 패키지의 본문·메타데이터·관계와 대조한다. 리허설 파일럿은 루프백에만 접속을 받고 명령을 실행한 셸의 외부 연동 자격 증명을 상속하지 않는다.
 
-이관 리허설은 `stage`, `review`, `verify`에서 외부 웹훅 전송과 반복 업무·마감 알림의 자동 실행을 중지한다. 저장된 규칙은 조회할 수 있다. `.teamspace-rehearsal/`이 있는 워크스페이스와 복원본은 일반 API와 팀 접속 모드에서 시작할 수 없으며 `pilot:rehearsal review`로 연다.
+이관 리허설은 `stage`, `review`, `verify`에서 외부 웹훅 전송과 반복 업무·마감 알림의 자동 실행을 중지한다. 저장된 규칙은 조회할 수 있다. `.donefac-rehearsal/`이 있는 워크스페이스와 복원본은 일반 API와 팀 접속 모드에서 시작할 수 없으며 `pilot:rehearsal review`로 연다.
 
 브라우저에서 파일을 준비할 때는 **워크스페이스 설정 → 기존 도구 원본 분석 → 여러 원본 파일 분석**을 연다. 파일별로 원본 도구와 인스턴스 식별값을 확인한 뒤 순서대로 분석한다. 실패한 행은 설정을 수정해 다시 시도하거나 대기열에서 뺄 수 있다. 응답을 받지 못한 파일도 같은 내용과 인스턴스 식별값으로 확인할 수 있으며 이미 저장된 분석은 다시 사용한다. **분석한 패키지로 이관 매핑**을 누르면 확인된 패키지를 **실제 데이터 이관**에서 선택한다. 다른 패키지의 작업 중인 매핑이나 미리보기가 있으면 교체를 확인한다. **선택 패키지 매핑 불러오기**에서 매핑을 열고 미리보기를 검토해 적용한다.
 
@@ -323,7 +323,7 @@ npm run pilot:rehearsal -- stage /absolute/path/manifest.json /absolute/path/reh
 
 관리자 XML에 현재 업무가 없는 승인 단계가 있으면 상태 정의와 이력의 출발·도착 ID, 소유 업무를 확인해 선택지에 넣는다. 초기 상태나 허용 전이로 선택한 경우 적용할 워크플로에 추가된다. 같은 원본에 속하는 분할 패키지는 함께 선택한다. 상태 변경 이력의 열람 범위가 모호하면 이관 검토 진단에서 해당 이력을 확인하고 제외한다. 이전 분석에서 이력의 열람 범위를 다시 확인하라는 진단이 나오면 같은 원본 파일을 같은 인스턴스로 다시 올린다.
 
-**상태 매핑**은 Jira REST·검색 XML·관리자 XML에서 같은 원본 상태 ID의 분류를 확인해 기본값을 제안한다. 예를 들어 Jira에서 완료로 분류된 ‘Shipped’는 Teamspace에서도 완료로 제안한다. 분류 근거가 엇갈리는 항목은 **분류 선택**에서 직접 골라 미리보기를 검토한다. 완료 티켓은 확인된 원본 해결 시각을 사용한다. [Jira 원본 상태 분류](https://developer.atlassian.com/server/jira/platform/jira-issue-statuses-as-lozenges/)
+**상태 매핑**은 Jira REST·검색 XML·관리자 XML에서 같은 원본 상태 ID의 분류를 확인해 기본값을 제안한다. 예를 들어 Jira에서 완료로 분류된 ‘Shipped’는 Donefac에서도 완료로 제안한다. 분류 근거가 엇갈리는 항목은 **분류 선택**에서 직접 골라 미리보기를 검토한다. 완료 티켓은 확인된 원본 해결 시각을 사용한다. [Jira 원본 상태 분류](https://developer.atlassian.com/server/jira/platform/jira-issue-statuses-as-lozenges/)
 
 **사용자 매핑 → 이메일 일치 후보 검토**에서 원본 계정과 팀원의 이메일을 비교한다. 원본과 대상이 맞는 항목만 선택하고 **선택한 매핑 반영**을 누른다. 기존 수동 지정은 유지되며, 선택 결과는 새 **적용 전 미리보기**에서 확인한다. 팀원 이메일이 검토 중 변경되면 표시된 후보를 다시 확인한다. 이메일이 없거나, 근거가 충돌하거나, 이전 Jira 분석에 확인 근거가 없는 계정은 사용자 매핑 목록에서 직접 지정할 수 있다.
 
@@ -383,7 +383,7 @@ Confluence 문장 댓글이 있는 ZIP은 이전 분석 자료를 쓰는 경우 
 
 같은 화면에서 **문장 댓글에 연결한 답글**과 **일반 댓글로 옮긴 답글**을 확인한다. 이전에 분석한 ZIP의 답글 관계도 원본 바이트로 다시 분석한다. 처음 이관하거나 기존 댓글에 과거 답글을 추가한 뒤, 답글 주소가 올바른 대화를 열고 상위 댓글의 해결 상태가 유지되는지 확인한다.
 
-JQL이 들어 있는 Jira 목록 매크로의 **JIRA_LIST_REVIEW** 진단은 문서에서 대상 프로젝트와 검색 결과를 확인하라는 뜻이다. 문서를 적용한 뒤 보관된 매크로 코드 블록 안에 커서를 두면, Jira 이관 기록을 사용하는 공유 보기로 변환할 수 있다. 선택한 블록을 교체하기 전에 원본 검색과 Teamspace 업무를 비교한다. [문서의 Jira 목록 복원](../README.md#confluence-문서의-jira-목록-복원)
+JQL이 들어 있는 Jira 목록 매크로의 **JIRA_LIST_REVIEW** 진단은 문서에서 대상 프로젝트와 검색 결과를 확인하라는 뜻이다. 문서를 적용한 뒤 보관된 매크로 코드 블록 안에 커서를 두면, Jira 이관 기록을 사용하는 공유 보기로 변환할 수 있다. 선택한 블록을 교체하기 전에 원본 검색과 Donefac 업무를 비교한다. [문서의 Jira 목록 복원](../README.md#confluence-문서의-jira-목록-복원)
 
 브라우저 검토를 마치고 `review`를 `Ctrl+C`로 종료한 뒤 실행한다.
 
@@ -441,19 +441,19 @@ npm run test:pilot:team-native
 
 한 작업자가 사이클을 완료해 미완료 업무를 다음 사이클로 옮긴다. 완료 업무는 기존 사이클에 두고, 이월한 업무의 담당자와 날짜를 대조한다. 다른 팀원이 완료 기록에서 회고 문서와 연결 티켓을 열고 간트에서 저장된 날짜를 확인한다. 완료 기록·사이클·업무·회고 저장본을 재시작과 별도 물리 복원 뒤 다시 읽어 비교한다.
 
-브라우저에서 모의 GitLab 저장소를 검색하고 Teamspace 업무 키로 MR 연결을 미리 본다. 저장된 읽기 토큰으로 동기화할 때 저장소 응답이 실패하면 재시도해 같은 업무에서 정확한 MR 주소를 확인한다. 같은 저장소의 서명된 파이프라인 웹훅으로 중복 전달 뒤에도 상태 전이가 한 번인지 검증한다. 새로고침·재시작·별도 복원에서 연결 주소와 동기화 결과를 대조한다.
+브라우저에서 모의 GitLab 저장소를 검색하고 Donefac 업무 키로 MR 연결을 미리 본다. 저장된 읽기 토큰으로 동기화할 때 저장소 응답이 실패하면 재시도해 같은 업무에서 정확한 MR 주소를 확인한다. 같은 저장소의 서명된 파이프라인 웹훅으로 중복 전달 뒤에도 상태 전이가 한 번인지 검증한다. 새로고침·재시작·별도 복원에서 연결 주소와 동기화 결과를 대조한다.
 
 같은 HTTPS 파일럿의 GitLab 설정에서 저장된 읽기 토큰의 웹훅 설정 조회가 거절되는지 확인하고, 모의 관리 토큰으로 정확한 수신 주소에 등록된 웹훅을 읽는다. 두 전송이 모두 HTTP 200이어도 실제로 서명을 검증한 수신 기록과 프록시에서만 200을 돌려준 전송을 구분한다. 수신 기록은 재시작과 물리 복원 뒤에도 비교한다.
 
 문서 편집 탭과 날짜 초안이 있는 간트 탭을 열어 둔 채 같은 HTTPS 주소의 파일럿 서버를 재시작한다. 이전 접속이 만료된 뒤 별도 탭에서 다시 접속하면 원래 문서 탭의 오프라인 편집이 같은 편집 세대에 한 번만 반영된다. 간트는 동료가 수정한 티켓의 이전 버전 저장을 거절하고, 최신 버전에서 날짜를 재검토할 때 기존 날짜 초안과 동료의 수정 내용을 함께 보존한다. 별도 물리 복원에서도 두 기록을 대조한다.
 
-읽기 키로 업무를 조회하고 쓰기가 거절되는지 확인한다. 같은 발급 요청을 다시 보내면 기존 키 정보만 조회한다. 팀원 이메일을 바꾼 뒤에도 같은 키로 조회하고, 회수 뒤에는 요청이 거절되는지 확인한다. 기본 공동 편집 시간은 75초이며 `TEAMSPACE_PILOT_TEAM_SECONDS`로 30~1,800초를 지정할 수 있다. 오프라인 재접속, 파일럿 재시작, 별도 물리 복원 이후 같은 접수·문서·첨부·일정·키·GitLab 기록을 대조한다. 실제 이관 파일과 GitLab 저장소는 도입 범위가 정해지면 확인한다.
+읽기 키로 업무를 조회하고 쓰기가 거절되는지 확인한다. 같은 발급 요청을 다시 보내면 기존 키 정보만 조회한다. 팀원 이메일을 바꾼 뒤에도 같은 키로 조회하고, 회수 뒤에는 요청이 거절되는지 확인한다. 기본 공동 편집 시간은 75초이며 `DONEFAC_PILOT_TEAM_SECONDS`로 30~1,800초를 지정할 수 있다. 오프라인 재접속, 파일럿 재시작, 별도 물리 복원 이후 같은 접수·문서·첨부·일정·키·GitLab 기록을 대조한다. 실제 이관 파일과 GitLab 저장소는 도입 범위가 정해지면 확인한다.
 
 ## 20명 동시 사용 리허설
 
 ```bash
 npm run test:pilot:team
-TEAMSPACE_PILOT_TEAM_SECONDS=120 npm run test:pilot:team
+DONEFAC_PILOT_TEAM_SECONDS=120 npm run test:pilot:team
 ```
 
 이 명령은 OpenSSL로 임시 인증서를 만들고 루프백 HTTPS 프록시 뒤에 별도 파일럿을 띄운다. 먼저 합성 Jira 관리자 백업과 Confluence 공간 ZIP을 같은 프로젝트에 이관한다. 인증한 브라우저가 Confluence 문서에서 연결된 티켓을 열고 원래 Jira 키로 같은 티켓을 찾는지 확인한다. Chromium 컨텍스트 20개에서 각각 팀 접속 폼에 로그인해 서로 다른 세션 쿠키와 같은 주소의 WSS 연결을 확인한다. 모두 이관한 문서를 동시에 편집하며, 각 편집이 서버에 정확히 한 번 저장되어 모든 브라우저에 보이고 티켓 참조가 유지되는지 검사한다.
@@ -464,4 +464,4 @@ TEAMSPACE_PILOT_TEAM_SECONDS=120 npm run test:pilot:team
 
 같은 HTTPS 주소로 합성 GitLab 파이프라인의 서명된 웹훅을 보낸다. 원래 Jira 키만 담긴 이벤트가 이관한 업무에 연결되는지 확인한다. 키가 빠진 후속 이벤트로 기존 연결을 갱신한 뒤, 별도 성공 이벤트와 중복 전송을 보내 `진행 중`에서 `검토`로 이동한 기록이 한 건인지 확인한다. 티켓 상세에서 두 파이프라인과 원래 Jira 키를 확인하고, 재시작과 물리 복원 뒤 연동 설정·연결·수신·자동 전이 기록을 비교한다.
 
-연결을 끊고 편집한 내용을 같은 편집 세대로 재접속해 합친다. 저장본 복구로 세대가 바뀐 경우에는 이전 편집을 사본으로 저장하고 최신 문서에서 다시 편집한다. 파일럿 재시작과 별도 경로의 물리 복원 뒤에는 검사 도구의 이전 접속 세션이 거절되는지 확인한다. 새로 접속해 공동 편집 상태·복구 사본·업무 일정·저장 보기와 이관 영수증, 원본 ZIP 해시, 원본 작업 시간, 첨부파일 네 건의 해시와 다운로드 바이트를 비교한다. 기본 동시 사용 검사 시간은 75초이고 `TEAMSPACE_PILOT_TEAM_SECONDS`에 30~1,800초의 정수를 지정할 수 있다. 브라우저 시작, 오프라인 복구와 물리 복원에는 시간이 추가된다.
+연결을 끊고 편집한 내용을 같은 편집 세대로 재접속해 합친다. 저장본 복구로 세대가 바뀐 경우에는 이전 편집을 사본으로 저장하고 최신 문서에서 다시 편집한다. 파일럿 재시작과 별도 경로의 물리 복원 뒤에는 검사 도구의 이전 접속 세션이 거절되는지 확인한다. 새로 접속해 공동 편집 상태·복구 사본·업무 일정·저장 보기와 이관 영수증, 원본 ZIP 해시, 원본 작업 시간, 첨부파일 네 건의 해시와 다운로드 바이트를 비교한다. 기본 동시 사용 검사 시간은 75초이고 `DONEFAC_PILOT_TEAM_SECONDS`에 30~1,800초의 정수를 지정할 수 있다. 브라우저 시작, 오프라인 복구와 물리 복원에는 시간이 추가된다.

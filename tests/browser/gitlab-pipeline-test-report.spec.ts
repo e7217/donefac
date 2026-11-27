@@ -78,8 +78,8 @@ test('360px 티켓과 개발 화면에서 GitLab 테스트 요약과 실패한 �
       }
       response.end(JSON.stringify({ total_count: 20, failed_count: 3, error_count: 1, success_count: 14, skipped_count: 2,
         test_suites: [{ name: suiteName, test_cases: [
-          { status: 'failed', name: failedTestName, classname: 'teamspace.planning.ReleaseTest', stack_trace: privateOutput },
-          { status: 'error', name: errorTestName, classname: 'teamspace.planning.ScheduleTest', system_output: privateOutput },
+          { status: 'failed', name: failedTestName, classname: 'donefac.planning.ReleaseTest', stack_trace: privateOutput },
+          { status: 'error', name: errorTestName, classname: 'donefac.planning.ScheduleTest', system_output: privateOutput },
           { status: 'success', name: passedTestName }, { status: 'skipped', name: skippedTestName },
         ] }],
       }));
@@ -175,7 +175,7 @@ test('360px 티켓과 개발 화면에서 GitLab 테스트 요약과 실패한 �
     await expect(cases.getByRole('listitem').filter({ hasText: failedTestName })).toContainText('실패');
     await expect(cases.getByRole('listitem').filter({ hasText: errorTestName })).toContainText('오류');
     await expect(cases).toContainText(suiteName);
-    await expect(cases).toContainText('teamspace.planning.ReleaseTest');
+    await expect(cases).toContainText('donefac.planning.ReleaseTest');
     await expect(cases).not.toContainText(passedTestName);
     await expect(cases).not.toContainText(skippedTestName);
     await expect(failedTests).toContainText('조회 범위가 제한되었습니다. 전체 테스트를 GitLab에서 확인해 주세요.');

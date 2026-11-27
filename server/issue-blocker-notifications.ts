@@ -1,4 +1,4 @@
-import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
+import { isDonefacIssueRelation } from '../shared/issue-relations.js';
 import type { Issue, IssueRelation, ProjectWorkflow } from '../shared/types.js';
 import { isTerminalStatus } from '../shared/workflow-helpers.js';
 import { MAX_NOTIFICATION_DETAIL_LENGTH } from './notifications.js';
@@ -8,7 +8,7 @@ type BlockerNotificationKind = 'issue-block-added' | 'issue-block-resolved';
 type Notify = (issue: Issue, actorId: string, kind: BlockerNotificationKind, createdAt: string, detail: string) => void;
 
 function canonicalBlock(relation: IssueRelation | undefined): IssueRelation | undefined {
-  if (relation && isTeamspaceIssueRelation(relation) && relation.type === 'blocks' && relation.sourceIssueId !== relation.targetIssueId) {
+  if (relation && isDonefacIssueRelation(relation) && relation.type === 'blocks' && relation.sourceIssueId !== relation.targetIssueId) {
     return relation;
   }
 }
@@ -47,7 +47,7 @@ export class IssueBlockerNotifications {
     const targets = this.store.db.prepare(`
       SELECT DISTINCT target_issue_id AS id FROM issue_relations
       WHERE source_issue_id=? AND target_issue_id<>source_issue_id
-        AND json_extract(json,'$.origin')='teamspace' AND json_extract(json,'$.type')='blocks'
+        AND json_extract(json,'$.origin')='donefac' AND json_extract(json,'$.type')='blocks'
       ORDER BY target_issue_id
     `).all(after.id) as { id: string }[];
     const kind = terminal ? 'issue-block-resolved' : 'issue-block-added';

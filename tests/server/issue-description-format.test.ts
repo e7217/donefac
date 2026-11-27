@@ -16,7 +16,7 @@ const markdown = '# 재현 절차\n\n- [x] 작업 시작\n\n| 값 | 결과 |\n| 
 type Backup = WorkspaceSnapshot & { schemaVersion: number; trashEntries: TrashArchive[] };
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-issue-description-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-issue-description-'));
   const service = createApp({ dataDir: directory, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   await once(server, 'listening');

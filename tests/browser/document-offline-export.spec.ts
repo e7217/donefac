@@ -17,7 +17,7 @@ async function json<T>(response: APIResponse, status = 200) {
 }
 
 async function downloadedZip(download: Download) {
-  expect(download.suggestedFilename()).toBe('Teamspace 문서.zip');
+  expect(download.suggestedFilename()).toBe('Donefac 문서.zip');
   const path = await download.path();
   expect(path).toBeTruthy();
   const { files } = await readLegacyArchive(await readFile(path!), 'offline.zip');
@@ -57,7 +57,7 @@ test('360px에서 문서 트리 ZIP을 내려받고 발행본이 없는 오류 �
       content: body(original, { type: 'documentReference', attrs: { documentId: child.id, label: '하위 작업 설명 열기' } }),
     } }));
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${project.id}/documents/${root.id}`);
     const paragraph = page.locator('.docs-prose p').filter({ hasText: original }).first();
     await expect(paragraph).toBeVisible({ timeout: 35_000 });
@@ -95,7 +95,7 @@ test('360px에서 문서 트리 ZIP을 내려받고 발행본이 없는 오류 �
     expect(rootMarkdown).toContain(`(${posix.relative(posix.dirname(rootEntry.path), childEntry.path).split('/').map(encodeURIComponent).join('/')})`);
     expect(manifest.attachments).toEqual([expect.objectContaining({ id: uploaded.id, filename })]);
     expect(files.get(manifest.attachments[0].path)).toEqual(fileBytes);
-    await expect(dialog.getByRole('status')).toContainText('Teamspace 문서.zip');
+    await expect(dialog.getByRole('status')).toContainText('Donefac 문서.zip');
 
     await source.selectOption('published');
     const pendingError = page.waitForResponse(response => new URL(response.url()).pathname === exportEndpoint);

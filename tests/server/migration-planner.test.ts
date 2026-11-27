@@ -1997,7 +1997,7 @@ test('Confluence titles use the original page space for current documents, histo
   request.configuration.excludedRecords = ['source/page:102', 'source/page:103'];
   const plan = buildMigrationPlan(request);
   assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
-  assert.equal(plan.projects.length, 1, 'Original space, not the merged Teamspace project, governs title matching.');
+  assert.equal(plan.projects.length, 1, 'Original space, not the merged Donefac project, governs title matching.');
   const target = (packageId: string, recordId: string) => plan.sourceRecords.find(row =>
     row.packageSha256 === request.packages.find(pkg => pkg.summary.id === packageId)?.summary.sha256 && row.record.id === recordId)?.targetId;
   const sourcePageId = target('source', 'page:100');

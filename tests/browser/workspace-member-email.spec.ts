@@ -13,7 +13,7 @@ test('팀원 이메일 충돌에서 초안을 유지하고 응답이 끊기면 �
   const received: { body: string | null; actor: string | undefined }[] = [];
   let committed: UserEmailChangeResult | undefined;
   let rejectRefresh = false;
-  await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), actor.id);
+  await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), actor.id);
   await page.setViewportSize({ width: 360, height: 800 });
   try {
     await page.goto(`/#/${initial.projects[0].id}/settings`);

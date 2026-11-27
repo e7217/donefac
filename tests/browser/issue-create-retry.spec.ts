@@ -206,7 +206,7 @@ test('생성 뒤 목록을 불러오지 못한 티켓이 다른 작업에서 삭
 
     const reloaded = page.waitForResponse(result => result.url().endsWith('/api/workspace') && result.request().method() === 'GET');
     page.once('dialog', dialog => dialog.accept());
-    expect(await page.evaluate(() => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })))).toBe(true);
+    expect(await page.evaluate(() => window.dispatchEvent(new Event('donefac:navigate', { cancelable: true })))).toBe(true);
     expect((await reloaded).ok()).toBe(true);
     await expect(modal).toHaveCount(0);
     const snapshot = await workspace(request);

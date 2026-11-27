@@ -210,7 +210,7 @@ test('360px에서 같은 Jira 원본 계정에 팀원 매핑을 재사용하고 
   const [actor, member, conflictFirstMember, conflictSecondMember] = ['user-seo', 'user-min', 'user-jun', 'user-yun']
     .map(id => workspace.users.find(user => user.id === id)!);
   expect([actor, member, conflictFirstMember, conflictSecondMember].every(Boolean)).toBe(true);
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
 
   const suffix = randomUUID().slice(0, 7).toUpperCase();
   const instance = `same-jira-${suffix.toLowerCase()}`;

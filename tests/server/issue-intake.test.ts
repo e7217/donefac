@@ -21,7 +21,7 @@ const reporter = 'user-min';
 const conflict = (reason: string) => (data: { details?: { reason?: string } }) => assert.equal(data.details?.reason, reason);
 
 async function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-issue-intake-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-issue-intake-'));
   async function open() {
     const runtime = createApp({ dataDir: directory, outboundWorker: false });
     const server = runtime.app.listen(0, '127.0.0.1');
@@ -35,7 +35,7 @@ async function fixture(t: TestContext) {
     await new Promise<void>(resolve => service.server.close(() => resolve()));
     service.runtime.close();
   }
-  const database = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(directory, 'donefac.sqlite'));
   t.after(async () => {
     await close();
     database.close();

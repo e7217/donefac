@@ -59,12 +59,12 @@
   margin: 5px 18px 0;
 }
 
-::highlight(teamspace-document-reader-find) {
+::highlight(donefac-document-reader-find) {
   background-color: color-mix(in srgb, var(--warning) 25%, var(--bg-surface-1));
   color: var(--fg-primary);
 }
 
-::highlight(teamspace-document-reader-find-current) {
+::highlight(donefac-document-reader-find-current) {
   background-color: color-mix(in srgb, var(--warning) 45%, var(--bg-surface-1));
   color: var(--fg-primary);
   text-decoration: underline;

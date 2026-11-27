@@ -16,7 +16,7 @@ const sourceInstance = 'synthetic-jira-schedule-dates';
 const datePicker = 'com.atlassian.jira.plugin.system.customfieldtypes:datepicker';
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-jira-dates-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-jira-dates-'));
   const service = createApp({ dataDir, outboundWorker: false });
   const server = service.app.listen(0, '127.0.0.1');
   t.after(async () => {

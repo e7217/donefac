@@ -13,7 +13,7 @@ import type { ApiKeyCreated, Issue, Project, ProjectWorklogReport, WorklogEntry,
 interface WorklogList { entries: WorklogEntry[]; totalMinutes: number; totalEntries: number }
 type WorklogBackup = WorkspaceSnapshot & { schemaVersion: number; worklogs: (WorklogEntry & { createHash: string; deletedAt: string | null })[] };
 async function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-worklogs-integration-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-worklogs-integration-'));
   const service = createApp({ dataDir: dir, outboundWorker: false }), server = service.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;

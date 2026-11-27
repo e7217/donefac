@@ -30,7 +30,7 @@ function snapshot(values: Partial<CycleCompletionRecord> = {}): CycleCompletionR
 }
 
 function fixture(t: TestContext) {
-  const path = mkdtempSync(join(tmpdir(), 'teamspace-cycle-records-'));
+  const path = mkdtempSync(join(tmpdir(), 'donefac-cycle-records-'));
   const store = new Store(path);
   t.after(() => { store.db.close(); rmSync(path, { recursive: true, force: true }); });
   store.put('projects', team);

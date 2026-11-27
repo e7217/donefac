@@ -36,7 +36,7 @@ const accept = (page: Page) => review(page).getByRole('button', { name: '업무�
 test('접수 링크와 360px 검토로 다른 작업자의 요청을 업무 하나로 전환하고 응답을 재확인한다', async ({ page, browser, request, baseURL }) => {
   test.setTimeout(90_000);
   const f = await fixture(request);
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.reviewer.id);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.reviewer.id);
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
   await page.goto(`/#/${f.project.id}/overview`);
   await page.getByRole('button', { name: '업무 접수', exact: true }).click();
@@ -47,7 +47,7 @@ test('접수 링크와 360px 검토로 다른 작업자의 요청을 업무 하�
 
   const submitter = await browser.newContext({ baseURL, viewport: { width: 360, height: 820 } });
   try {
-    await submitter.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.reporter.id);
+    await submitter.addInitScript(id => localStorage.setItem('donefac.actor', id), f.reporter.id);
     const fromLink = await submitter.newPage();
     await fromLink.goto(submissionUrl.href);
     const form = fromLink.getByRole('dialog', { name: '업무 요청 작성', exact: true });
@@ -149,7 +149,7 @@ test('접수 요청자는 처리 전에 내용을 바로잡고 동료의 작성 
   const item = await f.create('압력 값 확인 요청', '처음 기록한 압력 범위입니다.');
   const address = `${f.workspacePath}?request=${item.id}`;
   await page.setViewportSize({ width: 360, height: 820 });
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.reviewer.id);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.reviewer.id);
   await page.goto(address);
   const check = review(page);
   const original = check.getByRole('region', { name: '접수 원문', exact: true });
@@ -159,7 +159,7 @@ test('접수 요청자는 처리 전에 내용을 바로잡고 동료의 작성 
 
   const submitter = await browser.newContext({ baseURL, viewport: { width: 360, height: 820 } });
   try {
-    await submitter.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.reporter.id);
+    await submitter.addInitScript(id => localStorage.setItem('donefac.actor', id), f.reporter.id);
     const author = await submitter.newPage();
     await author.goto(address);
     const authorDialog = review(author);
@@ -220,7 +220,7 @@ test('중복 업무가 바뀌면 메모를 남기고 최신 버전을 다시 고
     headers, data: { projectId: f.project.id, title: '수집 데이터 정리' },
   }), 201);
   await page.setViewportSize({ width: 360, height: 820 });
-  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.reviewer.id);
+  await page.addInitScript(id => localStorage.setItem('donefac.actor', id), f.reviewer.id);
   await page.goto(`${f.workspacePath}?request=${duplicate.id}`);
   const dialog = review(page);
   const method = dialog.getByRole('combobox', { name: '처리 방식', exact: true });

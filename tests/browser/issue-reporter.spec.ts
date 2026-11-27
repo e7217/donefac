@@ -42,7 +42,7 @@ test('360px 업무의 요청자를 기본 지정하고 변경한 뒤 내가 요�
     const assignedOnly = await prepIssue('담당만 있는 업무', first.id, other.id, actor.id);
     const blank = await prepIssue('미지정 업무', second.id, null, actor.id);
 
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.setViewportSize({ width: 360, height: 820 });
     await page.goto(`/#/${first.id}/issues`);
     await page.getByRole('button', { name: '업무 만들기', exact: true }).first().click();

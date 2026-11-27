@@ -72,7 +72,7 @@ test('360px에서 연결된 업무를 검토해 프로젝트를 옮기고 기존
     const oldHash = `#/${source.id}/issues?issue=${root.id}`;
     const newHash = `#/${target.id}/issues?issue=${root.id}`;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/${oldHash}`);
     const panel = page.getByRole('dialog', { name: root.title, exact: true });
     await button(panel, '프로젝트 이동').click();
@@ -211,7 +211,7 @@ test('360px에서 작업 기록이 있는 업무를 옮기고 대상 프로젝�
       headers, data: { requestId: randomUUID(), workDate, minutes: 75, note },
     }), 201);
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.addInitScript(id => localStorage.setItem('donefac.actor', id), actor.id);
     await page.goto(`/#/${source.id}/issues?issue=${issue.id}`);
     const issuePanel = page.getByRole('dialog', { name: issue.title, exact: true });
     await button(issuePanel, '작업 시간').click();
@@ -332,7 +332,7 @@ test('360px에서 Jira 이관 업무를 다른 프로젝트로 이동하고 원�
     const originalHash = `#/${issue.projectId}/issues?issue=${id}`;
     const targetHash = `#/${target.id}/issues?issue=${id}`;
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), actor.id);
+    await page.addInitScript(actorId => localStorage.setItem('donefac.actor', actorId), actor.id);
     await page.goto(`/${originalHash}`);
     const panel = page.getByRole('dialog', { name: title, exact: true });
     const originalLink = panel.getByRole('region', { name: '기존 도구 연결', exact: true })

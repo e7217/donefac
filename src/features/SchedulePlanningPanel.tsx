@@ -60,8 +60,8 @@ function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, se
       if (!areGanttDateDraftsPreservedByNavigation(event)) afterAcceptedNavigation(event, reset);
     };
     const unload = (event: BeforeUnloadEvent) => { if (dirty || pending.current) { event.preventDefault(); event.returnValue = ''; } };
-    window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', unload);
-    return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', unload); };
+    window.addEventListener('donefac:navigate', navigate); window.addEventListener('beforeunload', unload);
+    return () => { window.removeEventListener('donefac:navigate', navigate); window.removeEventListener('beforeunload', unload); };
   }, [dirty, notify, reset]);
   const canNavigate = () => dispatchWorkspaceNavigation({ preserveGantt: 'dateDrafts' });
   const source = () => calendar ? { expectedIssueVersions: Object.fromEntries(issues.map(item => [item.id, item.version])), expectedMilestoneVersions: Object.fromEntries(milestones.map(item => [item.id, item.version])), expectedCalendarVersion: calendar.version } : null;

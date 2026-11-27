@@ -27,7 +27,7 @@ type Backup = WorkspaceSnapshot & {
 type Failure = { error: string; details: { reason: string; currentVersion?: number } };
 
 async function fixture(t: TestContext) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-document-templates-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'donefac-document-templates-'));
   const runtime = createApp({ dataDir, outboundWorker: false });
   const server = runtime.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -185,7 +185,7 @@ test('team and project templates capture portable saved content and create an in
   await f.call(`/trash/${removed.trashEntryId}`, 200, 'DELETE');
   const request = draftRequest(template);
   const workspace = await f.call<WorkspaceSnapshot>('/workspace');
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     db.exec(`CREATE TRIGGER fail_template_receipt BEFORE INSERT ON document_creation_requests
       BEGIN SELECT RAISE(ABORT, 'synthetic template receipt failure'); END`);
@@ -267,7 +267,7 @@ test('saved templates copy inline images and exact file versions through purge, 
   const imagePath = `/api${contentPath(logo.id)}?inline=1`;
   const pinnedPath = `/attachment-versions/${pinned.currentVersionId}/download`;
   const sameOriginLink = `${f.origin}/api${pinnedPath}`;
-  const externalLink = `https://teamspace.invalid${imagePath}`;
+  const externalLink = `https://donefac.invalid${imagePath}`;
   const source = await saveBlocks(f, original, [
     { type: 'image', attrs: { src: imagePath, alt: '팀 로고' } },
     fileLink(sameOriginLink, '작업 절차'), fileLink(`/api${pinnedPath}`, '작업 절차 다시 열기'),
@@ -289,7 +289,7 @@ test('saved templates copy inline images and exact file versions through purge, 
   const uploads = () => readdirSync(join(f.dataDir, 'uploads')).sort();
   const beforeFiles = uploads();
   const beforeBackup = await f.call<Backup>('/export');
-  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  const db = new DatabaseSync(join(f.dataDir, 'donefac.sqlite'));
   try {
     db.exec(`CREATE TRIGGER fail_asset_template_receipt BEFORE INSERT ON document_creation_requests
       BEGIN SELECT RAISE(ABORT, 'synthetic template attachment receipt failure'); END`);

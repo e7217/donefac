@@ -121,7 +121,7 @@ function FindingDetails({ finding, onLocateDate, onEditLink, onReviewDependency,
     </div>
     <p className="gantt-findings-item-titles">{predecessor.title} → {successor.title}</p>
     {teamBlocker && <p className="gantt-findings-relation gantt-findings-team-relation">
-      프로젝트 간 차단 · {teamBlocker.relation.origin === 'jira' ? 'Jira 원본' : 'Teamspace'}
+      프로젝트 간 차단 · {teamBlocker.relation.origin === 'jira' ? 'Jira 원본' : 'Donefac'}
     </p>}
     {dependency && isDependencyType(dependency.type) && isDependencyLag(dependency.lagDays) &&
       <p className="gantt-findings-relation">{dependencyLabel(dependency)}</p>}

@@ -1,4 +1,4 @@
-export const CONFLUENCE_FINDINGS_FORMAT = 'teamspace-confluence-audit-findings';
+export const CONFLUENCE_FINDINGS_FORMAT = 'donefac-confluence-audit-findings';
 export const CONFLUENCE_FINDINGS_VERSION = 3;
 export const CONFLUENCE_FINDINGS_MAX_BYTES = 64 * 1024 * 1024;
 

@@ -192,8 +192,8 @@ function PinnedRevision({ documentId, revisionId, label, nodeBudget, sourceLabel
 
   useEffect(() => {
     const imported = () => { setOpen(false); setLoaded(null); };
-    window.addEventListener('teamspace:workspace-imported', imported);
-    return () => window.removeEventListener('teamspace:workspace-imported', imported);
+    window.addEventListener('donefac:workspace-imported', imported);
+    return () => window.removeEventListener('donefac:workspace-imported', imported);
   }, []);
 
   const saved = loaded && 'revision' in loaded ? loaded : undefined;
@@ -412,11 +412,11 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
       const layout = normalizeDocumentColumnLayoutOptions(attrs, children.length);
       if (!layout) return <div key={key}>{children}</div>;
       return <div key={key} className="document-column-layout-readonly" role="group" aria-label="문서 다단 구역"
-        data-teamspace-node="documentColumnLayout" data-layout-weights={layout.weights.join(',')} data-layout-border={String(layout.border)}>
+        data-donefac-node="documentColumnLayout" data-layout-weights={layout.weights.join(',')} data-layout-border={String(layout.border)}>
         <div data-layout-grid="" style={{ '--document-column-tracks': documentColumnLayoutTracks(layout.weights) } as CSSProperties}>{children}</div>
       </div>;
     }
-    case 'documentColumn': return <div key={key} data-teamspace-node="documentColumn">{children}</div>;
+    case 'documentColumn': return <div key={key} data-donefac-node="documentColumn">{children}</div>;
     case 'documentExcerpt': return state.mode
       ? <aside key={key} className="document-excerpt-definition" aria-label="저장된 발췌 구역">
         <div className="document-excerpt-heading"><strong>발췌 구역{attrs.hidden === true ? ' · 원본 숨김' : ''}</strong></div>
@@ -530,7 +530,7 @@ function ReferenceNodeView({ node, selected, deleteNode, updateAttributes, edito
   const noPanel = excerpt && node.attrs.noPanel === true;
   const blockLabel = pinned ? '문서 버전 포함' : excerpt ? '발췌 포함' : included ? '문서 포함' : '참조';
   const state: RenderState = { documentId: context.documentId, remaining: context.includeBudget, exhausted: false, visited: new Set(context.documentId ? [context.documentId] : []), includeDepth: 0, structuralDepth: 0, outline: [] };
-  return <NodeViewWrapper className={`doc-reference-node ${selected ? 'is-selected' : ''}`} contentEditable={false} data-teamspace-node={node.type.name} data-reference-id={node.attrs.issueId || node.attrs.documentId}>
+  return <NodeViewWrapper className={`doc-reference-node ${selected ? 'is-selected' : ''}`} contentEditable={false} data-donefac-node={node.type.name} data-reference-id={node.attrs.issueId || node.attrs.documentId}>
     {node.type.name === 'issueReference' ? issueCard(context, node.attrs.issueId, label) : pinned
       ? pinnedRevision(node.attrs.documentId, node.attrs.revisionId, label, context.includeBudget, 'pin') : included
         ? renderIncluded(context, node.attrs.documentId, label, state, 'include', { excerpt, noPanel })
@@ -558,7 +558,7 @@ function DocumentExcerptNodeView({ node, selected, editor, getPos, updateAttribu
   }
 
   return <NodeViewWrapper as="section" className={`document-excerpt-definition${selected ? ' is-selected' : ''}`}
-    data-teamspace-node="documentExcerpt" aria-label="발췌 구역">
+    data-donefac-node="documentExcerpt" aria-label="발췌 구역">
     <div className="document-excerpt-heading" contentEditable={false}>
       <strong>발췌 구역</strong>
       {editor.isEditable && <>
@@ -583,7 +583,7 @@ function IssueBlockNodeView({ node, selected, getPos, deleteNode, editor }: Node
     onEdit: canEdit ? () => { if (editor.isEditable) context.openIssueBlock?.(editor, nodeType, { getPos, attrs }); } : undefined,
     onDelete: canEdit ? () => { if (editor.isEditable) deleteNode(); } : undefined,
   };
-  return <NodeViewWrapper className={`doc-reference-node ${selected ? 'is-selected' : ''}`} contentEditable={false} data-teamspace-node={nodeType}>
+  return <NodeViewWrapper className={`doc-reference-node ${selected ? 'is-selected' : ''}`} contentEditable={false} data-donefac-node={nodeType}>
     {summaryAttrs ? <IssueSummaryCard {...props} attrs={summaryAttrs} /> : <IssueListCard {...props} attrs={attrs} />}
   </NodeViewWrapper>;
 }
@@ -591,7 +591,7 @@ function DocumentLabelListNodeView({ node, selected, editor, updateAttributes, d
   const { data, documentId, openDocument, onListDraftChange } = contextOf(useContext(BlockContext));
   const id = useId();
   const trackSettingsDraft = useCallback((dirty: boolean) => onListDraftChange?.(id, dirty), [id, onListDraftChange]);
-  return <NodeViewWrapper className={`doc-reference-node${selected ? ' is-selected' : ''}`} contentEditable={false} data-teamspace-node="documentLabelList">
+  return <NodeViewWrapper className={`doc-reference-node${selected ? ' is-selected' : ''}`} contentEditable={false} data-donefac-node="documentLabelList">
     <DocumentLabelListCard attrs={node.attrs} data={data} documentId={documentId} openDocument={openDocument} onSettingsDraftChange={trackSettingsDraft}
       onChange={editor.isEditable ? attrs => { if (editor.isEditable) updateAttributes(attrs); } : undefined}
       onDelete={editor.isEditable ? () => { if (editor.isEditable) deleteNode(); } : undefined} />
@@ -601,7 +601,7 @@ function DocumentChildListNodeView({ node, selected, editor, getPos, updateAttri
   const { data, documentId, openDocument, onListDraftChange, editorReadOnly } = contextOf(useContext(BlockContext));
   const id = useId();
   const trackSettingsDraft = useCallback((dirty: boolean) => onListDraftChange?.(id, dirty), [id, onListDraftChange]);
-  return <NodeViewWrapper className={`doc-reference-node${selected ? ' is-selected' : ''}`} contentEditable={false} data-teamspace-node="documentChildList">
+  return <NodeViewWrapper className={`doc-reference-node${selected ? ' is-selected' : ''}`} contentEditable={false} data-donefac-node="documentChildList">
     <DocumentChildListCard attrs={node.attrs} data={data} documentId={documentId} openDocument={openDocument} onSettingsDraftChange={trackSettingsDraft}
       onChange={!editorReadOnly ? (attrs, baseline) => {
         const position = getPos();
@@ -632,7 +632,7 @@ function DocumentPropertyNodeView({ node, selected, editor, getPos, updateAttrib
     onDelete: !editorReadOnly ? () => { if (editor.isEditable) deleteNode(); } : undefined,
     onSettingsDraftChange: trackSettingsDraft,
   };
-  return <NodeViewWrapper className={`doc-reference-node${selected ? ' is-selected' : ''}`} contentEditable={false} data-teamspace-node={type}>
+  return <NodeViewWrapper className={`doc-reference-node${selected ? ' is-selected' : ''}`} contentEditable={false} data-donefac-node={type}>
     {type === 'documentProperties' ? <DocumentPropertiesCard attrs={node.attrs} {...actions}
       onChange={!editorReadOnly ? (options, baseline) => apply(options, baseline, normalizeDocumentPropertiesOptions) : undefined} />
       : <DocumentPropertyReportCard attrs={node.attrs} {...actions} data={data} documentId={documentId} openDocument={openDocument}
@@ -666,7 +666,7 @@ export function decorateDocumentExtensions(extensions: AnyExtension[]): AnyExten
   } }) : extension.name === 'documentExcerpt' ? extension.extend({ addNodeView() {
     return ReactNodeViewRenderer(DocumentExcerptNodeView);
   } }) : (extension.name === 'issueList' || extension.name === 'issueSummary') ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(IssueBlockNodeView); } }) : (isLiveDocumentInclude(extension.name) || ['issueReference', 'documentReference', 'documentRevisionInclude'].includes(extension.name)) ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(ReferenceNodeView); } }) : extension.name === 'details' ? extension.extend({
-    addNodeView(): NodeViewRenderer { return ({ node }) => { const dom = document.createElement('details'); dom.open = true; dom.className = 'doc-details-block'; dom.dataset.teamspaceNode = 'details'; return { dom, contentDOM: dom, update: updated => updated.type === node.type, ignoreMutation: mutation => mutation.type === 'attributes' && mutation.target === dom && mutation.attributeName === 'open' }; }; },
+    addNodeView(): NodeViewRenderer { return ({ node }) => { const dom = document.createElement('details'); dom.open = true; dom.className = 'doc-details-block'; dom.dataset.donefacNode = 'details'; return { dom, contentDOM: dom, update: updated => updated.type === node.type, ignoreMutation: mutation => mutation.type === 'attributes' && mutation.target === dom && mutation.attributeName === 'open' }; }; },
     addKeyboardShortcuts() { return { Enter: () => detailsBody(this.editor), ArrowDown: () => this.editor.state.selection.$from.parentOffset === this.editor.state.selection.$from.parent.content.size && detailsBody(this.editor) }; },
   }) : decorateDocumentAnnotation(extension));
 }
@@ -686,7 +686,7 @@ export function insertDocumentExcerpt(editor: Editor) {
     return true;
   }).run();
 }
-export function unfoldDetails(editor: Editor | null) { if (!editor) return; for (const element of editor.view.dom.querySelectorAll<HTMLDetailsElement>('details[data-teamspace-node="details"]')) element.open = true; }
+export function unfoldDetails(editor: Editor | null) { if (!editor) return; for (const element of editor.view.dom.querySelectorAll<HTMLDetailsElement>('details[data-donefac-node="details"]')) element.open = true; }
 export function unwrapDetails(editor: Editor | null) {
   if (!editor) return false;
   return editor.commands.command(({ state, tr, dispatch }) => {

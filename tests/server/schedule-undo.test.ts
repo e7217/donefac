@@ -14,12 +14,12 @@ import type {
 
 const actor = 'user-min';
 const otherActor = 'user-seo';
-const scopeHeader = 'X-Teamspace-Schedule-Undo-Scope';
+const scopeHeader = 'X-Donefac-Schedule-Undo-Scope';
 const undoPath = '/schedule/undo';
 const expected = ({ id, version }: Issue) => ({ id, expectedVersion: version });
 
 async function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-undo-'));
+  const dir = mkdtempSync(join(tmpdir(), 'donefac-undo-'));
   async function start() {
     const service = createApp({ dataDir: dir, outboundWorker: false, deadlineReminderWorker: false });
     const server = service.app.listen(0, '127.0.0.1');
@@ -164,7 +164,7 @@ test('age limits scoped discovery and mutation while unscoped exact IDs keep com
   const f = await fixture(t);
   const issue = await f.issue('유효 기간을 검사할 업무');
   const scoped = await f.shift(issue, '2026-11-23', 'team');
-  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const database = new DatabaseSync(join(f.dir, 'donefac.sqlite'));
   try {
     database.prepare(`UPDATE schedule_undos SET json=json_set(json,'$.appliedAt','2020-01-01T00:00:00.000Z') WHERE id=?`).run(scoped.undoId);
     assert.equal(await f.latest('team'), null);

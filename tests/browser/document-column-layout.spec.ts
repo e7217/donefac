@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Locator } from '@playwright/test';
 import type { DocPage, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
-const layoutSelector = '[data-teamspace-node="documentColumnLayout"]';
-const columnSelector = ':scope > [data-layout-grid] > [data-teamspace-node="documentColumn"]';
+const layoutSelector = '[data-donefac-node="documentColumnLayout"]';
+const columnSelector = ':scope > [data-layout-grid] > [data-donefac-node="documentColumn"]';
 const paragraph = (value?: string): RichContent => ({ type: 'paragraph', ...(value ? { content: [{ type: 'text', text: value }] } : {}) });
 const body = (...content: RichContent[]): RichContent => ({ type: 'doc', content });
 

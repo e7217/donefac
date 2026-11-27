@@ -26,7 +26,7 @@ async function listen(t: TestContext, listener: RequestListener) {
 }
 
 function scratch(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'teamspace-atlassian-read-'));
+  const directory = mkdtempSync(join(tmpdir(), 'donefac-atlassian-read-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   return directory;
 }
@@ -95,8 +95,8 @@ test('preview reads bounded metadata from the configured Jira and Confluence con
   });
   const reader = new AtlassianReader({
     NODE_ENV: 'test',
-    TEAMSPACE_JIRA_BASE_URL: `${origin}/services/jira/`, TEAMSPACE_JIRA_AUTH_FILE: jiraAuthFile,
-    TEAMSPACE_CONFLUENCE_BASE_URL: `${origin}/wiki`, TEAMSPACE_CONFLUENCE_AUTH_FILE: confluenceAuthFile,
+    DONEFAC_JIRA_BASE_URL: `${origin}/services/jira/`, DONEFAC_JIRA_AUTH_FILE: jiraAuthFile,
+    DONEFAC_CONFLUENCE_BASE_URL: `${origin}/wiki`, DONEFAC_CONFLUENCE_AUTH_FILE: confluenceAuthFile,
   });
   const jira = await reader.preview('jira', `${origin}/services/jira/browse/ops-25?secret=discard`);
   assert.deepEqual(jira, { title: 'Review scheduling', locator: 'OPS-26', status: 'Open', updatedAt: '2026-11-20T10:00:00.000Z' });
@@ -157,8 +157,8 @@ test('preview keeps credentials scoped and cancels origin redirects, oversized b
   });
   const reader = new AtlassianReader({
     NODE_ENV: 'test',
-    TEAMSPACE_JIRA_BASE_URL: `${origin}/jira`,
-    TEAMSPACE_JIRA_AUTH_FILE: authFile,
+    DONEFAC_JIRA_BASE_URL: `${origin}/jira`,
+    DONEFAC_JIRA_AUTH_FILE: authFile,
   });
   await assert.rejects(reader.preview('jira', `${origin}/other/browse/HOME-1`), hasStatus(403));
   await assert.rejects(reader.preview('jira', `${origin.replace('127.0.0.1', 'localhost')}/jira/browse/HOME-1`), hasStatus(403));
@@ -167,8 +167,8 @@ test('preview keeps credentials scoped and cancels origin redirects, oversized b
   symlinkSync(authFile, linkedFile);
   await assert.rejects(new AtlassianReader({
     NODE_ENV: 'test',
-    TEAMSPACE_JIRA_BASE_URL: `${origin}/jira`,
-    TEAMSPACE_JIRA_AUTH_FILE: linkedFile,
+    DONEFAC_JIRA_BASE_URL: `${origin}/jira`,
+    DONEFAC_JIRA_AUTH_FILE: linkedFile,
   }).preview('jira', `${origin}/jira/browse/HOME-1`), hasStatus(503));
   chmodSync(authFile, 0o644);
   await assert.rejects(reader.preview('jira', `${origin}/jira/browse/HOME-1`), hasStatus(503));

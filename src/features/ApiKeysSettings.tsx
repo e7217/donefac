@@ -43,7 +43,7 @@ function ActorApiKeysSettings({ actorId, projects, restoreGeneration, refreshWor
   const ownerRef = useRef(actorId);
   const activeRef = useRef(true);
   const loadSequence = useRef(0);
-  const storageKey = `teamspace:api-key-issuance:${actorId}`;
+  const storageKey = `donefac:api-key-issuance:${actorId}`;
   const selectedProjects = projectIds.filter(id => projects.some(project => project.id === id));
   const fieldsLocked = creating || !draftReady || Boolean(issuance);
 
@@ -143,10 +143,10 @@ function ActorApiKeysSettings({ actorId, projects, restoreGeneration, refreshWor
       rememberIssuance(null); setUnrecoverable(null); setIssuanceError('');
       void load();
     };
-    window.addEventListener('teamspace:navigate', navigate);
+    window.addEventListener('donefac:navigate', navigate);
     window.addEventListener('beforeunload', unload);
-    window.addEventListener('teamspace:workspace-imported', imported);
-    return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', unload); window.removeEventListener('teamspace:workspace-imported', imported); };
+    window.addEventListener('donefac:workspace-imported', imported);
+    return () => { window.removeEventListener('donefac:navigate', navigate); window.removeEventListener('beforeunload', unload); window.removeEventListener('donefac:workspace-imported', imported); };
   }, [load, notify, rememberIssuance]);
 
   async function createKey(event: React.FormEvent) {

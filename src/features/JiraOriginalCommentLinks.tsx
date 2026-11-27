@@ -28,9 +28,9 @@ export function JiraOriginalCommentLinks({ commentId, actorId }: { commentId: st
       request.current = null;
       setState({ kind: 'closed' });
     }
-    window.addEventListener('teamspace:workspace-imported', discard);
+    window.addEventListener('donefac:workspace-imported', discard);
     return () => {
-      window.removeEventListener('teamspace:workspace-imported', discard);
+      window.removeEventListener('donefac:workspace-imported', discard);
       request.current?.abort();
       request.current = null;
     };
