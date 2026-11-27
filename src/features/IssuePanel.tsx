@@ -1,7 +1,7 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react';
-import { ArrowRight, CalendarRange, Check, ChevronLeft, ChevronRight, Clock3, Copy, Eye, FileText, Flag, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, Undo2, X } from 'lucide-react';
+import { ArrowRight, CalendarRange, Check, ChevronLeft, ChevronRight, Clock3, Copy, Eye, FileText, Flag, FolderInput, Link2, ListTree, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, Undo2, X } from 'lucide-react';
 import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type GitlabStatusSuggestion, type Issue, type IssueCommentView, type IssueRelation, type LinkedDocumentCreationResult, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type SchedulePreview, type ScheduleUndoScope, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, projectWorkflow, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
@@ -1430,7 +1430,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       </section>
       <section className="issue-related-section" aria-label="하위 업무">
         <div className="issue-children-heading">
-          <h3><LayersIcon />하위 업무 <span>{children.length}</span></h3>
+          <h3><ListTree size={16} aria-hidden="true" />하위 업무 <span>{children.length}</span></h3>
           {children.length > 0 && <span className="issue-children-completed">완료 {completedChildren}개</span>}
           <button ref={childCreationTrigger} className="btn" type="button" disabled={saving} onClick={() => setChildCreation(issue)}>
             <Plus size={14} aria-hidden="true" />하위 업무 추가
@@ -1594,4 +1594,3 @@ function IssuePanelContent(props: IssuePanelProps) {
   </>;
 }
 
-function LayersIcon() { return <span className="issue-subtask-icon">↳</span>; }
